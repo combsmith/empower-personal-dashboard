@@ -53,6 +53,7 @@ test = [
     "pyyaml>=6.0",
     "tomli>=1.1.0; python_version < '3.11'",
     "coverage>=7.0",
+    "beancount>=3.0",
 ]
 beancount = [
     "pyyaml>=6.0",
@@ -71,6 +72,7 @@ dev = [
     "keyring>=24.0.0",
     "tomli>=1.1.0; python_version < '3.11'",
     "coverage>=7.0",
+    "beancount>=3.0",
 ]
 all = [
     "mcp>=1.2.0; python_version >= '3.10'",
@@ -83,6 +85,7 @@ all = [
     "twine>=5.0",
     "tomli>=1.1.0; python_version < '3.11'",
     "coverage>=7.0",
+    "beancount>=3.0",
 ]
 
 [project.scripts]
