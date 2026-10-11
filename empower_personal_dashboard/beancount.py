@@ -1539,9 +1539,6 @@ class BeancountGenerator:
             ticker = pos.get("ticker", "")
             key = (b_account, ticker)
             holding_tag = f"{b_account}:{ticker}"
-            if holding_tag in existing_keys:
-                continue
-
             snapshot_qty = pos.get("quantity", 0.0)
             baseline_qty = self._calculate_baseline_qty(
                 snapshot_qty, has_tx, key, net_buys, net_buy_meta,
@@ -1557,12 +1554,19 @@ class BeancountGenerator:
             if has_tx and snapshot_qty > 0:
                 floor_surplus = baseline_qty - (snapshot_qty - net_buys.get(key, 0.0))
 
-            force_cost = bool(net_buy_meta.get(key, {}).get("has_sell"))
-            self._append_snapshot_lot(
-                lines, lot_date, pos.get("firm", _FIRM_BROKERAGE), ticker, holding_tag,
-                b_account, baseline_qty, snapshot_qty, pos.get("price", 0.0), pos.get("cost_basis"),
-                force_cost,
-            )
+            if holding_tag not in existing_keys:
+                # A sale against this ticker in the window reduces the lot with an
+                # empty ``{}`` cost spec, which Beancount matches only against costed
+                # lots; emit the baseline lot with a cost basis so the sale can book.
+                force_cost = bool(net_buy_meta.get(key, {}).get("has_sell"))
+                self._append_snapshot_lot(
+                    lines, lot_date, pos.get("firm", _FIRM_BROKERAGE), ticker, holding_tag,
+                    b_account, baseline_qty, snapshot_qty, pos.get("price", 0.0), pos.get("cost_basis"),
+                    force_cost,
+                )
+            # Emit shortfall reconciliation even if the opening lot already exists
+            # (on append). The reconciliation is keyed by snapshot_date, so it is
+            # idempotent across appends of the same snapshot.
             if round(floor_surplus, 6) > 0 and snapshot_date:
                 self._append_shortfall_reconciliation(
                     lines, snapshot_date, pos.get("firm", _FIRM_BROKERAGE), ticker,
