@@ -1406,13 +1406,18 @@ class EmpowerDashboardClient:
     ) -> DashboardTransactions:
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         end = end_date or today_str
+        # Generate transaction dates within the requested range using the end_date's
+        # month as the reference, so historical snapshots contain historically-dated
+        # mock records rather than clamped-to-range records from the current month.
+        date_base = end_date or today_str
+        date_base = date_base[:7]  # Extract YYYY-MM
         mock_txs = [
             {
                 "user_transaction_id": "TXN-001",
                 "account_id": "ACC-CHK-003",
                 "user_account_id": 1003,
                 "account_name": "Apex Premier Checking",
-                "transaction_date": f"{today_str[:7]}-15",
+                "transaction_date": f"{date_base}-15",
                 "description": "Payroll Direct Deposit",
                 "original_description": "ACH DIRECT DEPOSIT PAYROLL",
                 "amount": 4500.00,
@@ -1436,7 +1441,7 @@ class EmpowerDashboardClient:
                 "account_id": "ACC-INV-001",
                 "user_account_id": 1001,
                 "account_name": "Horizon 401(k) Retirement Plan",
-                "transaction_date": f"{today_str[:7]}-15",
+                "transaction_date": f"{date_base}-15",
                 "description": "Elective Payroll Contribution",
                 "original_description": "PLAN ELECTIVE CONTRIB",
                 "amount": 750.00,
@@ -1460,7 +1465,7 @@ class EmpowerDashboardClient:
                 "account_id": "ACC-IRA-002",
                 "user_account_id": 1002,
                 "account_name": "Pinnacle Traditional IRA",
-                "transaction_date": f"{today_str[:7]}-10",
+                "transaction_date": f"{date_base}-10",
                 "description": "Dividend Received — SPDR S&P 500 ETF (SPY)",
                 "original_description": "DIVIDEND ON SPY",
                 "amount": 125.50,
@@ -1484,7 +1489,7 @@ class EmpowerDashboardClient:
                 "account_id": "ACC-CRD-005",
                 "user_account_id": 1005,
                 "account_name": "Beacon Preferred Credit Card",
-                "transaction_date": f"{today_str[:7]}-05",
+                "transaction_date": f"{date_base}-05",
                 "description": "Neighborhood Grocery Market",
                 "original_description": "GROCERY MARKET MAIN ST",
                 "amount": 182.40,
