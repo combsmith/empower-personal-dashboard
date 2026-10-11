@@ -399,6 +399,7 @@ class BeancountMapper:
     """Handles mapping of Empower accounts, categories, and payee rules to Beancount accounts."""
 
     def __init__(self, mapping_path: Optional[Union[str, Path]] = None):
+        """Initialize mapper with optional path to a JSON mapping file."""
         self.accounts: Dict[str, str] = {}
         self.categories: Dict[str, str] = {}
         self.regex_rules: List[Dict[str, str]] = []
@@ -785,6 +786,7 @@ class BeancountGenerator:
     """Generates Beancount directives and ledger files from Empower data models."""
 
     def __init__(self, mapper: Optional[BeancountMapper] = None):
+        """Initialize the generator with an optional account/category mapper."""
         self.mapper = mapper or BeancountMapper()
 
     def generate_main_bean(self, additional_includes: Optional[List[str]] = None) -> str:

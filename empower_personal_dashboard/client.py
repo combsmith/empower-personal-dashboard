@@ -160,6 +160,7 @@ class EmpowerDashboardClient:
         password_provider: Optional[Callable[[], Optional[str]]] = None,
         username: Optional[str] = None,
     ):
+        """Initialize a client session for Empower Personal Dashboard API."""
         # `.expanduser()` so a `~`-prefixed EMPOWER_SESSION_FILE resolves to the
         # home directory rather than a literal "~" folder in the CWD.
         self.session_file = Path(session_file or os.environ.get("EMPOWER_SESSION_FILE", DEFAULT_SESSION_FILE)).expanduser()
