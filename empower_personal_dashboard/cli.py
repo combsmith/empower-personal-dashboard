@@ -1024,7 +1024,7 @@ class _ArchiveLockTimeoutError(Exception):
 
 @contextlib.contextmanager
 def _archive_lock(
-    path,
+    path: Optional[str],
     timeout: float = DEFAULT_MERGE_LOCK_TIMEOUT,
     poll_interval: float = 0.1,
     progress_file=None,
