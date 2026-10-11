@@ -771,6 +771,16 @@ def _build_delta_transactions(
     )
 
 
+def _reconciliation_date(snapshot_date: str) -> str:
+    """Return the day after ``snapshot_date`` on which a shortfall reconciliation posts."""
+    try:
+        return (
+            datetime.date.fromisoformat(snapshot_date) + datetime.timedelta(days=1)
+        ).isoformat()
+    except (TypeError, ValueError):
+        return snapshot_date
+
+
 class BeancountGenerator:
     """Generates Beancount directives and ledger files from Empower data models."""
 
@@ -1287,7 +1297,7 @@ class BeancountGenerator:
         if existing_content:
             existing_keys = set(re.findall(r'empower_holding:\s*"([^"]+)"', existing_content))
             # Extract existing shortfall reconciliations: keyed by (holding_tag, snapshot_date)
-            # for idempotency across multiple appends of the same snapshot.
+            # for idempotency across multiple appends (date is the posting date, D+1).
             for match in re.finditer(
                 r'(\d{4}-\d{2}-\d{2})\s+\*\s+"[^"]*Snapshot Shortfall Reconciliation".*?'
                 r'empower_holding:\s*"([^"]+)"',
@@ -1577,9 +1587,9 @@ class BeancountGenerator:
                     force_cost,
                 )
             # Emit shortfall reconciliation even if the opening lot already exists
-            # (on append). The reconciliation is keyed by (holding_tag, snapshot_date),
+            # (on append). The reconciliation is keyed by (holding_tag, reconciliation date),
             # so it is idempotent across appends of the same snapshot.
-            reconciliation_key = (holding_tag, snapshot_date)
+            reconciliation_key = (holding_tag, _reconciliation_date(snapshot_date))
             if (round(floor_surplus, 6) > 0 and snapshot_date
                     and reconciliation_key not in (existing_reconciled_keys or set())):
                 self._append_shortfall_reconciliation(
@@ -1611,13 +1621,7 @@ class BeancountGenerator:
         """
         payee_esc = _escape_beancount_string(f"{firm} Snapshot Shortfall Reconciliation")
         narration_esc = _escape_beancount_string(f"{ticker} Deficit Floor Adjustment")
-        reconciliation_date = snapshot_date
-        try:
-            reconciliation_date = (
-                datetime.date.fromisoformat(snapshot_date) + datetime.timedelta(days=1)
-            ).isoformat()
-        except (TypeError, ValueError):
-            pass
+        reconciliation_date = _reconciliation_date(snapshot_date)
         lines.append(f'{reconciliation_date} * "{payee_esc}" "{narration_esc}"\n')
         lines.append(f'  empower_holding: "{holding_tag}"\n')
         # Reduce the opening lot with an empty cost spec ``{}`` so the reduction
