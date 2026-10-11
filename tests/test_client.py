@@ -1412,6 +1412,31 @@ class TestReconstructionWindowGuard(unittest.TestCase):
         with self.assertRaises(ValueError):
             client.reconcile_transaction_window(transactions, holdings, policy="erorr")
 
+    def test_unknown_policy_raises_for_complete_window(self):
+        """An invalid policy raises ValueError even when the window is complete."""
+        holdings = DashboardHoldings(
+            as_of_date="2024-10-01", total_value=100.0,
+            holdings=[{"ticker": "VTI", "quantity": 1.0, "price": 100.0}],
+        )
+        transactions = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-01", total_transactions=0,
+            money_in=0.0, money_out=0.0, net_cashflow=0.0, transactions=[],
+        )
+        with self.assertRaises(ValueError):
+            self._client().reconcile_transaction_window(
+                transactions, holdings, policy="erorr"
+            )
+
+    def test_mock_transactions_stay_within_requested_range(self):
+        """Mock records for a historical range never fall outside it."""
+        result = self._client().fetch_transactions(
+            start_date="2024-09-01", end_date="2024-10-01"
+        )
+        self.assertTrue(result.transactions)
+        for tx in result.transactions:
+            self.assertGreaterEqual(tx["transaction_date"], "2024-09-01")
+            self.assertLessEqual(tx["transaction_date"], "2024-10-01")
+
     def test_extend_rejects_window_still_short_of_snapshot(self):
         """Extend still raises an error if the refetch window remains incomplete."""
         from empower_personal_dashboard.exceptions import ReconstructionWindowError

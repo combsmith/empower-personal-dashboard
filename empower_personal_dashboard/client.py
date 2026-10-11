@@ -1093,6 +1093,14 @@ class EmpowerDashboardClient:
         An unknown ``policy`` raises :class:`ValueError`. A window that already
         reaches the snapshot date is returned unchanged.
         """
+        # Validate the policy up front so a misconfiguration fails the same way
+        # for every window, complete or not.
+        normalized_policy = (policy or "warn").strip().lower()
+        if normalized_policy not in {"warn", "error", "extend"}:
+            raise ValueError(
+                f"policy must be 'warn', 'error', or 'extend', not {policy!r}"
+            )
+
         # A limited fetch keeps the full date bounds while dropping older trades,
         # so matching bounds cannot prove coverage; only an unbounded fetch whose
         # window reaches the snapshot date is treated as complete.
@@ -1114,11 +1122,6 @@ class EmpowerDashboardClient:
                 f"transaction window ends {transactions.end_date!r} before holdings "
                 f"as_of_date {holdings.as_of_date!r}; reconstructed opening lots would "
                 f"absorb omitted post-range trades"
-            )
-        normalized_policy = (policy or "warn").strip().lower()
-        if normalized_policy not in {"warn", "error", "extend"}:
-            raise ValueError(
-                f"policy must be 'warn', 'error', or 'extend', not {policy!r}"
             )
         if normalized_policy == "error":
             raise ReconstructionWindowError(detail)
@@ -1500,6 +1503,17 @@ class EmpowerDashboardClient:
                 "category_name": "Groceries",
             },
         ]
+        # Keep every record inside the requested [start_date, end_date] range
+        # (ISO dates compare lexically), so a historical request cannot yield
+        # post-snapshot or pre-window mock records.
+        for t in mock_txs:
+            tx_date = t["transaction_date"]
+            if end_date and tx_date > end_date:
+                tx_date = end_date
+            if start_date and tx_date < start_date:
+                tx_date = start_date
+            t["transaction_date"] = tx_date
+
         dates = [t.get("transaction_date") for t in mock_txs if t.get("transaction_date")]
         start = start_date or (min(dates) if dates else f"{datetime.now(timezone.utc).year}-01-01")
 
