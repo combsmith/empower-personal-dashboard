@@ -1087,11 +1087,12 @@ def _archive_lock(
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             acquired = True
         except (BlockingIOError, OSError) as e:
-            if getattr(e, "errno", None) not in (errno.EAGAIN, errno.EWOULDBLOCK):
+            if getattr(e, "errno", None) in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
+                # Lock contention or interrupted; continue retrying
+                acquired = False
+            else:
                 # Filesystem does not support flock (e.g. ENOTSUP); proceed best-effort
                 acquired = True
-            else:
-                acquired = False
 
         if not acquired:
             if not quiet:
@@ -1110,7 +1111,8 @@ def _archive_lock(
                     acquired = True
                     break
                 except (BlockingIOError, OSError) as e:
-                    if getattr(e, "errno", None) not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    if getattr(e, "errno", None) not in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
+                        # Filesystem does not support flock or other error; proceed best-effort
                         acquired = True
                         break
 

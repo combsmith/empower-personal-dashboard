@@ -691,29 +691,24 @@ class TestCliMerge(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             out = Path(tmpdir) / "transactions.jsonl"
             fd = os.open(tmpdir, os.O_RDONLY)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def delayed_release():
+                time.sleep(0.02)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+            t = threading.Thread(target=delayed_release)
+            t.start()
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-
-                def delayed_release():
-                    time.sleep(0.02)
-                    fcntl.flock(fd, fcntl.LOCK_UN)
-                    os.close(fd)
-
-                t = threading.Thread(target=delayed_release)
-                t.start()
                 progress_buf = io.StringIO()
                 executed = False
                 with _archive_lock(out, timeout=1.0, poll_interval=0.005, progress_file=progress_buf):
                     executed = True
-                t.join()
                 self.assertTrue(executed)
                 self.assertIn("[*] Another --merge is running for this archive; waiting...", progress_buf.getvalue())
-            except Exception:
-                try:
-                    os.close(fd)
-                except OSError:
-                    pass
-                raise
+            finally:
+                t.join()
 
     def test_archive_lock_busy_past_timeout_raises_and_reports_waiting(self):
         from empower_personal_dashboard.cli import _archive_lock, _ArchiveLockTimeoutError
