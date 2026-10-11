@@ -1283,8 +1283,19 @@ class BeancountGenerator:
 
         # Existing holding tags to skip on append
         existing_keys: Set[str] = set()
+        existing_reconciled_keys: Set[Tuple[str, str]] = set()
         if existing_content:
             existing_keys = set(re.findall(r'empower_holding:\s*"([^"]+)"', existing_content))
+            # Extract existing shortfall reconciliations: keyed by (holding_tag, snapshot_date)
+            # for idempotency across multiple appends of the same snapshot.
+            for match in re.finditer(
+                r'(\d{4}-\d{2}-\d{2})\s+\*\s+"[^"]*Snapshot Shortfall Reconciliation".*?'
+                r'empower_holding:\s*"([^"]+)"',
+                existing_content,
+                re.DOTALL
+            ):
+                snapshot_date_str, holding_tag = match.groups()
+                existing_reconciled_keys.add((holding_tag, snapshot_date_str))
 
         net_buys, net_buy_meta = self._compute_net_buys(transactions, acct_lookup)
         aggregated_holdings = self._aggregate_snapshot_holdings(holdings, acct_lookup)
@@ -1292,7 +1303,7 @@ class BeancountGenerator:
         snapshot_date = holdings.as_of_date if holdings else None
         self._emit_snapshot_lots(
             aggregated_holdings, net_buys, net_buy_meta, transactions, existing_keys,
-            lot_date, snapshot_date, lines,
+            lot_date, snapshot_date, lines, existing_reconciled_keys,
         )
         self._emit_reconstructed_opening_lots(
             net_buys, net_buy_meta, aggregated_holdings, existing_keys, lot_date, transactions, lines
@@ -1528,6 +1539,7 @@ class BeancountGenerator:
         lot_date: str,
         snapshot_date: Optional[str],
         lines: List[str],
+        existing_reconciled_keys: Optional[Set[Tuple[str, str]]] = None,
     ) -> None:
         """Emit the baseline opening lot for each snapshot position acquired before the window."""
         has_tx = transactions is not None and bool(transactions.transactions)
@@ -1565,9 +1577,11 @@ class BeancountGenerator:
                     force_cost,
                 )
             # Emit shortfall reconciliation even if the opening lot already exists
-            # (on append). The reconciliation is keyed by snapshot_date, so it is
-            # idempotent across appends of the same snapshot.
-            if round(floor_surplus, 6) > 0 and snapshot_date:
+            # (on append). The reconciliation is keyed by (holding_tag, snapshot_date),
+            # so it is idempotent across appends of the same snapshot.
+            reconciliation_key = (holding_tag, snapshot_date)
+            if (round(floor_surplus, 6) > 0 and snapshot_date
+                    and reconciliation_key not in (existing_reconciled_keys or set())):
                 self._append_shortfall_reconciliation(
                     lines, snapshot_date, pos.get("firm", _FIRM_BROKERAGE), ticker,
                     holding_tag, b_account, floor_surplus, pos.get("price", 0.0),
