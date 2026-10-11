@@ -313,6 +313,63 @@ if _HAS_BEANCOUNT:
                 )
                 assert_ledger_loads(self, header + "\n" + "\n".join(combined))
 
+    class TestIncompleteWindowReconciliation(unittest.TestCase):
+        """Integration test for incomplete-window reconciliation with real Beancount loader."""
+
+        def setUp(self):
+            """Initialize client and generator for incomplete-window testing."""
+            from empower_personal_dashboard.client import EmpowerDashboardClient
+            self.client = EmpowerDashboardClient(mock_mode=True)
+            self.generator = BeancountGenerator()
+
+        def test_incomplete_window_extend_policy_generates_loadable_ledger(self):
+            """Incomplete-window extend policy generates a ledger that loads cleanly.
+
+            When transactions end before the snapshot date, the client reconciles
+            the window by extending the fetch through the snapshot. The resulting
+            ledger must load without Beancount errors and balance.
+            """
+            # Create holdings snapshot at 2024-10-01 with VTI position
+            balances = _brokerage_balances(as_of="2024-10-01", balance=20100.0)
+            holdings = DashboardHoldings(
+                as_of_date="2024-10-01",
+                total_value=20100.0,
+                holdings=[
+                    {"user_account_id": 5001, "account_name": "Taxable Brokerage",
+                     "firm_name": "Acme Brokerage", "ticker": "VTI",
+                     "quantity": 60.0, "price": 280.0, "cost_basis": 12600.0},
+                ],
+            )
+            # Incomplete transactions: end_date is before holdings.as_of_date
+            incomplete_txns = DashboardTransactions(
+                start_date="2021-01-01", end_date="2024-06-30", total_transactions=1,
+                money_in=0.0, money_out=4000.0, net_cashflow=-4000.0,
+                transactions=[
+                    {"user_transaction_id": "tx-1", "account_id": "ACC-BRK-001",
+                     "user_account_id": 5001, "account_name": "Taxable Brokerage",
+                     "firm_name": "Acme Brokerage", "transaction_date": "2021-06-15",
+                     "description": "Buy VTI", "amount": 4000.0, "is_cash_out": True,
+                     "transaction_type": "Buy", "investment_type": "Buy",
+                     "symbol": "VTI", "price": 200.0, "quantity": 20.0},
+                ],
+            )
+            # Reconcile by extending the window to the snapshot date
+            reconciled_txns = self.client.reconcile_transaction_window(
+                incomplete_txns, holdings, policy="extend", limited=False,
+            )
+            # The reconciled window must now reach the snapshot date
+            self.assertEqual(reconciled_txns.end_date, holdings.as_of_date)
+            # Generate a ledger with the extended transactions
+            with tempfile.TemporaryDirectory() as tmp:
+                target = Path(tmp) / "extended.bean"
+                self.generator.export_single_file(
+                    filepath=target, balances=balances, holdings=holdings,
+                    transactions=reconciled_txns, opening_date="2021-01-01",
+                )
+                content = target.read_text(encoding="utf-8")
+            # The generated ledger must load cleanly without Beancount errors
+            assert_ledger_loads(self, content)
+
 
 if __name__ == "__main__":
     unittest.main()
