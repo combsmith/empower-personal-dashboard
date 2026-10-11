@@ -2029,6 +2029,7 @@ class TestBeancountInvestmentGrowthReconstruction(unittest.TestCase):
         self.assertIn("10.000000 GE {", output)
 
     def test_only_reconciled_assertion_is_delayed_to_two_days(self):
+        """Only assertions for reconciled holdings delay to D+2; others stay at D+1."""
         # GE is deficit-floored (sell 10 then buy 10, net 0, snapshot 5) so it
         # carries a shortfall reconciliation that posts on D+1; its assertion must
         # wait until D+2. VTI nets +20 with no intermediate deficit, so it has no
@@ -2562,6 +2563,7 @@ class TestWindowStartGuardFallback(unittest.TestCase):
     """The backward-broadening guard must still fire on a marker-less holdings file."""
 
     def test_markerless_existing_content_uses_earliest_lot_date(self):
+        """Ledgers without markers fall back to earliest opening-lot date for window boundary."""
         from empower_personal_dashboard.exceptions import LedgerAppendError
         # A holdings.bean body written by an older release (or any append, whose
         # stripped body drops the header marker) carries no window-start marker.

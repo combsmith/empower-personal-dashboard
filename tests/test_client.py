@@ -1336,9 +1336,11 @@ class TestReconstructionWindowGuard(unittest.TestCase):
     """
 
     def _client(self):
+        """Create a client in mock mode for testing."""
         return EmpowerDashboardClient(mock_mode=True)
 
     def _incomplete(self):
+        """Create incomplete transaction/holdings pair (end_date before as_of_date)."""
         holdings = DashboardHoldings(
             as_of_date="2024-10-01", total_value=100.0,
             holdings=[{"ticker": "VTI", "quantity": 1.0, "price": 100.0}],
@@ -1350,6 +1352,7 @@ class TestReconstructionWindowGuard(unittest.TestCase):
         return holdings, transactions
 
     def test_warn_policy_returns_unchanged(self):
+        """The 'warn' policy returns transactions unchanged with a log message."""
         holdings, transactions = self._incomplete()
         client = self._client()
         with self.assertLogs("EmpowerDashboardClient", level="WARNING") as cm:
@@ -1358,6 +1361,7 @@ class TestReconstructionWindowGuard(unittest.TestCase):
         self.assertTrue(any("as_of" in m or "window" in m.lower() for m in cm.output))
 
     def test_error_policy_raises(self):
+        """The 'error' policy raises ReconstructionWindowError on incomplete windows."""
         from empower_personal_dashboard.exceptions import ReconstructionWindowError
         holdings, transactions = self._incomplete()
         client = self._client()
@@ -1365,6 +1369,7 @@ class TestReconstructionWindowGuard(unittest.TestCase):
             client.reconcile_transaction_window(transactions, holdings, policy="error")
 
     def test_extend_policy_refetches_through_snapshot_date(self):
+        """The 'extend' policy refetches transactions through the snapshot date."""
         holdings, transactions = self._incomplete()
         client = self._client()
         captured = {}
@@ -1385,6 +1390,7 @@ class TestReconstructionWindowGuard(unittest.TestCase):
         self.assertEqual(result.end_date, "2024-10-01")
 
     def test_complete_window_is_returned_unchanged_without_warning(self):
+        """A window reaching the snapshot date is returned unchanged without warning."""
         holdings = DashboardHoldings(
             as_of_date="2024-10-01", total_value=100.0,
             holdings=[{"ticker": "VTI", "quantity": 1.0, "price": 100.0}],
@@ -1400,12 +1406,14 @@ class TestReconstructionWindowGuard(unittest.TestCase):
         warn.assert_not_called()
 
     def test_unknown_policy_raises_value_error(self):
+        """An unknown policy value raises ValueError."""
         holdings, transactions = self._incomplete()
         client = self._client()
         with self.assertRaises(ValueError):
             client.reconcile_transaction_window(transactions, holdings, policy="erorr")
 
     def test_extend_rejects_window_still_short_of_snapshot(self):
+        """Extend still raises an error if the refetch window remains incomplete."""
         from empower_personal_dashboard.exceptions import ReconstructionWindowError
         holdings, transactions = self._incomplete()
         client = self._client()
@@ -1425,6 +1433,7 @@ class TestReconstructionWindowGuard(unittest.TestCase):
                 )
 
     def test_limited_window_with_covering_dates_is_not_complete(self):
+        """Limited fetches are incomplete even when date bounds match the snapshot."""
         # A limited fetch keeps the full date bounds while dropping older trades,
         # so matching bounds must not short-circuit as complete.
         holdings = DashboardHoldings(
@@ -1444,6 +1453,7 @@ class TestReconstructionWindowGuard(unittest.TestCase):
         self.assertTrue(any("limit" in m.lower() for m in cm.output))
 
     def test_limited_window_error_policy_raises(self):
+        """Limited windows trigger error policy even with matching end dates."""
         from empower_personal_dashboard.exceptions import ReconstructionWindowError
         holdings = DashboardHoldings(
             as_of_date="2024-10-01", total_value=100.0,
@@ -1460,6 +1470,7 @@ class TestReconstructionWindowGuard(unittest.TestCase):
             )
 
     def test_extend_rejects_window_starting_after_original(self):
+        """Extend rejects refetch windows that start later than the original."""
         from empower_personal_dashboard.exceptions import ReconstructionWindowError
         holdings, transactions = self._incomplete()
         client = self._client()
@@ -1479,6 +1490,7 @@ class TestReconstructionWindowGuard(unittest.TestCase):
                 )
 
     def test_extend_drops_limit_and_date_kwargs(self):
+        """Extend drops limit and date kwargs while passing other fetch_kwargs."""
         holdings, transactions = self._incomplete()
         client = self._client()
         captured = {}

@@ -44,6 +44,7 @@ def assert_ledger_loads(testcase, content):
 
 
 def _brokerage_balances(as_of="2024-10-01", balance=20100.0):
+    """Create a synthetic brokerage balance snapshot for testing."""
     return DashboardBalances(
         as_of_date=as_of,
         net_worth=balance,
@@ -76,9 +77,11 @@ if _HAS_BEANCOUNT:
         """The pre-existing lifecycle ledger must still load clean (loader harness sanity)."""
 
         def setUp(self):
+            """Initialize the Beancount generator for each test."""
             self.generator = BeancountGenerator()
 
         def test_full_lifecycle_single_file_loads(self):
+            """A complete lifecycle export must load cleanly through the Beancount loader."""
             balances = _brokerage_balances()
             holdings = DashboardHoldings(
                 as_of_date="2024-10-01",
@@ -113,9 +116,11 @@ if _HAS_BEANCOUNT:
         """Item 1 — negative snapshot quantities preserved end to end."""
 
         def setUp(self):
+            """Initialize the Beancount generator for each test."""
             self.generator = BeancountGenerator()
 
         def test_current_short_emits_negative_lot_and_assertion_and_loads(self):
+            """Negative snapshot quantities produce negative opening lots that load cleanly."""
             # A currently-held short: the snapshot reports a negative quantity and no
             # offsetting trades. It must survive aggregation, produce a negative
             # opening lot, and a negative unit balance assertion that loads.
@@ -140,6 +145,7 @@ if _HAS_BEANCOUNT:
             assert_ledger_loads(self, content)
 
         def test_current_short_distinct_from_fully_sold_security(self):
+            """Current shorts are distinct from pre-window longs that were fully sold."""
             # SHORTCO is a current short (in the snapshot, negative) while SOLDCO is a
             # pre-window long sold to zero (absent from the snapshot, net-sold). The
             # short yields a negative opening lot; the fully-sold yields a positive
@@ -186,9 +192,11 @@ if _HAS_BEANCOUNT:
         """Item 4 — a deficit-floored opening lot must still match the asserted snapshot."""
 
         def setUp(self):
+            """Initialize the Beancount generator for each test."""
             self.generator = BeancountGenerator()
 
         def test_deficit_floor_reconciles_to_snapshot_and_loads(self):
+            """Deficit-floor adjustments reconcile to the snapshot and load cleanly."""
             # Snapshot holds 5 GE. The window sells 10 then buys 10 (net 0), so the
             # running deficit (10) floors the opening lot to 10 — which would leave a
             # final quantity of 10, contradicting the 5-share snapshot assertion.
@@ -232,6 +240,7 @@ if _HAS_BEANCOUNT:
         """Item 3 — an append that broadens the window into the past is rejected."""
 
         def setUp(self):
+            """Initialize test fixtures for append validation."""
             self.generator = BeancountGenerator()
             self.balances = _brokerage_balances()
             self.holdings = DashboardHoldings(
@@ -244,6 +253,7 @@ if _HAS_BEANCOUNT:
             )
 
         def _txns(self, start, end, date):
+            """Create synthetic transaction data for append testing."""
             return DashboardTransactions(
                 start_date=start, end_date=end, total_transactions=1,
                 money_in=0.0, money_out=4000.0, net_cashflow=-4000.0,
@@ -258,6 +268,7 @@ if _HAS_BEANCOUNT:
             )
 
         def test_backward_broadened_append_is_rejected(self):
+            """Appends that broaden the window into the past are rejected before modifying files."""
             with tempfile.TemporaryDirectory() as tmp:
                 dest = Path(tmp) / "ledger"
                 self.generator.export_modular_ledger(
@@ -275,6 +286,7 @@ if _HAS_BEANCOUNT:
                     )
 
         def test_forward_append_still_works_and_loads(self):
+            """Forward appends with matching window bounds load cleanly."""
             with tempfile.TemporaryDirectory() as tmp:
                 dest = Path(tmp) / "ledger"
                 self.generator.export_modular_ledger(
