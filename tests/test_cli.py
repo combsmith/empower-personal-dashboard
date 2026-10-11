@@ -725,11 +725,94 @@ class TestCliMerge(unittest.TestCase):
                 progress_buf = io.StringIO()
                 with self.assertRaises(_ArchiveLockTimeoutError) as ctx:
                     with _archive_lock(out, timeout=0.03, poll_interval=0.005, progress_file=progress_buf):
-                        self.fail("Should not acquire lock")
+                        pass
                 self.assertIn("Timed out waiting for archive lock", str(ctx.exception))
                 self.assertIn("[*] Another --merge is running for this archive; waiting...", progress_buf.getvalue())
             finally:
                 os.close(fd)
+
+    def test_archive_lock_closes_fd_on_timeout(self):
+        from empower_personal_dashboard.cli import _archive_lock, _ArchiveLockTimeoutError
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            fd = os.open(tmpdir, os.O_RDONLY)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            closed_fds = []
+            orig_close = os.close
+
+            def tracking_close(f):
+                closed_fds.append(f)
+                orig_close(f)
+
+            try:
+                with patch("empower_personal_dashboard.cli.os.close", side_effect=tracking_close):
+                    with self.assertRaises(_ArchiveLockTimeoutError):
+                        with _archive_lock(out, timeout=0.01, poll_interval=0.005, quiet=True):
+                            pass
+                self.assertTrue(len(closed_fds) > 0)
+            finally:
+                orig_close(fd)
+
+    def test_archive_lock_retries_on_eintr(self):
+        import errno
+        from empower_personal_dashboard.cli import _archive_lock
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            calls = 0
+
+            def mock_flock(fd, op):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    e = OSError("Interrupted system call")
+                    e.errno = errno.EINTR
+                    raise e
+
+            with patch("fcntl.flock", side_effect=mock_flock):
+                progress_buf = io.StringIO()
+                executed = False
+                with _archive_lock(out, timeout=1.0, poll_interval=0.005, progress_file=progress_buf):
+                    executed = True
+                self.assertTrue(executed)
+                self.assertGreaterEqual(calls, 2)
+
+    def test_archive_lock_retries_on_eacces(self):
+        import errno
+        from empower_personal_dashboard.cli import _archive_lock
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            calls = 0
+
+            def mock_flock(fd, op):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    e = OSError("Permission denied")
+                    e.errno = errno.EACCES
+                    raise e
+
+            with patch("fcntl.flock", side_effect=mock_flock):
+                progress_buf = io.StringIO()
+                executed = False
+                with _archive_lock(out, timeout=1.0, poll_interval=0.005, progress_file=progress_buf):
+                    executed = True
+                self.assertTrue(executed)
+                self.assertGreaterEqual(calls, 2)
 
     def test_cli_merge_lock_busy_past_timeout_exits_nonzero_and_leaves_archive_untouched(self):
         try:
@@ -765,17 +848,18 @@ class TestCliMerge(unittest.TestCase):
             finally:
                 os.close(fd)
 
-    def test_cli_merge_lock_timeout_negative_rejected(self):
-        stderr_buf = io.StringIO()
-        argv = [
-            "empower", "--transactions", "--merge",
-            "--merge-lock-timeout", "-5",
-        ]
-        with patch.object(sys, "argv", argv), patch("sys.stderr", stderr_buf):
-            with self.assertRaises(SystemExit) as ctx:
-                cli_main()
-            self.assertEqual(ctx.exception.code, 2)
-        self.assertIn("--merge-lock-timeout", stderr_buf.getvalue())
+    def test_cli_merge_lock_timeout_invalid_rejected(self):
+        for invalid_val in ["-5", "nan", "inf", "+inf", "-inf", "1e309"]:
+            stderr_buf = io.StringIO()
+            argv = [
+                "empower", "--transactions", "--merge",
+                "--merge-lock-timeout", invalid_val,
+            ]
+            with patch.object(sys, "argv", argv), patch("sys.stderr", stderr_buf):
+                with self.assertRaises(SystemExit) as ctx:
+                    cli_main()
+                self.assertEqual(ctx.exception.code, 2)
+            self.assertIn("--merge-lock-timeout", stderr_buf.getvalue())
 
     def test_archive_lock_does_not_follow_a_symlinked_directory(self):
         # The lock only ever opens a validated path. A symlinked parent is

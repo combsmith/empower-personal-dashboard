@@ -35,7 +35,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 from .client import (
     DEFAULT_BASE_URL,
@@ -294,8 +294,8 @@ def parse_args() -> argparse.Namespace:
         help="Suppress console output, only writing files.",
     )
     args = parser.parse_args()
-    if math.isnan(args.merge_lock_timeout) or args.merge_lock_timeout < 0:
-        parser.error("--merge-lock-timeout must be non-negative.")
+    if not math.isfinite(args.merge_lock_timeout) or args.merge_lock_timeout < 0:
+        parser.error("--merge-lock-timeout must be a non-negative finite number.")
     return args
 
 
@@ -1022,9 +1022,50 @@ class _ArchiveLockTimeoutError(Exception):
     """Raised when acquiring the transaction archive lock times out."""
 
 
+_LOCK_CONTENTION_ERRNOS = (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR, errno.EACCES)
+
+
+def _try_acquire_flock(fcntl_module, fd: int) -> bool:
+    """Attempt non-blocking advisory lock. Return True if acquired or unsupported."""
+    try:
+        fcntl_module.flock(fd, fcntl_module.LOCK_EX | fcntl_module.LOCK_NB)
+        return True
+    except OSError as e:
+        # Filesystems that do not support flock (e.g. ENOTSUP) proceed best-effort.
+        # Contention, interrupted system calls, and access denial retry.
+        return getattr(e, "errno", None) not in _LOCK_CONTENTION_ERRNOS
+
+
+def _wait_for_archive_lock(
+    fcntl_module,
+    fd: int,
+    timeout: float,
+    poll_interval: float,
+    progress_file,
+    quiet: bool,
+) -> bool:
+    """Wait up to timeout seconds for archive lock to become available."""
+    if not quiet:
+        print(
+            "[*] Another --merge is running for this archive; waiting...",
+            file=progress_file,
+            flush=True,
+        )
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        sleep_time = min(poll_interval, max(0.0, deadline - time.monotonic()))
+        if sleep_time > 0:
+            time.sleep(sleep_time)
+        if time.monotonic() >= deadline:
+            break
+        if _try_acquire_flock(fcntl_module, fd):
+            return True
+    return False
+
+
 @contextlib.contextmanager
 def _archive_lock(
-    path: Optional[str],
+    path: Optional[Union[str, Path]] = None,
     timeout: float = DEFAULT_MERGE_LOCK_TIMEOUT,
     poll_interval: float = 0.1,
     progress_file=None,
@@ -1081,41 +1122,12 @@ def _archive_lock(
         yield
         return
 
-    acquired = False
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            acquired = True
-        except (BlockingIOError, OSError) as e:
-            if getattr(e, "errno", None) in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
-                # Lock contention or interrupted; continue retrying
-                acquired = False
-            else:
-                # Filesystem does not support flock (e.g. ENOTSUP); proceed best-effort
-                acquired = True
-
+        acquired = _try_acquire_flock(fcntl, fd)
         if not acquired:
-            if not quiet:
-                print(
-                    "[*] Another --merge is running for this archive; waiting...",
-                    file=progress_file,
-                    flush=True,
-                )
-            deadline = time.monotonic() + max(0.0, timeout)
-            while not acquired and time.monotonic() < deadline:
-                sleep_time = min(poll_interval, max(0.0, deadline - time.monotonic()))
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    acquired = True
-                    break
-                except (BlockingIOError, OSError) as e:
-                    if getattr(e, "errno", None) not in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EINTR):
-                        # Filesystem does not support flock or other error; proceed best-effort
-                        acquired = True
-                        break
-
+            acquired = _wait_for_archive_lock(
+                fcntl, fd, timeout, poll_interval, progress_file, quiet
+            )
         if not acquired:
             raise _ArchiveLockTimeoutError(
                 f"Timed out waiting for archive lock on {directory} after {timeout:g}s."
