@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `--merge-lock-timeout` option for transaction archive merges ([#74](https://github.com/petry-projects/empower-personal-dashboard/issues/74)):
+  - Retries lock acquisition with a waiting notice (`[*] Another --merge is running for this archive; waiting...`) if the archive lock is busy.
+  - Times out cleanly after a configurable duration (default: 60s) with a non-zero exit code while leaving the existing archive untouched, preventing unattended cron jobs or agents from hanging indefinitely on stalled merges.
+
 ## [0.3.0] - 2026-10-10
 
 ### Added

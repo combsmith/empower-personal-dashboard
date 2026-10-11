@@ -24,11 +24,14 @@ Usage:
 import argparse
 import contextlib
 import csv
+import errno
 import getpass
 import json
 import logging
+import math
 import os
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,6 +58,7 @@ DEFAULT_BALANCES_FILE = DEFAULT_OUTPUT_DIR / "empower_balances.json"
 DEFAULT_HOLDINGS_FILE = DEFAULT_OUTPUT_DIR / "empower_holdings.json"
 DEFAULT_TRANSACTIONS_FILE = DEFAULT_OUTPUT_DIR / "empower_transactions.jsonl"
 _JSONL_SUFFIX = ".jsonl"
+DEFAULT_MERGE_LOCK_TIMEOUT = 60.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -175,6 +179,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--merge-lock-timeout",
+        type=float,
+        default=DEFAULT_MERGE_LOCK_TIMEOUT,
+        help=(
+            "Maximum time in seconds to wait for another --merge process to release "
+            f"the archive lock before timing out (default: {int(DEFAULT_MERGE_LOCK_TIMEOUT)})."
+        ),
+    )
+    parser.add_argument(
         "--overwrite-ledger",
         "--overwrite",
         action="store_true",
@@ -280,7 +293,10 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Suppress console output, only writing files.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if math.isnan(args.merge_lock_timeout) or args.merge_lock_timeout < 0:
+        parser.error("--merge-lock-timeout must be non-negative.")
+    return args
 
 
 def format_currency(val: float) -> str:
@@ -1002,8 +1018,18 @@ def _write_transactions_output(args, transactions_res, t_data, progress_file) ->
                 print(f"[+] Transactions CSV saved to: {csv_path}", file=progress_file)
 
 
+class _ArchiveLockTimeoutError(Exception):
+    """Raised when acquiring the transaction archive lock times out."""
+
+
 @contextlib.contextmanager
-def _archive_lock(path):
+def _archive_lock(
+    path,
+    timeout: float = DEFAULT_MERGE_LOCK_TIMEOUT,
+    poll_interval: float = 0.1,
+    progress_file=None,
+    quiet: bool = False,
+):
     """Hold an exclusive advisory lock for a transaction archive.
 
     The ``--merge`` flow reads the archive, fetches a window, merges, then
@@ -1027,7 +1053,15 @@ def _archive_lock(path):
     the read and write steps refuse anyway), before the directory exists
     (nothing to race on yet), or on a filesystem that does not support
     ``flock``, the sequence proceeds unserialized.
+
+    If the lock is busy, a waiting message is reported and acquisition retries
+    until ``timeout`` seconds elapse, raising ``_ArchiveLockTimeoutError`` if the
+    lock cannot be acquired in time.
     """
+    if path is None:
+        yield
+        return
+
     try:
         import fcntl
     except ImportError:
@@ -1046,11 +1080,44 @@ def _archive_lock(path):
     except OSError:
         yield
         return
+
+    acquired = False
     try:
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        except OSError:
-            pass
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except (BlockingIOError, OSError) as e:
+            if getattr(e, "errno", None) not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                # Filesystem does not support flock (e.g. ENOTSUP); proceed best-effort
+                acquired = True
+            else:
+                acquired = False
+
+        if not acquired:
+            if not quiet:
+                print(
+                    "[*] Another --merge is running for this archive; waiting...",
+                    file=progress_file,
+                    flush=True,
+                )
+            deadline = time.monotonic() + max(0.0, timeout)
+            while not acquired and time.monotonic() < deadline:
+                sleep_time = min(poll_interval, max(0.0, deadline - time.monotonic()))
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except (BlockingIOError, OSError) as e:
+                    if getattr(e, "errno", None) not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                        acquired = True
+                        break
+
+        if not acquired:
+            raise _ArchiveLockTimeoutError(
+                f"Timed out waiting for archive lock on {directory} after {timeout:g}s."
+            )
         yield
     finally:
         # Closing the descriptor releases the lock.
@@ -1103,36 +1170,50 @@ def _fetch_transactions(args, client, progress_file):
     # os.replace silently drop the earlier process's additions. A non-merge fetch
     # overwrites unconditionally, so it needs no lock.
     merge_enabled = bool(getattr(args, "merge", False) and args.output_transactions)
-    # Validate the output path before acquiring the lock to prevent path traversal attacks.
-    validated_output_path = (
-        _safe_output_path(args.output_transactions) if merge_enabled else None
-    )
+    validated_output_path = None
+    if merge_enabled:
+        try:
+            validated_output_path = _safe_output_path(args.output_transactions)
+        except ValueError:
+            validated_output_path = None
+
     lock = (
-        _archive_lock(validated_output_path) if merge_enabled else contextlib.nullcontext()
+        _archive_lock(
+            validated_output_path,
+            timeout=getattr(args, "merge_lock_timeout", DEFAULT_MERGE_LOCK_TIMEOUT),
+            progress_file=progress_file,
+            quiet=getattr(args, "quiet", False),
+        )
+        if merge_enabled
+        else contextlib.nullcontext()
     )
 
-    with lock:
-        # Merge mode: load any existing archive up front so the fetched window can be
-        # delta-merged into it rather than clobbering multi-year history.
-        existing_records, start_date = _load_merge_archive(args, args.start_date, progress_file)
+    try:
+        with lock:
+            # Merge mode: load any existing archive up front so the fetched window can be
+            # delta-merged into it rather than clobbering multi-year history.
+            existing_records, start_date = _load_merge_archive(args, args.start_date, progress_file)
 
-        # Beancount reconstruction requires complete transaction history, not truncated.
-        # Apply limit only for display purposes (via render functions), not the fetch.
-        tx_limit = None if (args.beancount or args.format == "beancount") else args.limit
-        transactions_res = client.fetch_transactions(
-            start_date=start_date,
-            end_date=end_date,
-            user_account_ids=args.account_id,
-            limit=tx_limit,
-        )
+            # Beancount reconstruction requires complete transaction history, not truncated.
+            # Apply limit only for display purposes (via render functions), not the fetch.
+            tx_limit = None if (args.beancount or args.format == "beancount") else args.limit
+            transactions_res = client.fetch_transactions(
+                start_date=start_date,
+                end_date=end_date,
+                user_account_ids=args.account_id,
+                limit=tx_limit,
+            )
 
-        if existing_records:
-            transactions_res = _merge_into_archive(args, existing_records, transactions_res, progress_file)
+            if existing_records:
+                transactions_res = _merge_into_archive(args, existing_records, transactions_res, progress_file)
 
-        t_data = transactions_res.to_dict()
-        t_data["extracted_at"] = datetime.now(timezone.utc).isoformat()
+            t_data = transactions_res.to_dict()
+            t_data["extracted_at"] = datetime.now(timezone.utc).isoformat()
 
-        _write_transactions_output(args, transactions_res, t_data, progress_file)
+            _write_transactions_output(args, transactions_res, t_data, progress_file)
+    except _ArchiveLockTimeoutError as e:
+        print(f"[!] Cannot merge: {e} The archive was left unchanged.", file=sys.stderr)
+        raise _CliExit(1)
     return transactions_res
 
 
