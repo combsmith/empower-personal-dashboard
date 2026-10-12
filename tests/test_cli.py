@@ -754,7 +754,7 @@ class TestCliMerge(unittest.TestCase):
                     with self.assertRaises(_ArchiveLockTimeoutError):
                         with _archive_lock(out, timeout=0.01, poll_interval=0.005, quiet=True):
                             pass
-                self.assertTrue(len(closed_fds) > 0)
+                self.assertGreater(len(closed_fds), 0)
             finally:
                 orig_close(fd)
 
