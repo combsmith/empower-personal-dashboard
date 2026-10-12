@@ -1246,6 +1246,7 @@ def _merge_into_archive(args, existing_records, transactions_res, progress_file,
         and not is_limited
         and not getattr(args, "account_id", None)
         and not is_sandbox
+        and getattr(transactions_res, "is_complete", True)
         and start_date
         and end_date
     )

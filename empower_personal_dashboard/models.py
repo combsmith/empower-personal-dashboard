@@ -207,6 +207,9 @@ class DashboardTransactions:
     net_cashflow: float
     transactions: List[Dict[str, Any]]
     mode: str = "live"
+    # False when the fetch is known to cover less than the requested window
+    # (e.g. truncated by a limit). Runtime-only: not serialized.
+    is_complete: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return {

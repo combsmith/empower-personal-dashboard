@@ -1424,6 +1424,36 @@ class TestCliMerge(unittest.TestCase):
             self.assertNotIn("pruned", stdout_buf.getvalue())
 
     @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
+    def test_merge_cli_no_prune_when_fetch_incomplete(self, mock_txs):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text(
+                json.dumps({"user_transaction_id": "PENDING_STALE", "transaction_date": "2026-09-10", "status": "pending", "amount": 25.0}) + "\n",
+                encoding="utf-8",
+            )
+            res = self._mk_result([
+                {"user_transaction_id": "NEW_TX", "transaction_date": "2026-09-20", "status": "posted", "amount": 7.0},
+            ])
+            res.is_complete = False
+            mock_txs.return_value = res
+
+            stdout_buf = io.StringIO()
+            argv = [
+                "empower", "--transactions", "--merge",
+                "--output-transactions", str(out),
+                "--session-file", "/nonexistent/session.json", "--mock",
+            ]
+            with patch.object(sys, "argv", argv), patch("sys.stdout", stdout_buf):
+                self.assertEqual(cli_main(), 0)
+
+            records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+            by_id = {r["user_transaction_id"]: r for r in records}
+            # Not pruned: the fetch is not proven to cover the whole window
+            self.assertIn("PENDING_STALE", by_id)
+            self.assertIn("NEW_TX", by_id)
+            self.assertNotIn("pruned", stdout_buf.getvalue())
+
+    @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
     def test_merge_cli_reports_zero_pruned_when_none_pruned(self, mock_txs):
         with tempfile.TemporaryDirectory() as tmpdir:
             out = Path(tmpdir) / "transactions.jsonl"
