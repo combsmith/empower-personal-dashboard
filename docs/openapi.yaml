@@ -360,7 +360,7 @@ components:
           schema:
             $ref: '#/components/schemas/RpcEnvelope'
     UnauthorizedError:
-      description: Unauthorized, session expired, or authentication required (Empower Code 202/203).
+      description: Unauthorized, session expired, or authentication required (Empower Code 201/202/203).
       content:
         application/json:
           schema:
@@ -425,7 +425,7 @@ components:
       properties:
         code:
           type: integer
-          description: Empower domain error code (e.g. 202/203 session expired, 920 platform migration).
+          description: Empower domain error code (e.g. 201/202/203 session expired, 920 platform migration).
           example: 920
         message:
           type: string

@@ -550,7 +550,7 @@ def interactive_login(
                 with open(safe_session, "r", encoding="utf-8") as f:
                     saved_sess = json.load(f)
                 if isinstance(saved_sess, dict) and isinstance(saved_sess.get("username"), str):
-                    email = saved_sess["username"]
+                    email = clean_api_text(saved_sess["username"])
         except (OSError, ValueError) as e:
             print(f"[!] Ignoring unreadable session file: {e}", file=sys.stderr)
 

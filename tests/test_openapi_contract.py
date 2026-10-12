@@ -350,6 +350,20 @@ class TestOpenApiContract(unittest.TestCase):
         }
         self._validate_schema(raw_error, "RpcEnvelope")
 
+    def test_contract_upstream_session_expired_code_201_envelope(self):
+        """Validate session expired (Code 201) error response matches RpcEnvelope schema."""
+        raw_error = {
+            "spHeader": {
+                "success": False,
+                "status": "ERROR",
+                "code": 201,
+                "errors": [
+                    {"code": 201, "message": "Session expired"}
+                ],
+            }
+        }
+        self._validate_schema(raw_error, "RpcEnvelope")
+
     # --------------------------------------------------------------------------
     # Tier 2 Contract Tests: Canonical Domain Models
     # --------------------------------------------------------------------------

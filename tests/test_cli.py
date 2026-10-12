@@ -2039,6 +2039,77 @@ class TestCliLoginChaining(unittest.TestCase):
         self.assertEqual(code, 0)
         mock_client.request_2fa_challenge.assert_called_once_with(mode="SMS")
 
+    def test_interactive_login_cancel_on_email_prompt(self):
+        from empower_personal_dashboard.cli import interactive_login
+        mock_client = MagicMock()
+        mock_client.username = None
+        with patch("builtins.input", side_effect=KeyboardInterrupt):
+            code = interactive_login(mock_client, Path("/tmp/mock_session.json"))
+        self.assertEqual(code, 1)
+
+    def test_interactive_login_cancel_on_password_prompt_user_remembered(self):
+        from empower_personal_dashboard.cli import interactive_login
+        mock_client = MagicMock()
+        mock_client.username = None
+        mock_client.identify_user.return_value = {
+            "spHeader": {"success": True, "authLevel": "USER_REMEMBERED"}
+        }
+        with patch("getpass.getpass", side_effect=KeyboardInterrupt):
+            code = interactive_login(
+                mock_client,
+                Path("/tmp/mock_session.json"),
+                cli_email="user@example.com",
+            )
+        self.assertEqual(code, 1)
+
+    def test_interactive_login_cancel_on_password_prompt_mfa_required(self):
+        from empower_personal_dashboard.cli import interactive_login
+        mock_client = MagicMock()
+        mock_client.username = None
+        mock_client.identify_user.return_value = {
+            "spHeader": {"success": True, "authLevel": "MFA_REQUIRED"}
+        }
+        with patch("getpass.getpass", side_effect=KeyboardInterrupt):
+            code = interactive_login(
+                mock_client,
+                Path("/tmp/mock_session.json"),
+                cli_email="user@example.com",
+                cli_mode="SMS",
+                cli_code="123456",
+            )
+        self.assertEqual(code, 1)
+
+    def test_interactive_login_unknown_auth_level(self):
+        from empower_personal_dashboard.cli import interactive_login
+        mock_client = MagicMock()
+        mock_client.username = None
+        mock_client.identify_user.return_value = {
+            "spHeader": {"success": True, "authLevel": "CUSTOM_TIER"}
+        }
+        code = interactive_login(
+            mock_client,
+            Path("/tmp/mock_session.json"),
+            cli_email="user@example.com",
+            cli_password="secret-pass",
+        )
+        self.assertEqual(code, 0)
+        mock_client.authenticate_password.assert_called_once_with(password="secret-pass")
+
+    def test_interactive_login_unknown_auth_level_cancel_password(self):
+        from empower_personal_dashboard.cli import interactive_login
+        mock_client = MagicMock()
+        mock_client.username = None
+        mock_client.identify_user.return_value = {
+            "spHeader": {"success": True, "authLevel": "CUSTOM_TIER"}
+        }
+        with patch("getpass.getpass", side_effect=KeyboardInterrupt):
+            code = interactive_login(
+                mock_client,
+                Path("/tmp/mock_session.json"),
+                cli_email="user@example.com",
+            )
+        self.assertEqual(code, 1)
+
 
 class TestCliProcessConcurrency(unittest.TestCase):
     """Multi-process end-to-end concurrency tests verifying OS flock serialization."""

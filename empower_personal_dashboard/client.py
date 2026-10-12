@@ -410,7 +410,8 @@ class EmpowerDashboardClient:
         if sp_header.get("csrf"):
             self.csrf = sp_header["csrf"]
 
-        self.username = sp_header.get("username") or username
+        raw_user = sp_header.get("username") or username
+        self.username = clean_api_text(raw_user) if raw_user else None
         # Parse challenge options
         self.available_challenge_methods = sp_data.get("allCredentials", []) or sp_data.get("challengeMethods", [])
         return res_json
@@ -572,7 +573,7 @@ class EmpowerDashboardClient:
         if sp_header.get("csrf"):
             self.csrf = sp_header["csrf"]
         if sp_header.get("username"):
-            self.username = sp_header["username"]
+            self.username = clean_api_text(sp_header["username"])
 
         return res_json
 
