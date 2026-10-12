@@ -1253,7 +1253,7 @@ def _merge_into_archive(args, existing_records, transactions_res, progress_file,
     if not args.quiet:
         summary = (
             f"[+] Merge: {fetched_count} fetched transaction(s) merged into "
-            f"{len(existing_records)} archived ({len(merged)} total"
+            f"{len(records_to_merge)} archived ({len(merged)} total"
         )
         if prune_enabled:
             summary += f", {pruned_count} pruned)."
