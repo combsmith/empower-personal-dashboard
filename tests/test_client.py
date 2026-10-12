@@ -1123,3 +1123,22 @@ class TestClientDebugEnvFlag(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+
+class TestReviewFixesIdentifyAndMockModes(unittest.TestCase):
+    def test_mock_2fa_rejects_unsupported_mode(self):
+        c = EmpowerDashboardClient(mock_mode=True)
+        with self.assertRaises(ValueError):
+            c.request_2fa_challenge(mode="PUSH")
+        with self.assertRaises(ValueError):
+            c.submit_2fa_code("123456", mode="PUSH")
+
+    def test_identify_user_wraps_transport_error(self):
+        import requests as _rq
+        from unittest.mock import patch
+        from empower_personal_dashboard.exceptions import LoginFailedException
+        c = EmpowerDashboardClient(session_file="/nonexistent/none.json")
+        with patch.object(c, "_get_csrf_from_homepage", return_value="x"), \
+                patch.object(c, "post", side_effect=_rq.ConnectionError("boom")):
+            with self.assertRaises(LoginFailedException):
+                c.identify_user("user@example.com")

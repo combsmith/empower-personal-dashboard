@@ -389,6 +389,7 @@ components:
             - USER_IDENTIFIED
             - MFA_REQUIRED
             - USER_REMEMBERED
+            - SESSION_AUTHENTICATED
           example: USER_REMEMBERED
         csrf:
           type: string

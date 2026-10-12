@@ -363,11 +363,17 @@ class EmpowerDashboardClient:
             "referrerId": "",
         }
 
-        resp = self.post("/login/identifyUser", payload)
+        try:
+            resp = self.post("/login/identifyUser", payload)
+        except requests.RequestException as e:
+            raise LoginFailedException(f"Failed to reach login endpoint: {e}") from e
         if resp.status_code != 200:
             raise LoginFailedException(f"Failed to reach login endpoint (HTTP {resp.status_code})")
 
-        res_json = resp.json()
+        try:
+            res_json = resp.json()
+        except ValueError as e:
+            raise LoginFailedException(f"Malformed response from login endpoint: {e}") from e
         sp_header = res_json.get("spHeader", {})
         sp_data = res_json.get("spData", {})
 
@@ -381,8 +387,11 @@ class EmpowerDashboardClient:
                     self.api_endpoint = f"{self.base_url}/api"
                     new_csrf = self._get_csrf_from_homepage() or initial_csrf
                     payload["csrf"] = new_csrf
-                    resp = self.post("/login/identifyUser", payload)
-                    res_json = resp.json()
+                    try:
+                        resp = self.post("/login/identifyUser", payload)
+                        res_json = resp.json()
+                    except (requests.RequestException, ValueError) as e:
+                        raise LoginFailedException(f"Failed to reach migrated login endpoint: {e}") from e
                     sp_header = res_json.get("spHeader", {})
                     sp_data = res_json.get("spData", {})
                     break
@@ -428,10 +437,12 @@ class EmpowerDashboardClient:
 
     def request_2fa_challenge(self, mode: str = "SMS") -> Dict[str, Any]:
         """Request 2FA code via SMS or Email."""
+        mode_upper = mode.upper()
+        if mode_upper not in ("SMS", "PHONE", "EMAIL"):
+            raise ValueError(f"Unsupported 2FA mode: {mode}. Must be 'SMS' or 'EMAIL'.")
         if self.mock_mode:
             return {"spHeader": {"success": True, "csrf": "mock-csrf-challenge"}}
 
-        mode_upper = mode.upper()
         if mode_upper in ("SMS", "PHONE"):
             endpoint = "/credential/challengeSms"
             challenge_type = "challengeSMS"
@@ -472,11 +483,13 @@ class EmpowerDashboardClient:
 
     def submit_2fa_code(self, code: str, mode: str = "SMS") -> Dict[str, Any]:
         """Submit 2FA verification code."""
+        mode_upper = mode.upper()
+        if mode_upper not in ("SMS", "PHONE", "EMAIL"):
+            raise ValueError(f"Unsupported 2FA mode: {mode}. Must be 'SMS' or 'EMAIL'.")
         if self.mock_mode:
             self.csrf = "mock-csrf-authed"
             return {"spHeader": {"success": True, "csrf": "mock-csrf-authed"}}
 
-        mode_upper = mode.upper()
         if mode_upper in ("SMS", "PHONE"):
             endpoint = "/credential/authenticateSms"
         elif mode_upper == "EMAIL":
