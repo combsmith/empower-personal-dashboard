@@ -1461,7 +1461,39 @@ class TestClientReauthenticateAndAutoRefresh(unittest.TestCase):
             self.client.fetch("/newaccount/getAccounts")
         self.assertEqual(mock_reauth.call_count, 1)
 
+    @patch.object(EmpowerDashboardClient, "reauthenticate")
+    @patch.object(EmpowerDashboardClient, "post")
+    def test_fetch_auto_reauth_propagates_require_two_factor_exception(self, mock_post, mock_reauth):
+        expired_resp = MagicMock()
+        expired_resp.status_code = 200
+        expired_resp.json.return_value = {
+            "spHeader": {"success": False, "errors": [{"code": 201, "message": "Session expired"}]}
+        }
+        mock_post.return_value = expired_resp
+        mock_reauth.side_effect = RequireTwoFactorException("2FA required")
+        self.client.password_provider = MagicMock(return_value="vault-pw")
+
+        with self.assertRaises(RequireTwoFactorException):
+            self.client.fetch("/newaccount/getAccounts")
+
+    @patch.object(EmpowerDashboardClient, "reauthenticate")
+    @patch.object(EmpowerDashboardClient, "post")
+    def test_fetch_auto_reauth_failure_raises_descriptive_session_expired_error(self, mock_post, mock_reauth):
+        expired_resp = MagicMock()
+        expired_resp.status_code = 200
+        expired_resp.json.return_value = {
+            "spHeader": {"success": False, "errors": [{"code": 201, "message": "Session expired"}]}
+        }
+        mock_post.return_value = expired_resp
+        mock_reauth.side_effect = LoginFailedException("Helper exited with 1")
+        self.client.password_provider = MagicMock(return_value="vault-pw")
+
+        with self.assertRaises(SessionExpiredError) as ctx:
+            self.client.fetch("/newaccount/getAccounts")
+        self.assertIn("Helper exited with 1", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

@@ -547,13 +547,69 @@ def render_transactions_table(transactions: DashboardTransactions, limit: Option
     return f"{divider}\n{md}\n{divider}"
 
 
+_MSG_CANCELED = "\n[!] Canceled."
+_SESSION_FILE_DESC = "session file path"
+
+
+def _read_username_from_session_file(session_file: Optional[Path]) -> Optional[str]:
+    """Read stored username from session file if available."""
+    if not session_file or not session_file.exists():
+        return None
+    try:
+        safe_session = _safe_fs_path(session_file, description=_SESSION_FILE_DESC)
+        if safe_session.exists():
+            with open(safe_session, "r", encoding="utf-8") as f:
+                saved_sess = json.load(f)
+            if isinstance(saved_sess, dict) and isinstance(saved_sess.get("username"), str):
+                return clean_api_text(saved_sess["username"])
+    except (OSError, ValueError) as e:
+        print(f"[!] Ignoring unreadable session file: {e}", file=sys.stderr)
+    return None
+
+
+def _resolve_cli_username(args: argparse.Namespace, client: Optional[EmpowerDashboardClient] = None) -> Optional[str]:
+    """Resolve configured username from arguments, environment, client, or session file."""
+    return (
+        getattr(args, "email", None)
+        or os.environ.get("EMPOWER_USERNAME")
+        or os.environ.get("PERSONAL_CAPITAL_EMAIL")
+        or getattr(client, "username", None)
+        or _read_username_from_session_file(getattr(args, "session_file", None))
+    )
+
+
+def _resolve_or_prompt_username(args: argparse.Namespace, client: Optional[EmpowerDashboardClient] = None) -> Optional[str]:
+    """Resolve username or prompt user interactively."""
+    email = _resolve_cli_username(args, client)
+    if email:
+        return email
+    try:
+        raw = input("Empower Email / Username: ").strip()
+        if raw:
+            return raw
+        print("[!] Email / Username cannot be empty.", file=sys.stderr)
+        return None
+    except (EOFError, KeyboardInterrupt):
+        print(_MSG_CANCELED, file=sys.stderr)
+        return None
+
+
+def _resolve_or_prompt_password(prompt_label: str = "Empower Password: ") -> Optional[str]:
+    """Prompt user for password returning None if canceled."""
+    try:
+        raw = getpass.getpass(prompt_label)
+        if raw:
+            return raw
+        print("[!] Password cannot be empty.", file=sys.stderr)
+        return None
+    except (EOFError, KeyboardInterrupt):
+        print(_MSG_CANCELED, file=sys.stderr)
+        return None
+
+
 def _prompt_for_password() -> Optional[str]:
     """Prompt user for password, returning None if canceled."""
-    try:
-        return getpass.getpass("Empower Password: ")
-    except (EOFError, KeyboardInterrupt):
-        print("\n[!] Canceled.", file=sys.stderr)
-        return None
+    return _resolve_or_prompt_password("Empower Password: ")
 
 
 def handle_set_keyring(args: argparse.Namespace, client: EmpowerDashboardClient) -> int:
@@ -563,44 +619,14 @@ def handle_set_keyring(args: argparse.Namespace, client: EmpowerDashboardClient)
         print("[!] Install it with: pip install 'empower-personal-dashboard[keyring]' or pip install keyring", file=sys.stderr)
         return 1
 
-    email = (
-        getattr(args, "email", None)
-        or os.environ.get("EMPOWER_USERNAME")
-        or os.environ.get("PERSONAL_CAPITAL_EMAIL")
-        or getattr(client, "username", None)
-    )
-    if not email and getattr(args, "session_file", None):
-        try:
-            safe_session = _safe_fs_path(args.session_file, description="session file path")
-            if safe_session.exists():
-                with open(safe_session, "r", encoding="utf-8") as f:
-                    saved_sess = json.load(f)
-                if isinstance(saved_sess, dict) and isinstance(saved_sess.get("username"), str):
-                    email = clean_api_text(saved_sess["username"])
-        except (OSError, ValueError):
-            pass
-
+    email = _resolve_or_prompt_username(args, client)
     if not email:
-        try:
-            email = input("Empower Email / Username: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\n[!] Canceled.", file=sys.stderr)
-            return 1
-
-    if not email:
-        print("[!] Email / Username cannot be empty.", file=sys.stderr)
         return 1
 
     password = getattr(args, "password", None) or os.environ.get("EMPOWER_PASSWORD") or os.environ.get("PERSONAL_CAPITAL_PASSWORD")
     if not password:
-        try:
-            password = getpass.getpass(f"Empower Password for '{email}': ")
-        except (EOFError, KeyboardInterrupt):
-            print("\n[!] Canceled.", file=sys.stderr)
-            return 1
-
+        password = _resolve_or_prompt_password(f"Empower Password for '{email}': ")
     if not password:
-        print("[!] Password cannot be empty.", file=sys.stderr)
         return 1
 
     try:
@@ -633,24 +659,13 @@ def interactive_login(
         or os.environ.get("EMPOWER_USERNAME")
         or os.environ.get("PERSONAL_CAPITAL_EMAIL")
         or getattr(client, "username", None)
+        or _read_username_from_session_file(session_file)
     )
-    if not email:
-        try:
-            # Validate the (possibly CLI/LLM-supplied) path: rejects NUL bytes and symlinks.
-            safe_session = _safe_fs_path(session_file, description="session file path")
-            if safe_session.exists():
-                with open(safe_session, "r", encoding="utf-8") as f:
-                    saved_sess = json.load(f)
-                if isinstance(saved_sess, dict) and isinstance(saved_sess.get("username"), str):
-                    email = clean_api_text(saved_sess["username"])
-        except (OSError, ValueError) as e:
-            print(f"[!] Ignoring unreadable session file: {e}", file=sys.stderr)
-
     if not email:
         try:
             email = input("Empower Email / Username: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\n[!] Canceled.", file=sys.stderr)
+            print(_MSG_CANCELED, file=sys.stderr)
             return 1
 
     try:
@@ -765,24 +780,9 @@ def _build_client(args: argparse.Namespace) -> EmpowerDashboardClient:
     session_file = getattr(args, "session_file", DEFAULT_SESSION_FILE)
 
     def _password_provider() -> Optional[str]:
-        username = (
-            getattr(args, "email", None)
-            or os.environ.get("EMPOWER_USERNAME")
-            or os.environ.get("PERSONAL_CAPITAL_EMAIL")
-        )
-        if not username and session_file and session_file.exists():
-            try:
-                safe_session = _safe_fs_path(session_file, description="session file path")
-                if safe_session.exists():
-                    with open(safe_session, "r", encoding="utf-8") as f:
-                        saved = json.load(f)
-                    if isinstance(saved, dict) and isinstance(saved.get("username"), str):
-                        username = clean_api_text(saved["username"])
-            except (OSError, ValueError):
-                pass
         return resolve_password(
             cli_password=getattr(args, "password", None),
-            username=username,
+            username=_resolve_cli_username(args),
             credential_helper=getattr(args, "credential_helper", None),
             use_keyring=bool(getattr(args, "keyring", False)),
         )
