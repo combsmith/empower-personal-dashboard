@@ -523,6 +523,15 @@ def render_transactions_table(transactions: DashboardTransactions, limit: Option
     return f"{divider}\n{md}\n{divider}"
 
 
+def _prompt_for_password() -> Optional[str]:
+    """Prompt user for password, returning None if canceled."""
+    try:
+        return getpass.getpass("Empower Password: ")
+    except (EOFError, KeyboardInterrupt):
+        print("\n[!] Canceled.", file=sys.stderr)
+        return None
+
+
 def interactive_login(
     client: EmpowerDashboardClient,
     session_file: Path,
@@ -573,10 +582,8 @@ def interactive_login(
         if auth_level == "USER_REMEMBERED":
             print(f"[+] Device recognized ('{device_name}'). No SMS/Email 2FA challenge required.")
             if not password:
-                try:
-                    password = getpass.getpass("Empower Password: ")
-                except (EOFError, KeyboardInterrupt):
-                    print("\n[!] Canceled.", file=sys.stderr)
+                password = _prompt_for_password()
+                if password is None:
                     return 1
 
             print("[*] Authenticating password to resume session...")
@@ -604,10 +611,8 @@ def interactive_login(
             print("[+] 2FA verified successfully.")
 
             if not password:
-                try:
-                    password = getpass.getpass("Empower Password: ")
-                except (EOFError, KeyboardInterrupt):
-                    print("\n[!] Canceled.", file=sys.stderr)
+                password = _prompt_for_password()
+                if password is None:
                     return 1
 
             print("[*] Finalizing device registration with password...")
@@ -619,10 +624,8 @@ def interactive_login(
 
         else:
             if not password:
-                try:
-                    password = getpass.getpass("Empower Password: ")
-                except (EOFError, KeyboardInterrupt):
-                    print("\n[!] Canceled.", file=sys.stderr)
+                password = _prompt_for_password()
+                if password is None:
                     return 1
             client.authenticate_password(password=password)
             print("[+] Login successful! Password authenticated.")

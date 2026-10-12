@@ -459,11 +459,9 @@ class EmpowerDashboardClient:
         if mode_upper in ("SMS", "PHONE"):
             endpoint = "/credential/challengeSms"
             challenge_type = "challengeSMS"
-        elif mode_upper == "EMAIL":
+        else:
             endpoint = "/credential/challengeEmail"
             challenge_type = "challengeEmail"
-        else:
-            raise ValueError(f"Unsupported 2FA mode: {mode}. Must be 'SMS' or 'EMAIL'.")
 
         payload = {
             "challengeReason": "DEVICE_AUTH",
@@ -505,10 +503,8 @@ class EmpowerDashboardClient:
 
         if mode_upper in ("SMS", "PHONE"):
             endpoint = "/credential/authenticateSms"
-        elif mode_upper == "EMAIL":
-            endpoint = "/credential/authenticateEmailByCode"
         else:
-            raise ValueError(f"Unsupported 2FA mode: {mode}. Must be 'SMS' or 'EMAIL'.")
+            endpoint = "/credential/authenticateEmailByCode"
 
         payload = {
             "challengeReason": "DEVICE_AUTH",
