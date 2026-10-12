@@ -1677,6 +1677,32 @@ class TestCliLoginChaining(unittest.TestCase):
         self.assertIn("Device recognized ('Empower CLI Client'). No SMS/Email 2FA challenge required.", output_str)
         self.assertIn("Password authenticated and session resumed.", output_str)
 
+    def test_interactive_login_ignores_undecodable_session_file_and_prompts(self):
+        from empower_personal_dashboard.cli import interactive_login
+        import io
+        import tempfile
+
+        mock_client = MagicMock()
+        mock_client.username = None
+        mock_client.identify_user.return_value = {
+            "spHeader": {"success": True, "authLevel": "USER_REMEMBERED"}
+        }
+        mock_client.save_session.return_value = Path("/tmp/mock_session.json")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session_path = Path(tmp) / "session.json"
+            session_path.write_bytes(b"\xff\xfe\x00invalid-utf8")
+            err = io.StringIO()
+            with patch.dict("os.environ", {}, clear=True), \
+                    patch("builtins.input", return_value="user@example.com"), \
+                    patch("sys.stdout", io.StringIO()), \
+                    patch("sys.stderr", err):
+                code = interactive_login(mock_client, session_path, cli_password="secret-password")
+
+        self.assertEqual(code, 0)
+        self.assertIn("Ignoring unreadable session file", err.getvalue())
+        mock_client.identify_user.assert_called_once_with(username="user@example.com")
+
     def test_interactive_login_mfa_required_performs_full_flow(self):
         from empower_personal_dashboard.cli import interactive_login
         import io
