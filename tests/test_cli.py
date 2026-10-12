@@ -2247,6 +2247,239 @@ class TestCliProcessConcurrency(unittest.TestCase):
             self.assertEqual(len(lines), 5)
 
 
+class TestCliCredentialsAndKeyring(unittest.TestCase):
+    def test_parse_args_keyring_and_helper(self):
+        from empower_personal_dashboard.cli import parse_args
+        with patch("sys.argv", ["empower", "--keyring", "--credential-helper", "pass show empower", "--set-keyring"]):
+            args = parse_args()
+            self.assertTrue(args.keyring)
+            self.assertTrue(args.set_keyring)
+            self.assertEqual(args.credential_helper, "pass show empower")
+
+    @patch("empower_personal_dashboard.cli.set_password_in_keyring")
+    @patch("empower_personal_dashboard.cli.is_keyring_available", return_value=True)
+    def test_handle_set_keyring_with_cli_args(self, mock_avail, mock_set):
+        from empower_personal_dashboard.cli import handle_set_keyring
+        args = MagicMock()
+        args.email = "testuser@example.com"
+        args.password = "secretpass123"
+        args.session_file = Path("/nonexistent/sess.json")
+
+        client = MagicMock()
+        ret = handle_set_keyring(args, client)
+        self.assertEqual(ret, 0)
+        mock_set.assert_called_once_with(username="testuser@example.com", password="secretpass123")
+
+    @patch("empower_personal_dashboard.cli.getpass.getpass", return_value="prompted-pw")
+    @patch("builtins.input", return_value="prompted@example.com")
+    @patch("empower_personal_dashboard.cli.set_password_in_keyring")
+    @patch("empower_personal_dashboard.cli.is_keyring_available", return_value=True)
+    def test_handle_set_keyring_prompt(self, mock_avail, mock_set, mock_input, mock_getpass):
+        from empower_personal_dashboard.cli import handle_set_keyring
+        args = MagicMock()
+        args.email = None
+        args.password = None
+        args.session_file = Path("/nonexistent/sess.json")
+
+        client = MagicMock()
+        client.username = None
+        ret = handle_set_keyring(args, client)
+        self.assertEqual(ret, 0)
+        mock_set.assert_called_once_with(username="prompted@example.com", password="prompted-pw")
+
+    @patch("empower_personal_dashboard.cli.is_keyring_available", return_value=False)
+    def test_handle_set_keyring_unavailable(self, mock_avail):
+        from empower_personal_dashboard.cli import handle_set_keyring
+        args = MagicMock()
+        client = MagicMock()
+        stderr_buf = io.StringIO()
+        with patch("sys.stderr", stderr_buf):
+            ret = handle_set_keyring(args, client)
+        self.assertEqual(ret, 1)
+        self.assertIn("keyring", stderr_buf.getvalue().lower())
+
+    @patch("empower_personal_dashboard.cli.interactive_login")
+    @patch("empower_personal_dashboard.cli.handle_set_keyring", return_value=0)
+    @patch("empower_personal_dashboard.cli._build_client")
+    @patch("empower_personal_dashboard.cli.parse_args")
+    def test_main_standalone_set_keyring(self, mock_parse, mock_build, mock_set_keyring, mock_login):
+        from empower_personal_dashboard.cli import main
+        mock_args = MagicMock()
+        mock_args.set_keyring = True
+        mock_args.login = False
+        mock_args.balances = False
+        mock_args.holdings = False
+        mock_args.transactions = False
+        mock_args.all = False
+        mock_args.beancount = False
+        mock_parse.return_value = mock_args
+
+        ret = main()
+        self.assertEqual(ret, 0)
+        mock_set_keyring.assert_called_once()
+        mock_login.assert_not_called()
+
+    @patch("empower_personal_dashboard.cli.resolve_password", return_value="vault-retrieved-pw")
+    def test_interactive_login_uses_credential_helper_when_user_remembered(self, mock_resolve):
+        from empower_personal_dashboard.cli import interactive_login
+        client = MagicMock()
+        client.identify_user.return_value = {
+            "spHeader": {"authLevel": "USER_REMEMBERED", "deviceName": "Test Device"}
+        }
+        client.mock_mode = True
+
+        ret = interactive_login(
+            client=client,
+            session_file=Path("/tmp/dummy.json"),
+            cli_email="user@example.com",
+            cli_credential_helper="pass show empower",
+        )
+        self.assertEqual(ret, 0)
+        client.authenticate_password.assert_called_once_with(password="vault-retrieved-pw")
+
+    @patch("empower_personal_dashboard.cli.set_password_in_keyring")
+    @patch("empower_personal_dashboard.cli.resolve_password", return_value="pass-123")
+    def test_interactive_login_set_keyring_saves_password(self, mock_resolve, mock_set_keyring):
+        from empower_personal_dashboard.cli import interactive_login
+        client = MagicMock()
+        client.identify_user.return_value = {
+            "spHeader": {"authLevel": "USER_REMEMBERED", "deviceName": "Test Device"}
+        }
+        client.mock_mode = True
+
+        ret = interactive_login(
+            client=client,
+            session_file=Path("/tmp/dummy.json"),
+            cli_email="user@example.com",
+            cli_set_keyring=True,
+        )
+        self.assertEqual(ret, 0)
+        mock_set_keyring.assert_called_once_with(username="user@example.com", password="pass-123")
+
+    @patch("empower_personal_dashboard.credentials.get_password_from_helper", return_value="helper-retrieved-pw")
+    def test_unattended_extraction_auto_reauths_with_credential_helper(self, mock_helper):
+        from empower_personal_dashboard.cli import main
+        from empower_personal_dashboard.client import EmpowerDashboardClient
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sess_path = Path(tmpdir) / "session.json"
+            sess_path.write_text(json.dumps({
+                "version": 2,
+                "username": "unattended@example.com",
+                "csrf": "old-csrf",
+                "cookies": [{"name": "foo", "value": "bar"}],
+            }), encoding="utf-8")
+
+            out_path = Path(tmpdir) / "balances.json"
+
+            with patch("sys.argv", [
+                "empower",
+                "--balances",
+                "--session-file", str(sess_path),
+                "--credential-helper", "pass show empower",
+                "--output", str(out_path),
+                "--quiet",
+            ]):
+                with patch.object(EmpowerDashboardClient, "identify_user") as mock_identify, \
+                     patch.object(EmpowerDashboardClient, "authenticate_password") as mock_auth_pw, \
+                     patch.object(EmpowerDashboardClient, "post") as mock_post:
+
+                    # First API call returns session expired (code 201)
+                    expired_resp = MagicMock()
+                    expired_resp.status_code = 200
+                    expired_resp.json.return_value = {
+                        "spHeader": {"success": False, "errors": [{"code": 201, "message": "Session expired"}]}
+                    }
+
+                    # After re-auth, second API call succeeds
+                    success_resp = MagicMock()
+                    success_resp.status_code = 200
+                    success_resp.json.return_value = {
+                        "spHeader": {"success": True, "csrf": "fresh-csrf"},
+                        "spData": {
+                            "networth": 125000.0,
+                            "accounts": [],
+                        }
+                    }
+
+                    mock_post.side_effect = [expired_resp, success_resp]
+
+                    mock_identify.return_value = {
+                        "spHeader": {"success": True, "authLevel": "USER_REMEMBERED", "deviceName": "Empower CLI Client"}
+                    }
+                    mock_auth_pw.return_value = {
+                        "spHeader": {"success": True, "authLevel": "SESSION_AUTHENTICATED", "csrf": "fresh-csrf"}
+                    }
+
+                    ret = main()
+                    self.assertEqual(ret, 0)
+                    mock_helper.assert_called_once_with("pass show empower")
+                    mock_identify.assert_called_once_with(username="unattended@example.com")
+                    mock_auth_pw.assert_called_once_with(password="helper-retrieved-pw")
+                    self.assertTrue(out_path.exists())
+
+    @patch("empower_personal_dashboard.credentials.get_password_from_keyring", return_value="keyring-retrieved-pw")
+    def test_unattended_extraction_auto_reauths_with_keyring(self, mock_keyring):
+        from empower_personal_dashboard.cli import main
+        from empower_personal_dashboard.client import EmpowerDashboardClient
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sess_path = Path(tmpdir) / "session.json"
+            sess_path.write_text(json.dumps({
+                "version": 2,
+                "username": "keyringuser@example.com",
+                "csrf": "old-csrf",
+                "cookies": [{"name": "foo", "value": "bar"}],
+            }), encoding="utf-8")
+
+            out_path = Path(tmpdir) / "balances.json"
+
+            with patch("sys.argv", [
+                "empower",
+                "--balances",
+                "--session-file", str(sess_path),
+                "--keyring",
+                "--output", str(out_path),
+                "--quiet",
+            ]):
+                with patch.object(EmpowerDashboardClient, "identify_user") as mock_identify, \
+                     patch.object(EmpowerDashboardClient, "authenticate_password") as mock_auth_pw, \
+                     patch.object(EmpowerDashboardClient, "post") as mock_post:
+
+                    expired_resp = MagicMock()
+                    expired_resp.status_code = 200
+                    expired_resp.json.return_value = {
+                        "spHeader": {"success": False, "errors": [{"code": 201, "message": "Session expired"}]}
+                    }
+
+                    success_resp = MagicMock()
+                    success_resp.status_code = 200
+                    success_resp.json.return_value = {
+                        "spHeader": {"success": True, "csrf": "fresh-csrf"},
+                        "spData": {
+                            "networth": 50000.0,
+                            "accounts": [],
+                        }
+                    }
+
+                    mock_post.side_effect = [expired_resp, success_resp]
+
+                    mock_identify.return_value = {
+                        "spHeader": {"success": True, "authLevel": "USER_REMEMBERED", "deviceName": "Empower CLI Client"}
+                    }
+                    mock_auth_pw.return_value = {
+                        "spHeader": {"success": True, "authLevel": "SESSION_AUTHENTICATED", "csrf": "fresh-csrf"}
+                    }
+
+                    ret = main()
+                    self.assertEqual(ret, 0)
+                    mock_keyring.assert_called_once_with("keyringuser@example.com", service_name="empower-personal-dashboard")
+                    mock_identify.assert_called_once_with(username="keyringuser@example.com")
+                    mock_auth_pw.assert_called_once_with(password="keyring-retrieved-pw")
+                    self.assertTrue(out_path.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

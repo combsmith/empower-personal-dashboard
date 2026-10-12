@@ -50,6 +50,14 @@ from .exceptions import (
     RequireTwoFactorException,
     SessionExpiredError,
 )
+from .credentials import (
+    DEFAULT_KEYRING_SERVICE,
+    get_password_from_helper,
+    get_password_from_keyring,
+    is_keyring_available,
+    resolve_password,
+    set_password_in_keyring,
+)
 from .sanitizers import clean_api_text
 from .models import DashboardBalances, DashboardHoldings, DashboardTransactions
 
@@ -253,6 +261,22 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Empower password (optional, otherwise reads env or prompts).",
+    )
+    parser.add_argument(
+        "--keyring",
+        action="store_true",
+        help="Retrieve password from system keyring when authentication is required.",
+    )
+    parser.add_argument(
+        "--set-keyring",
+        action="store_true",
+        help="Prompt and store Empower password securely in system keyring.",
+    )
+    parser.add_argument(
+        "--credential-helper",
+        type=str,
+        default=None,
+        help="External command to execute for retrieving Empower password securely (e.g. 'pass show empower', 'op read op://...').",
     )
     parser.add_argument(
         "--mode",
@@ -532,6 +556,62 @@ def _prompt_for_password() -> Optional[str]:
         return None
 
 
+def handle_set_keyring(args: argparse.Namespace, client: EmpowerDashboardClient) -> int:
+    """Prompt for username and password if not provided and store in system keyring."""
+    if not is_keyring_available():
+        print("[!] Error: The 'keyring' package is required for --set-keyring.", file=sys.stderr)
+        print("[!] Install it with: pip install 'empower-personal-dashboard[keyring]' or pip install keyring", file=sys.stderr)
+        return 1
+
+    email = (
+        getattr(args, "email", None)
+        or os.environ.get("EMPOWER_USERNAME")
+        or os.environ.get("PERSONAL_CAPITAL_EMAIL")
+        or getattr(client, "username", None)
+    )
+    if not email and getattr(args, "session_file", None):
+        try:
+            safe_session = _safe_fs_path(args.session_file, description="session file path")
+            if safe_session.exists():
+                with open(safe_session, "r", encoding="utf-8") as f:
+                    saved_sess = json.load(f)
+                if isinstance(saved_sess, dict) and isinstance(saved_sess.get("username"), str):
+                    email = clean_api_text(saved_sess["username"])
+        except (OSError, ValueError):
+            pass
+
+    if not email:
+        try:
+            email = input("Empower Email / Username: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n[!] Canceled.", file=sys.stderr)
+            return 1
+
+    if not email:
+        print("[!] Email / Username cannot be empty.", file=sys.stderr)
+        return 1
+
+    password = getattr(args, "password", None) or os.environ.get("EMPOWER_PASSWORD") or os.environ.get("PERSONAL_CAPITAL_PASSWORD")
+    if not password:
+        try:
+            password = getpass.getpass(f"Empower Password for '{email}': ")
+        except (EOFError, KeyboardInterrupt):
+            print("\n[!] Canceled.", file=sys.stderr)
+            return 1
+
+    if not password:
+        print("[!] Password cannot be empty.", file=sys.stderr)
+        return 1
+
+    try:
+        set_password_in_keyring(username=email, password=password)
+        print(f"[+] Password for '{email}' securely saved to system keyring.")
+        return 0
+    except Exception as e:
+        print(f"[!] Failed to store password in keyring: {e}", file=sys.stderr)
+        return 1
+
+
 def interactive_login(
     client: EmpowerDashboardClient,
     session_file: Path,
@@ -539,6 +619,9 @@ def interactive_login(
     cli_password: Optional[str] = None,
     cli_mode: Optional[str] = None,
     cli_code: Optional[str] = None,
+    cli_credential_helper: Optional[str] = None,
+    cli_keyring: bool = False,
+    cli_set_keyring: bool = False,
 ) -> int:
     """Run interactive 2FA login workflow."""
     print("=" * 68)
@@ -577,7 +660,16 @@ def interactive_login(
         auth_level = sp_header.get("authLevel", "")
         device_name = clean_api_text(sp_header.get("deviceName")) or "Empower CLI Client"
 
-        password = cli_password or os.environ.get("EMPOWER_PASSWORD") or os.environ.get("PERSONAL_CAPITAL_PASSWORD")
+        password = (
+            cli_password
+            or os.environ.get("EMPOWER_PASSWORD")
+            or os.environ.get("PERSONAL_CAPITAL_PASSWORD")
+            or resolve_password(
+                username=email,
+                credential_helper=cli_credential_helper,
+                use_keyring=cli_keyring,
+            )
+        )
 
         if auth_level == "USER_REMEMBERED":
             print(f"[+] Device recognized ('{device_name}'). No SMS/Email 2FA challenge required.")
@@ -630,6 +722,13 @@ def interactive_login(
             client.authenticate_password(password=password)
             print("[+] Login successful! Password authenticated.")
 
+        if cli_set_keyring and password:
+            try:
+                set_password_in_keyring(username=email, password=password)
+                print(f"[+] Password for '{email}' securely saved to system keyring.")
+            except Exception as e:
+                print(f"[!] Warning: Could not save password to keyring: {e}", file=sys.stderr)
+
         if getattr(client, "mock_mode", False) is True:
             print("[+] Sandbox mode: synthetic session not persisted.")
             return 0
@@ -659,17 +758,43 @@ class _CliExit(Exception):
 
 
 def _build_client(args: argparse.Namespace) -> EmpowerDashboardClient:
-    base_url = args.api_host
-    if not base_url and args.migrated:
+    base_url = getattr(args, "api_host", None)
+    if not base_url and getattr(args, "migrated", False):
         base_url = MIGRATED_BASE_URL
 
+    session_file = getattr(args, "session_file", DEFAULT_SESSION_FILE)
+
+    def _password_provider() -> Optional[str]:
+        username = (
+            getattr(args, "email", None)
+            or os.environ.get("EMPOWER_USERNAME")
+            or os.environ.get("PERSONAL_CAPITAL_EMAIL")
+        )
+        if not username and session_file and session_file.exists():
+            try:
+                safe_session = _safe_fs_path(session_file, description="session file path")
+                if safe_session.exists():
+                    with open(safe_session, "r", encoding="utf-8") as f:
+                        saved = json.load(f)
+                    if isinstance(saved, dict) and isinstance(saved.get("username"), str):
+                        username = clean_api_text(saved["username"])
+            except (OSError, ValueError):
+                pass
+        return resolve_password(
+            cli_password=getattr(args, "password", None),
+            username=username,
+            credential_helper=getattr(args, "credential_helper", None),
+            use_keyring=bool(getattr(args, "keyring", False)),
+        )
+
     return EmpowerDashboardClient(
-        session_file=args.session_file,
+        session_file=session_file,
         base_url=base_url or DEFAULT_BASE_URL,
-        timeout_seconds=args.timeout,
-        mock_mode=args.sandbox,
-        debug=args.debug,
-        log_file=args.log_file,
+        timeout_seconds=getattr(args, "timeout", 90),
+        mock_mode=getattr(args, "sandbox", False),
+        debug=getattr(args, "debug", False),
+        log_file=getattr(args, "log_file", None),
+        password_provider=_password_provider,
     )
 
 
@@ -1535,6 +1660,13 @@ def main() -> int:
     args = parse_args()
     client = _build_client(args)
 
+    if getattr(args, "set_keyring", False) and not getattr(args, "login", False):
+        ret = handle_set_keyring(args, client)
+        if ret != 0:
+            return ret
+        if not (args.balances or args.holdings or args.transactions or args.all or args.beancount):
+            return 0
+
     if args.login:
         ret = interactive_login(
             client=client,
@@ -1543,6 +1675,9 @@ def main() -> int:
             cli_password=args.password,
             cli_mode=args.mode,
             cli_code=args.code,
+            cli_credential_helper=args.credential_helper,
+            cli_keyring=args.keyring,
+            cli_set_keyring=args.set_keyring,
         )
         if ret != 0:
             return ret

@@ -14,7 +14,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import requests
 
@@ -155,6 +155,7 @@ class EmpowerDashboardClient:
         mock_mode: bool = False,
         debug: bool = False,
         log_file: Optional[Union[str, Path]] = None,
+        password_provider: Optional[Callable[[], Optional[str]]] = None,
     ):
         # `.expanduser()` so a `~`-prefixed EMPOWER_SESSION_FILE resolves to the
         # home directory rather than a literal "~" folder in the CWD.
@@ -165,6 +166,8 @@ class EmpowerDashboardClient:
         self.mock_mode = mock_mode
         self.debug = debug or _env_flag(os.environ.get("EMPOWER_DEBUG"))
         self.log_file = Path(log_file) if log_file else None
+        self.password_provider = password_provider
+        self._reauthenticating: bool = False
         self.session = requests.Session()
         self.csrf: str = ""
         self.username: Optional[str] = None
@@ -322,6 +325,17 @@ class EmpowerDashboardClient:
                     err_code = first_err.get("code")
 
             if err_code in (201, 202, 203) or "session" in err_msg.lower():
+                if not self._reauthenticating and (self.password_provider is not None):
+                    self._log_debug("Session expired during fetch; attempting automatic re-authentication...")
+                    self._reauthenticating = True
+                    try:
+                        self.reauthenticate()
+                        return self.fetch(endpoint, data)
+                    except Exception as e:
+                        self._log_debug(f"Automatic re-authentication failed: {e}")
+                    finally:
+                        self._reauthenticating = False
+
                 raise SessionExpiredError(f"Session expired ({err_msg})", status_code=200, error_code=err_code)
 
             raise EmpowerError(f"API request failed: {err_msg}", status_code=200, error_code=err_code, response_body=resp.text)
@@ -588,6 +602,54 @@ class EmpowerDashboardClient:
             self.username = clean_api_text(sp_header["username"])
 
         return res_json
+
+    def reauthenticate(self, password: Optional[str] = None) -> Dict[str, Any]:
+        """Re-authenticate an existing session using password when device is remembered.
+
+        Useful for unattended background syncs (cron, agents) where the session
+        cookie (JSESSIONID) has expired, but the device registration is remembered
+        (authLevel: USER_REMEMBERED), avoiding 2FA SMS challenges.
+        """
+        if not self.username:
+            raise LoginFailedException("Cannot re-authenticate: username is not known.")
+
+        ident_res = self.identify_user(username=self.username)
+        sp_header, _ = self._validate_login_response(ident_res, "user identification endpoint")
+        auth_level = sp_header.get("authLevel", "")
+
+        if auth_level == "SESSION_AUTHENTICATED":
+            self._log_debug("Session is already authenticated.")
+            return ident_res
+
+        if auth_level == "USER_REMEMBERED":
+            pw = password
+            if not pw and self.password_provider:
+                pw = self.password_provider()
+            if not pw:
+                raise LoginFailedException("Password required for USER_REMEMBERED re-authentication.")
+
+            auth_res = self.authenticate_password(password=pw)
+            if not self.mock_mode:
+                self.save_session(self.session_file)
+            return auth_res
+
+        if auth_level in ("MFA_REQUIRED", "USER_IDENTIFIED", "NONE", ""):
+            raise RequireTwoFactorException(
+                f"Two-factor authentication (2FA) is required (authLevel: {auth_level}). "
+                "Interactive login is required: run 'empower --login'."
+            )
+
+        # Fallback for unexpected authLevel: try password if available
+        pw = password
+        if not pw and self.password_provider:
+            pw = self.password_provider()
+        if pw:
+            auth_res = self.authenticate_password(password=pw)
+            if not self.mock_mode:
+                self.save_session(self.session_file)
+            return auth_res
+
+        raise LoginFailedException(f"Unsupported authentication level for unattended re-auth: {auth_level}")
 
     def save_session(self, filepath: Optional[Union[str, Path]] = None) -> Path:
         """

@@ -31,6 +31,14 @@ from .beancount import (
     BeancountMapper,
     slugify_account_name,
 )
+from .credentials import (
+    DEFAULT_KEYRING_SERVICE,
+    get_password_from_helper,
+    get_password_from_keyring,
+    is_keyring_available,
+    resolve_password,
+    set_password_in_keyring,
+)
 from .sanitizers import clean_api_text
 
 __version__ = "0.5.0"
@@ -59,6 +67,12 @@ __all__ = [
     "DEFAULT_BASE_URL",
     "MIGRATED_BASE_URL",
     "DEFAULT_SESSION_FILE",
+    "DEFAULT_KEYRING_SERVICE",
+    "get_password_from_helper",
+    "get_password_from_keyring",
+    "set_password_in_keyring",
+    "resolve_password",
+    "is_keyring_available",
     "create_mcp_server",
     "BeancountGenerator",
     "BeancountMapper",

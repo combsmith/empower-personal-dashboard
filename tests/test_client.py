@@ -1348,3 +1348,120 @@ class TestReviewFixesIdentifyAndMockModes(unittest.TestCase):
                 patch.object(c, "post", side_effect=_rq.ConnectionError("boom")):
             with self.assertRaises(LoginFailedException):
                 c.identify_user("user@example.com")
+
+
+class TestClientReauthenticateAndAutoRefresh(unittest.TestCase):
+    def setUp(self):
+        self.client = EmpowerDashboardClient(session_file=Path("/tmp/dummy_sess.json"), mock_mode=False)
+        self.client.username = "user@example.com"
+        self.client.csrf = "csrf-token-123"
+
+    @patch.object(EmpowerDashboardClient, "save_session")
+    @patch.object(EmpowerDashboardClient, "authenticate_password")
+    @patch.object(EmpowerDashboardClient, "identify_user")
+    def test_reauthenticate_user_remembered_success(self, mock_identify, mock_auth_pw, mock_save):
+        mock_identify.return_value = {
+            "spHeader": {"success": True, "authLevel": "USER_REMEMBERED", "deviceName": "Empower CLI Client"}
+        }
+        mock_auth_pw.return_value = {
+            "spHeader": {"success": True, "authLevel": "SESSION_AUTHENTICATED"}
+        }
+        mock_save.return_value = Path("/tmp/dummy_sess.json")
+
+        res = self.client.reauthenticate(password="secret123")
+        self.assertEqual(res["spHeader"]["authLevel"], "SESSION_AUTHENTICATED")
+        mock_identify.assert_called_once_with(username="user@example.com")
+        mock_auth_pw.assert_called_once_with(password="secret123")
+        mock_save.assert_called_once()
+
+    @patch.object(EmpowerDashboardClient, "save_session")
+    @patch.object(EmpowerDashboardClient, "authenticate_password")
+    @patch.object(EmpowerDashboardClient, "identify_user")
+    def test_reauthenticate_uses_password_provider(self, mock_identify, mock_auth_pw, mock_save):
+        mock_identify.return_value = {
+            "spHeader": {"success": True, "authLevel": "USER_REMEMBERED"}
+        }
+        mock_auth_pw.return_value = {
+            "spHeader": {"success": True, "authLevel": "SESSION_AUTHENTICATED"}
+        }
+        self.client.password_provider = MagicMock(return_value="provided-secret")
+
+        res = self.client.reauthenticate()
+        self.assertEqual(res["spHeader"]["authLevel"], "SESSION_AUTHENTICATED")
+        self.client.password_provider.assert_called_once()
+        mock_auth_pw.assert_called_once_with(password="provided-secret")
+
+    @patch.object(EmpowerDashboardClient, "identify_user")
+    def test_reauthenticate_session_authenticated(self, mock_identify):
+        mock_identify.return_value = {
+            "spHeader": {"success": True, "authLevel": "SESSION_AUTHENTICATED"}
+        }
+        res = self.client.reauthenticate(password="secret123")
+        self.assertEqual(res["spHeader"]["authLevel"], "SESSION_AUTHENTICATED")
+
+    @patch.object(EmpowerDashboardClient, "identify_user")
+    def test_reauthenticate_mfa_required_raises(self, mock_identify):
+        mock_identify.return_value = {
+            "spHeader": {"success": True, "authLevel": "MFA_REQUIRED"}
+        }
+        with self.assertRaises(RequireTwoFactorException):
+            self.client.reauthenticate(password="secret123")
+
+    def test_reauthenticate_missing_username_raises(self):
+        self.client.username = None
+        with self.assertRaises(LoginFailedException):
+            self.client.reauthenticate(password="secret123")
+
+    @patch.object(EmpowerDashboardClient, "identify_user")
+    def test_reauthenticate_missing_password_raises(self, mock_identify):
+        mock_identify.return_value = {
+            "spHeader": {"success": True, "authLevel": "USER_REMEMBERED"}
+        }
+        self.client.password_provider = None
+        with self.assertRaises(LoginFailedException):
+            self.client.reauthenticate()
+
+    @patch.object(EmpowerDashboardClient, "reauthenticate")
+    @patch.object(EmpowerDashboardClient, "post")
+    def test_fetch_auto_reauthenticates_on_expired_session(self, mock_post, mock_reauth):
+        expired_resp = MagicMock()
+        expired_resp.status_code = 200
+        expired_resp.json.return_value = {
+            "spHeader": {"success": False, "errors": [{"code": 201, "message": "Session expired"}]}
+        }
+
+        success_resp = MagicMock()
+        success_resp.status_code = 200
+        success_resp.json.return_value = {
+            "spHeader": {"success": True, "csrf": "new-csrf"},
+            "spData": {"accounts": []}
+        }
+
+        mock_post.side_effect = [expired_resp, success_resp]
+        self.client.password_provider = MagicMock(return_value="vault-pw")
+
+        res = self.client.fetch("/newaccount/getAccounts")
+        self.assertTrue(res["spHeader"]["success"])
+        mock_reauth.assert_called_once()
+        self.assertEqual(mock_post.call_count, 2)
+
+    @patch.object(EmpowerDashboardClient, "reauthenticate")
+    @patch.object(EmpowerDashboardClient, "post")
+    def test_fetch_no_infinite_recursion_if_reauth_still_expired(self, mock_post, mock_reauth):
+        expired_resp = MagicMock()
+        expired_resp.status_code = 200
+        expired_resp.json.return_value = {
+            "spHeader": {"success": False, "errors": [{"code": 201, "message": "Session expired"}]}
+        }
+
+        mock_post.return_value = expired_resp
+        self.client.password_provider = MagicMock(return_value="vault-pw")
+
+        with self.assertRaises(SessionExpiredError):
+            self.client.fetch("/newaccount/getAccounts")
+        self.assertEqual(mock_reauth.call_count, 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
+

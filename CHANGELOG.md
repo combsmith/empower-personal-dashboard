@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Support OS keyring and pluggable credential helpers for unattended background syncs ([#55](https://github.com/petry-projects/empower-personal-dashboard/issues/55)):
+  - Added `empower_personal_dashboard.credentials` module with `get_password_from_helper`, `get_password_from_keyring`, `set_password_in_keyring`, and hierarchical `resolve_password`.
+  - Added CLI flags `--keyring`, `--set-keyring`, and `--credential-helper <command>`, as well as support for environment variables `EMPOWER_KEYRING` and `EMPOWER_CREDENTIAL_HELPER`.
+  - Implemented `reauthenticate()` and automatic unattended session refresh in `EmpowerDashboardClient` on `SessionExpiredError` (Code 201/202/203) when `USER_REMEMBERED` device binding is active.
+  - Added optional dependency `keyring>=24.0.0` in `pyproject.toml` (`[keyring]`, `[dev]`, `[all]`).
+
 ## [0.5.0] - 2026-10-12
 
 ### Added
