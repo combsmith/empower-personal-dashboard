@@ -1738,6 +1738,281 @@ class TestCliLoginChaining(unittest.TestCase):
         self.assertEqual(code, 0)
         mock_client.identify_user.assert_called_once_with(username="saved-user@example.com")
 
+    def test_interactive_login_session_authenticated(self):
+        from empower_personal_dashboard.cli import interactive_login
+        import io
+
+        mock_client = MagicMock()
+        mock_client.username = None
+        mock_client.identify_user.return_value = {
+            "spHeader": {
+                "success": True,
+                "authLevel": "SESSION_AUTHENTICATED",
+            }
+        }
+        mock_client.save_session.return_value = Path("/tmp/mock_session.json")
+
+        out = io.StringIO()
+        with patch("sys.stdout", out):
+            code = interactive_login(
+                mock_client,
+                Path("/tmp/mock_session.json"),
+                cli_email="user@example.com",
+                cli_password="secret-password",
+            )
+
+        self.assertEqual(code, 0)
+        mock_client.identify_user.assert_called_once_with(username="user@example.com")
+        output_str = out.getvalue()
+        self.assertIn("Session is already active and authenticated.", output_str)
+
+    def test_interactive_login_unknown_auth_level_with_password(self):
+        from empower_personal_dashboard.cli import interactive_login
+        import io
+
+        mock_client = MagicMock()
+        mock_client.username = None
+        mock_client.identify_user.return_value = {
+            "spHeader": {
+                "success": True,
+                "authLevel": "UNKNOWN_LEVEL",
+            }
+        }
+        mock_client.save_session.return_value = Path("/tmp/mock_session.json")
+
+        out = io.StringIO()
+        with patch("sys.stdout", out):
+            code = interactive_login(
+                mock_client,
+                Path("/tmp/mock_session.json"),
+                cli_email="user@example.com",
+                cli_password="secret-password",
+            )
+
+        self.assertEqual(code, 0)
+        mock_client.authenticate_password.assert_called_once_with(password="secret-password")
+        mock_client.save_session.assert_called_once()
+
+    def test_interactive_login_reads_saved_session_file(self):
+        from empower_personal_dashboard.cli import interactive_login
+        import io
+        import json
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sess_path = Path(tmpdir) / "session.json"
+            sess_path.write_text(json.dumps({"username": "saved@example.com", "csrf": "saved-csrf"}))
+
+            mock_client = MagicMock()
+            mock_client.username = None
+            mock_client.identify_user.return_value = {
+                "spHeader": {
+                    "success": True,
+                    "authLevel": "USER_REMEMBERED",
+                    "deviceName": "Empower CLI Client",
+                }
+            }
+            mock_client.save_session.return_value = sess_path
+
+            out = io.StringIO()
+            with patch("sys.stdout", out):
+                code = interactive_login(
+                    mock_client,
+                    sess_path,
+                    cli_password="secret-password",
+                )
+
+            self.assertEqual(code, 0)
+            mock_client.identify_user.assert_called_once_with(username="saved@example.com")
+
+    def test_interactive_login_invalid_session_file_skipped(self):
+        from empower_personal_dashboard.cli import interactive_login
+        import io
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sess_path = Path(tmpdir) / "session.json"
+            sess_path.write_text("invalid json content")
+
+            mock_client = MagicMock()
+            mock_client.username = None
+            mock_client.identify_user.return_value = {
+                "spHeader": {
+                    "success": True,
+                    "authLevel": "USER_REMEMBERED",
+                }
+            }
+            mock_client.save_session.return_value = sess_path
+
+            out = io.StringIO()
+            with patch("sys.stdout", out), patch("builtins.input", return_value="user@example.com"):
+                code = interactive_login(
+                    mock_client,
+                    sess_path,
+                    cli_password="secret-password",
+                )
+
+            self.assertEqual(code, 0)
+            mock_client.identify_user.assert_called_once_with(username="user@example.com")
+
+    def test_interactive_login_session_file_no_username_key(self):
+        from empower_personal_dashboard.cli import interactive_login
+        import io
+        import json
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sess_path = Path(tmpdir) / "session.json"
+            sess_path.write_text(json.dumps({"csrf": "saved-csrf"}))
+
+            mock_client = MagicMock()
+            mock_client.username = None
+            mock_client.identify_user.return_value = {
+                "spHeader": {
+                    "success": True,
+                    "authLevel": "USER_REMEMBERED",
+                }
+            }
+            mock_client.save_session.return_value = sess_path
+
+            out = io.StringIO()
+            with patch("sys.stdout", out), patch("builtins.input", return_value="user@example.com"):
+                code = interactive_login(
+                    mock_client,
+                    sess_path,
+                    cli_password="secret-password",
+                )
+
+            self.assertEqual(code, 0)
+            mock_client.identify_user.assert_called_once_with(username="user@example.com")
+
+    def test_interactive_login_user_remembered_password_prompt(self):
+        from empower_personal_dashboard.cli import interactive_login
+        import io
+
+        mock_client = MagicMock()
+        mock_client.username = None
+        mock_client.identify_user.return_value = {
+            "spHeader": {
+                "success": True,
+                "authLevel": "USER_REMEMBERED",
+                "deviceName": "Empower CLI Client",
+            }
+        }
+        mock_client.save_session.return_value = Path("/tmp/mock_session.json")
+
+        out = io.StringIO()
+        with patch("sys.stdout", out), patch("getpass.getpass", return_value="prompted-password"):
+            code = interactive_login(
+                mock_client,
+                Path("/tmp/mock_session.json"),
+                cli_email="user@example.com",
+            )
+
+        self.assertEqual(code, 0)
+        mock_client.authenticate_password.assert_called_once_with(password="prompted-password")
+
+    def test_interactive_login_mfa_required_password_prompt(self):
+        from empower_personal_dashboard.cli import interactive_login
+        import io
+
+        mock_client = MagicMock()
+        mock_client.username = None
+        mock_client.identify_user.return_value = {
+            "spHeader": {
+                "success": True,
+                "authLevel": "MFA_REQUIRED",
+            }
+        }
+        mock_client.save_session.return_value = Path("/tmp/mock_session.json")
+
+        out = io.StringIO()
+        with patch("sys.stdout", out), patch("builtins.input", return_value="123456"), \
+             patch("getpass.getpass", return_value="prompted-password"):
+            code = interactive_login(
+                mock_client,
+                Path("/tmp/mock_session.json"),
+                cli_email="user@example.com",
+                cli_mode="SMS",
+            )
+
+        self.assertEqual(code, 0)
+        mock_client.authenticate_password.assert_called_once_with(password="prompted-password")
+
+    def test_interactive_login_unknown_auth_level_password_prompt(self):
+        from empower_personal_dashboard.cli import interactive_login
+        import io
+
+        mock_client = MagicMock()
+        mock_client.username = None
+        mock_client.identify_user.return_value = {
+            "spHeader": {
+                "success": True,
+                "authLevel": "UNKNOWN_LEVEL",
+            }
+        }
+        mock_client.save_session.return_value = Path("/tmp/mock_session.json")
+
+        out = io.StringIO()
+        with patch("sys.stdout", out), patch("getpass.getpass", return_value="prompted-password"):
+            code = interactive_login(
+                mock_client,
+                Path("/tmp/mock_session.json"),
+                cli_email="user@example.com",
+            )
+
+        self.assertEqual(code, 0)
+        mock_client.authenticate_password.assert_called_once_with(password="prompted-password")
+
+    def test_interactive_login_mfa_required_email_mode(self):
+        from empower_personal_dashboard.cli import interactive_login
+        import io
+
+        mock_client = MagicMock()
+        mock_client.username = None
+        mock_client.identify_user.return_value = {
+            "spHeader": {
+                "success": True,
+                "authLevel": "MFA_REQUIRED",
+            }
+        }
+        mock_client.save_session.return_value = Path("/tmp/mock_session.json")
+
+        out = io.StringIO()
+        with patch("sys.stdout", out), patch("builtins.input", return_value="E123456"):
+            code = interactive_login(
+                mock_client,
+                Path("/tmp/mock_session.json"),
+                cli_email="user@example.com",
+                cli_password="secret-password",
+            )
+
+        self.assertEqual(code, 0)
+        mock_client.request_2fa_challenge.assert_called_once_with(mode="EMAIL")
+
+    def test_interactive_login_mfa_required_sms_input_prompt(self):
+        from empower_personal_dashboard.cli import interactive_login
+        import io
+
+        mock_client = MagicMock()
+        mock_client.username = None
+        mock_client.identify_user.return_value = {
+            "spHeader": {
+                "success": True,
+                "authLevel": "MFA_REQUIRED",
+            }
+        }
+        mock_client.save_session.return_value = Path("/tmp/mock_session.json")
+
+        out = io.StringIO()
+        with patch("sys.stdout", out), patch("builtins.input", side_effect=["", "123456"]):
+            code = interactive_login(
+                mock_client,
+                Path("/tmp/mock_session.json"),
+                cli_email="user@example.com",
+                cli_password="secret-password",
+            )
+
+        self.assertEqual(code, 0)
+        mock_client.request_2fa_challenge.assert_called_once_with(mode="SMS")
+
 
 class TestCliProcessConcurrency(unittest.TestCase):
     """Multi-process end-to-end concurrency tests verifying OS flock serialization."""

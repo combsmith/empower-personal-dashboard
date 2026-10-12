@@ -545,7 +545,7 @@ def interactive_login(
             with open(session_file, "r", encoding="utf-8") as f:
                 saved_sess = json.load(f)
                 email = saved_sess.get("username")
-        except Exception:
+        except (json.JSONDecodeError, FileNotFoundError, KeyError, TypeError):
             pass
 
     if not email:

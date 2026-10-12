@@ -527,6 +527,113 @@ class TestClientAuthentication(unittest.TestCase):
             self.assertEqual(new_client.username, "synthetic-user@example.com")
             self.assertEqual(new_client.csrf, "synthetic-csrf")
 
+    @patch("requests.Session.get")
+    @patch("requests.Session.post")
+    def test_identify_user_mfa_required(self, mock_post, mock_get):
+        mock_get_resp = MagicMock()
+        mock_get_resp.text = "<html>window.csrf = 'init-csrf';</html>"
+        mock_get.return_value = mock_get_resp
+
+        mock_post_resp = MagicMock()
+        mock_post_resp.status_code = 200
+        mock_post_resp.json.return_value = {
+            "spHeader": {
+                "success": True,
+                "csrf": "csrf-mfa",
+                "authLevel": "MFA_REQUIRED",
+            },
+            "spData": {
+                "allCredentials": [{"type": "SMS"}],
+            },
+        }
+        mock_post.return_value = mock_post_resp
+
+        res = self.client.identify_user("user@example.com")
+        self.assertEqual(res["spHeader"]["authLevel"], "MFA_REQUIRED")
+        self.assertEqual(self.client.username, "user@example.com")
+
+    @patch("requests.Session.get")
+    @patch("requests.Session.post")
+    def test_identify_user_session_authenticated(self, mock_post, mock_get):
+        mock_get_resp = MagicMock()
+        mock_get_resp.text = "<html>window.csrf = 'init-csrf';</html>"
+        mock_get.return_value = mock_get_resp
+
+        mock_post_resp = MagicMock()
+        mock_post_resp.status_code = 200
+        mock_post_resp.json.return_value = {
+            "spHeader": {
+                "success": True,
+                "csrf": "csrf-sess",
+                "authLevel": "SESSION_AUTHENTICATED",
+                "username": "existing@example.com",
+            },
+            "spData": {},
+        }
+        mock_post.return_value = mock_post_resp
+
+        res = self.client.identify_user("user@example.com")
+        self.assertEqual(res["spHeader"]["authLevel"], "SESSION_AUTHENTICATED")
+        self.assertEqual(self.client.username, "existing@example.com")
+
+    @patch("requests.Session.get")
+    @patch("requests.Session.post")
+    def test_login_mfa_required_raises_exception(self, mock_post, mock_get):
+        mock_get_resp = MagicMock()
+        mock_get_resp.text = "<html>window.csrf = 'init-csrf';</html>"
+        mock_get.return_value = mock_get_resp
+
+        mock_post_resp = MagicMock()
+        mock_post_resp.status_code = 200
+        mock_post_resp.json.return_value = {
+            "spHeader": {
+                "success": True,
+                "csrf": "csrf-mfa",
+                "authLevel": "MFA_REQUIRED",
+            },
+            "spData": {
+                "allCredentials": [{"type": "SMS"}],
+            },
+        }
+        mock_post.return_value = mock_post_resp
+
+        with self.assertRaises(RequireTwoFactorException):
+            self.client.login("user@example.com", "password123")
+
+    def test_request_2fa_challenge_mock_mode(self):
+        mock_client = EmpowerDashboardClient(session_file=Path("/tmp/dummy.json"), mock_mode=True)
+        res = mock_client.request_2fa_challenge(mode="SMS")
+        self.assertTrue(res["spHeader"]["success"])
+
+    def test_identify_user_mock_mode(self):
+        mock_client = EmpowerDashboardClient(session_file=Path("/tmp/dummy.json"), mock_mode=True)
+        res = mock_client.identify_user("user@example.com")
+        self.assertEqual(res["spHeader"]["authLevel"], "USER_REMEMBERED")
+        self.assertEqual(mock_client.username, "user@example.com")
+
+    @patch("requests.Session.get")
+    @patch("requests.Session.post")
+    def test_identify_user_sets_username_from_response(self, mock_post, mock_get):
+        mock_get_resp = MagicMock()
+        mock_get_resp.text = "<html>window.csrf = 'init-csrf';</html>"
+        mock_get.return_value = mock_get_resp
+
+        mock_post_resp = MagicMock()
+        mock_post_resp.status_code = 200
+        mock_post_resp.json.return_value = {
+            "spHeader": {
+                "success": True,
+                "csrf": "csrf-test",
+                "authLevel": "USER_IDENTIFIED",
+                "username": "response-user@example.com",
+            },
+            "spData": {},
+        }
+        mock_post.return_value = mock_post_resp
+
+        res = self.client.identify_user("input-user@example.com")
+        self.assertEqual(self.client.username, "response-user@example.com")
+
 
 class TestClientDataParsing(unittest.TestCase):
     def setUp(self):
