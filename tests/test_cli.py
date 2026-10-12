@@ -1481,6 +1481,71 @@ class TestCliMerge(unittest.TestCase):
             self.assertIn("NEW_TX", by_id)
             self.assertIn("1 pruned", stdout_buf.getvalue())
 
+    @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
+    def test_merge_cli_skips_pruning_for_sandbox_mode(self, mock_txs):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text(
+                json.dumps({"user_transaction_id": "PENDING_STALE", "transaction_date": "2026-09-10", "status": "pending", "amount": 25.0}) + "\n",
+                encoding="utf-8",
+            )
+            res = self._mk_result([
+                {"user_transaction_id": "NEW_TX", "transaction_date": "2026-09-20", "status": "posted", "amount": 7.0},
+            ])
+            res.mode = "sandbox_mock"
+            mock_txs.return_value = res
+
+            stdout_buf = io.StringIO()
+            argv = [
+                "empower", "--transactions", "--merge",
+                "--output-transactions", str(out),
+                "--session-file", "/nonexistent/session.json", "--mock",
+            ]
+            with patch.object(sys, "argv", argv), patch("sys.stdout", stdout_buf):
+                self.assertEqual(cli_main(), 0)
+
+            records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+            by_id = {r["user_transaction_id"]: r for r in records}
+            self.assertIn("PENDING_STALE", by_id)
+            self.assertIn("NEW_TX", by_id)
+            self.assertNotIn("pruned", stdout_buf.getvalue())
+
+    @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
+    def test_merge_cli_pruning_honors_returned_bounds_when_narrower(self, mock_txs):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text(
+                json.dumps({"user_transaction_id": "PENDING_EARLY", "transaction_date": "2026-09-05", "status": "pending", "amount": 25.0}) + "\n" +
+                json.dumps({"user_transaction_id": "PENDING_IN_BOUNDS", "transaction_date": "2026-09-20", "status": "pending", "amount": 15.0}) + "\n",
+                encoding="utf-8",
+            )
+            res = self._mk_result([
+                {"user_transaction_id": "NEW_TX", "transaction_date": "2026-09-25", "status": "posted", "amount": 7.0},
+            ])
+            res.start_date = "2026-09-15"
+            res.end_date = "2026-10-01"
+            mock_txs.return_value = res
+
+            stdout_buf = io.StringIO()
+            argv = [
+                "empower", "--transactions", "--merge",
+                "--start-date", "2026-09-01",
+                "--end-date", "2026-10-01",
+                "--output-transactions", str(out),
+                "--session-file", "/nonexistent/session.json", "--mock",
+            ]
+            with patch.object(sys, "argv", argv), patch("sys.stdout", stdout_buf):
+                self.assertEqual(cli_main(), 0)
+
+            records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+            by_id = {r["user_transaction_id"]: r for r in records}
+            # PENDING_EARLY (2026-09-05) is before response start_date (2026-09-15), so it is preserved
+            self.assertIn("PENDING_EARLY", by_id)
+            # PENDING_IN_BOUNDS (2026-09-20) is within returned window and missing from fetch, so it is pruned
+            self.assertNotIn("PENDING_IN_BOUNDS", by_id)
+            self.assertIn("NEW_TX", by_id)
+            self.assertIn("1 pruned", stdout_buf.getvalue())
+
 
 class TestSafeOutputPath(unittest.TestCase):
     def test_resolves_regular_path_and_rejects_symlink(self):

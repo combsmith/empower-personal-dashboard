@@ -1240,10 +1240,12 @@ def _merge_into_archive(args, existing_records, transactions_res, progress_file,
             and not (getattr(args, "beancount", False) or getattr(args, "format", None) == "beancount")
         )
 
+    is_sandbox = getattr(transactions_res, "mode", "") == "sandbox_mock"
     prune_enabled = bool(
         not getattr(args, "no_prune", False)
         and not is_limited
         and not getattr(args, "account_id", None)
+        and not is_sandbox
         and start_date
         and end_date
     )
@@ -1315,8 +1317,10 @@ def _fetch_transactions(args, client, progress_file):
             )
 
             if existing_records:
-                eff_start = start_date or getattr(transactions_res, "start_date", None)
-                eff_end = end_date or getattr(transactions_res, "end_date", None)
+                resp_start = getattr(transactions_res, "start_date", None)
+                resp_end = getattr(transactions_res, "end_date", None)
+                eff_start = max(start_date, resp_start) if (start_date and resp_start) else (resp_start or start_date)
+                eff_end = min(end_date, resp_end) if (end_date and resp_end) else (resp_end or end_date)
                 transactions_res = _merge_into_archive(
                     args,
                     existing_records,
