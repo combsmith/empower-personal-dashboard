@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -15,6 +16,9 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from empower_personal_dashboard.cli import main as cli_main
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_SUBPROCESS_ENV = dict(os.environ, PYTHONPATH=str(_REPO_ROOT))
 
 class TestCLI(unittest.TestCase):
     def test_cli_sandbox_all_with_csv(self):
@@ -1249,6 +1253,142 @@ class TestCliLoginChaining(unittest.TestCase):
             self.assertEqual(ret, 0)
             mock_interactive_login.assert_called_once()
             client_mock.fetch_balances.assert_called_once()
+
+
+class TestCliProcessConcurrency(unittest.TestCase):
+    """Multi-process end-to-end concurrency tests verifying OS flock serialization."""
+
+    def test_subprocess_merge_lock_timeout_exits_nonzero(self):
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            original = '{"user_transaction_id": "INIT"}\n'
+            out.write_text(original, encoding="utf-8")
+            fd = os.open(tmpdir, os.O_RDONLY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                res = subprocess.run([
+                    sys.executable, "-u", "-m", "empower_personal_dashboard.cli",
+                    "--transactions", "--merge",
+                    "--output-transactions", str(out),
+                    "--merge-lock-timeout", "0.1",
+                    "--mock",
+                ], capture_output=True, text=True, env=_SUBPROCESS_ENV)
+                self.assertEqual(res.returncode, 1)
+                self.assertIn("[*] Another --merge is running for this archive; waiting...", res.stdout)
+                self.assertIn("Timed out waiting for archive lock", res.stderr)
+                self.assertIn("The archive was left unchanged.", res.stderr)
+                self.assertEqual(out.read_text(encoding="utf-8"), original)
+            finally:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    def test_subprocess_merge_lock_released_in_flight(self):
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text('{"user_transaction_id": "INIT"}\n', encoding="utf-8")
+            fd = os.open(tmpdir, os.O_RDONLY)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            p = subprocess.Popen([
+                sys.executable, "-u", "-m", "empower_personal_dashboard.cli",
+                "--transactions", "--merge",
+                "--output-transactions", str(out),
+                "--merge-lock-timeout", "10.0",
+                "--mock",
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_SUBPROCESS_ENV)
+            collected = []
+            lock_released = False
+            try:
+                while True:
+                    line = p.stdout.readline()
+                    if not line:
+                        break
+                    collected.append(line)
+                    if "[*] Another --merge is running for this archive; waiting..." in line:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        os.close(fd)
+                        lock_released = True
+                        break
+            finally:
+                if not lock_released:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        os.close(fd)
+                    except OSError:
+                        pass
+
+            rest_stdout, stderr = p.communicate()
+            full_stdout = "".join(collected) + rest_stdout
+            self.assertTrue(lock_released)
+            self.assertEqual(p.returncode, 0, f"Error: {stderr}")
+            self.assertIn("[*] Another --merge is running for this archive; waiting...", full_stdout)
+            self.assertIn("Transactions saved to:", full_stdout)
+
+    def test_subprocess_merge_lock_quiet_suppresses_waiting_notice(self):
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            fd = os.open(tmpdir, os.O_RDONLY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                res = subprocess.run([
+                    sys.executable, "-u", "-m", "empower_personal_dashboard.cli",
+                    "--transactions", "--merge",
+                    "--output-transactions", str(out),
+                    "--merge-lock-timeout", "0.1",
+                    "--quiet",
+                    "--mock",
+                ], capture_output=True, text=True, env=_SUBPROCESS_ENV)
+                self.assertEqual(res.returncode, 1)
+                self.assertNotIn("[*] Another --merge is running", res.stdout)
+                self.assertIn("Timed out waiting for archive lock", res.stderr)
+            finally:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    def test_subprocess_concurrent_merges_serialize_cleanly(self):
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text('{"user_transaction_id": "T_INIT", "amount": 1.0}\n', encoding="utf-8")
+            cmd = [
+                sys.executable, "-u", "-m", "empower_personal_dashboard.cli",
+                "--transactions", "--merge",
+                "--output-transactions", str(out),
+                "--merge-lock-timeout", "10.0",
+                "--mock",
+            ]
+            p1 = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_SUBPROCESS_ENV)
+            p2 = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_SUBPROCESS_ENV)
+            out1, err1 = p1.communicate()
+            out2, err2 = p2.communicate()
+            self.assertEqual(p1.returncode, 0, f"P1 error: {err1}")
+            self.assertEqual(p2.returncode, 0, f"P2 error: {err2}")
+            lines = [l for l in out.read_text(encoding="utf-8").strip().split("\n") if l]
+            self.assertEqual(len(lines), 5)
 
 
 if __name__ == "__main__":
