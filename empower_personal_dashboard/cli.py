@@ -534,7 +534,20 @@ def interactive_login(
     print("  Empower Personal Dashboard — Login & 2FA Setup")
     print("=" * 68)
 
-    email = cli_email or os.environ.get("EMPOWER_USERNAME") or os.environ.get("PERSONAL_CAPITAL_EMAIL")
+    email = (
+        cli_email
+        or os.environ.get("EMPOWER_USERNAME")
+        or os.environ.get("PERSONAL_CAPITAL_EMAIL")
+        or getattr(client, "username", None)
+    )
+    if not email and session_file.exists():
+        try:
+            with open(session_file, "r", encoding="utf-8") as f:
+                saved_sess = json.load(f)
+                email = saved_sess.get("username")
+        except Exception:
+            pass
+
     if not email:
         try:
             email = input("Empower Email / Username: ").strip()
@@ -542,20 +555,29 @@ def interactive_login(
             print("\n[!] Canceled.", file=sys.stderr)
             return 1
 
-    password = cli_password or os.environ.get("EMPOWER_PASSWORD") or os.environ.get("PERSONAL_CAPITAL_PASSWORD")
-    if not password:
-        try:
-            password = getpass.getpass("Empower Password: ")
-        except (EOFError, KeyboardInterrupt):
-            print("\n[!] Canceled.", file=sys.stderr)
-            return 1
-
     try:
         print(f"[*] Identifying user '{email}'...")
-        try:
-            client.login(username=email, password=password)
-            print("[+] Login successful! No additional 2FA needed for this device.")
-        except RequireTwoFactorException:
+        ident_res = client.identify_user(username=email)
+        sp_header = ident_res.get("spHeader", {})
+        auth_level = sp_header.get("authLevel", "")
+        device_name = sp_header.get("deviceName", "Empower CLI Client")
+
+        password = cli_password or os.environ.get("EMPOWER_PASSWORD") or os.environ.get("PERSONAL_CAPITAL_PASSWORD")
+
+        if auth_level == "USER_REMEMBERED":
+            print(f"[+] Device recognized ('{device_name}'). No SMS/Email 2FA challenge required.")
+            if not password:
+                try:
+                    password = getpass.getpass("Empower Password: ")
+                except (EOFError, KeyboardInterrupt):
+                    print("\n[!] Canceled.", file=sys.stderr)
+                    return 1
+
+            print("[*] Authenticating password to resume session...")
+            client.authenticate_password(password=password)
+            print("[+] Login successful! Password authenticated and session resumed.")
+
+        elif auth_level in ("MFA_REQUIRED", "USER_IDENTIFIED", "NONE", ""):
             print("[*] Two-factor authentication (2FA) is required.")
 
             mode = cli_mode
@@ -575,9 +597,29 @@ def interactive_login(
             client.submit_2fa_code(code=code, mode=mode)
             print("[+] 2FA verified successfully.")
 
+            if not password:
+                try:
+                    password = getpass.getpass("Empower Password: ")
+                except (EOFError, KeyboardInterrupt):
+                    print("\n[!] Canceled.", file=sys.stderr)
+                    return 1
+
             print("[*] Finalizing device registration with password...")
             client.authenticate_password(password=password)
             print("[+] Password authenticated and device registered.")
+
+        elif auth_level == "SESSION_AUTHENTICATED":
+            print("[+] Session is already active and authenticated.")
+
+        else:
+            if not password:
+                try:
+                    password = getpass.getpass("Empower Password: ")
+                except (EOFError, KeyboardInterrupt):
+                    print("\n[!] Canceled.", file=sys.stderr)
+                    return 1
+            client.authenticate_password(password=password)
+            print("[+] Login successful! Password authenticated.")
 
         saved_path = client.save_session(session_file)
         print(f"[+] Session saved successfully to: {saved_path} (mode 0600)")

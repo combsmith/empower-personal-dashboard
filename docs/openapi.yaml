@@ -404,6 +404,14 @@ components:
             - 'null'
           description: Upstream status code (0 for success).
           example: 0
+        deviceName:
+          type: string
+          description: Registered client device identifier.
+          example: Empower CLI Client
+        username:
+          type: string
+          description: Associated user account username or email.
+          example: user@example.com
         errors:
           type: array
           description: List of error objects if the request failed or required redirection.

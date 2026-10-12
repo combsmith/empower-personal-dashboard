@@ -1644,6 +1644,100 @@ class TestCliLoginChaining(unittest.TestCase):
             mock_interactive_login.assert_called_once()
             client_mock.fetch_balances.assert_called_once()
 
+    def test_interactive_login_user_remembered_skips_2fa(self):
+        from empower_personal_dashboard.cli import interactive_login
+        import io
+
+        mock_client = MagicMock()
+        mock_client.username = None
+        mock_client.identify_user.return_value = {
+            "spHeader": {
+                "success": True,
+                "authLevel": "USER_REMEMBERED",
+                "deviceName": "Empower CLI Client",
+            }
+        }
+        mock_client.save_session.return_value = Path("/tmp/mock_session.json")
+
+        out = io.StringIO()
+        with patch("sys.stdout", out):
+            code = interactive_login(
+                mock_client,
+                Path("/tmp/mock_session.json"),
+                cli_email="user@example.com",
+                cli_password="secret-password",
+            )
+
+        self.assertEqual(code, 0)
+        mock_client.identify_user.assert_called_once_with(username="user@example.com")
+        mock_client.authenticate_password.assert_called_once_with(password="secret-password")
+        mock_client.request_2fa_challenge.assert_not_called()
+        mock_client.submit_2fa_code.assert_not_called()
+        output_str = out.getvalue()
+        self.assertIn("Device recognized ('Empower CLI Client'). No SMS/Email 2FA challenge required.", output_str)
+        self.assertIn("Password authenticated and session resumed.", output_str)
+
+    def test_interactive_login_mfa_required_performs_full_flow(self):
+        from empower_personal_dashboard.cli import interactive_login
+        import io
+
+        mock_client = MagicMock()
+        mock_client.username = None
+        mock_client.identify_user.return_value = {
+            "spHeader": {
+                "success": True,
+                "authLevel": "MFA_REQUIRED",
+            }
+        }
+        mock_client.save_session.return_value = Path("/tmp/mock_session.json")
+
+        out = io.StringIO()
+        with patch("sys.stdout", out):
+            code = interactive_login(
+                mock_client,
+                Path("/tmp/mock_session.json"),
+                cli_email="user@example.com",
+                cli_password="secret-password",
+                cli_mode="SMS",
+                cli_code="123456",
+            )
+
+        self.assertEqual(code, 0)
+        mock_client.identify_user.assert_called_once_with(username="user@example.com")
+        mock_client.request_2fa_challenge.assert_called_once_with(mode="SMS")
+        mock_client.submit_2fa_code.assert_called_once_with(code="123456", mode="SMS")
+        mock_client.authenticate_password.assert_called_once_with(password="secret-password")
+        output_str = out.getvalue()
+        self.assertIn("Two-factor authentication (2FA) is required.", output_str)
+        self.assertIn("2FA verified successfully.", output_str)
+        self.assertIn("Password authenticated and device registered.", output_str)
+
+    def test_interactive_login_uses_saved_client_username(self):
+        from empower_personal_dashboard.cli import interactive_login
+        import io
+
+        mock_client = MagicMock()
+        mock_client.username = "saved-user@example.com"
+        mock_client.identify_user.return_value = {
+            "spHeader": {
+                "success": True,
+                "authLevel": "USER_REMEMBERED",
+                "deviceName": "Empower CLI Client",
+            }
+        }
+        mock_client.save_session.return_value = Path("/tmp/mock_session.json")
+
+        out = io.StringIO()
+        with patch("sys.stdout", out), patch("builtins.input", side_effect=EOFError):
+            code = interactive_login(
+                mock_client,
+                Path("/tmp/mock_session.json"),
+                cli_password="secret-password",
+            )
+
+        self.assertEqual(code, 0)
+        mock_client.identify_user.assert_called_once_with(username="saved-user@example.com")
+
 
 class TestCliProcessConcurrency(unittest.TestCase):
     """Multi-process end-to-end concurrency tests verifying OS flock serialization."""

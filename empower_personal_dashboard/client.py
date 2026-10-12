@@ -167,6 +167,7 @@ class EmpowerDashboardClient:
         self.log_file = Path(log_file) if log_file else None
         self.session = requests.Session()
         self.csrf: str = ""
+        self.username: Optional[str] = None
         self.available_challenge_methods: List[Dict[str, Any]] = []
 
         # Configure logger
@@ -320,20 +321,32 @@ class EmpowerDashboardClient:
                     err_msg = first_err.get("message", err_msg)
                     err_code = first_err.get("code")
 
-            if err_code in (202, 203) or "session" in err_msg.lower():
+            if err_code in (201, 202, 203) or "session" in err_msg.lower():
                 raise SessionExpiredError(f"Session expired ({err_msg})", status_code=200, error_code=err_code)
 
             raise EmpowerError(f"API request failed: {err_msg}", status_code=200, error_code=err_code, response_body=resp.text)
 
         return res_json
 
-    def login(self, username: str, password: Optional[str] = None) -> Dict[str, Any]:
+    def identify_user(self, username: str) -> Dict[str, Any]:
         """
-        Authenticate user with username and password, or initiate 2FA.
+        Identify user and determine device binding / authentication state.
         Automatically handles unified platform migration (Code 920).
         """
         if self.mock_mode:
-            return {"spHeader": {"success": True, "authLevel": "USER_REMEMBERED"}}
+            self.username = username
+            return {
+                "spHeader": {
+                    "success": True,
+                    "authLevel": "USER_REMEMBERED",
+                    "status": "ACTIVE",
+                    "deviceName": "Empower CLI Client",
+                    "username": username,
+                },
+                "spData": {
+                    "allCredentials": [],
+                },
+            }
 
         initial_csrf = self._get_csrf_from_homepage()
         if not initial_csrf:
@@ -388,10 +401,20 @@ class EmpowerDashboardClient:
         if sp_header.get("csrf"):
             self.csrf = sp_header["csrf"]
 
+        self.username = sp_header.get("username") or username
         # Parse challenge options
         self.available_challenge_methods = sp_data.get("allCredentials", []) or sp_data.get("challengeMethods", [])
+        return res_json
 
+    def login(self, username: str, password: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Authenticate user with username and password, or initiate 2FA.
+        Skips 2FA challenge when the device is recognized (USER_REMEMBERED).
+        """
+        res_json = self.identify_user(username)
+        sp_header = res_json.get("spHeader", {})
         auth_level = sp_header.get("authLevel", "")
+
         if auth_level in ("MFA_REQUIRED", "USER_IDENTIFIED", "NONE", ""):
             raise RequireTwoFactorException(
                 "Two-factor authentication required for this device.",
@@ -405,6 +428,9 @@ class EmpowerDashboardClient:
 
     def request_2fa_challenge(self, mode: str = "SMS") -> Dict[str, Any]:
         """Request 2FA code via SMS or Email."""
+        if self.mock_mode:
+            return {"spHeader": {"success": True, "csrf": "mock-csrf-challenge"}}
+
         mode_upper = mode.upper()
         if mode_upper in ("SMS", "PHONE"):
             endpoint = "/credential/challengeSms"
@@ -446,6 +472,10 @@ class EmpowerDashboardClient:
 
     def submit_2fa_code(self, code: str, mode: str = "SMS") -> Dict[str, Any]:
         """Submit 2FA verification code."""
+        if self.mock_mode:
+            self.csrf = "mock-csrf-authed"
+            return {"spHeader": {"success": True, "csrf": "mock-csrf-authed"}}
+
         mode_upper = mode.upper()
         if mode_upper in ("SMS", "PHONE"):
             endpoint = "/credential/authenticateSms"
@@ -485,6 +515,20 @@ class EmpowerDashboardClient:
 
     def authenticate_password(self, password: str, device_name: str = "Empower CLI Client") -> Dict[str, Any]:
         """Submit account password and bind device for persistent sessions."""
+        if self.mock_mode:
+            self.csrf = "mock-csrf-token"
+            return {
+                "spHeader": {
+                    "success": True,
+                    "authLevel": "SESSION_AUTHENTICATED",
+                    "status": "ACTIVE",
+                    "deviceName": device_name,
+                    "username": self.username or "user@example.com",
+                    "csrf": "mock-csrf-token",
+                },
+                "spData": {},
+            }
+
         payload = {
             "bindDevice": "true",
             "deviceName": device_name,
@@ -514,6 +558,8 @@ class EmpowerDashboardClient:
 
         if sp_header.get("csrf"):
             self.csrf = sp_header["csrf"]
+        if sp_header.get("username"):
+            self.username = sp_header["username"]
 
         return res_json
 
@@ -526,13 +572,15 @@ class EmpowerDashboardClient:
         target_path = _safe_fs_path(filepath or self.session_file, description="session file path")
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
-        session_data = {
+        session_data: Dict[str, Any] = {
             "version": 2,
             "saved_at": datetime.now(timezone.utc).isoformat(),
             "base_url": self.base_url,
             "csrf": self.csrf,
             "cookies": self._serialize_cookies(),
         }
+        if self.username:
+            session_data["username"] = self.username
 
         fd, tmp_file = tempfile.mkstemp(dir=target_path.parent, prefix=".session_", suffix=".tmp")
         try:
@@ -652,6 +700,8 @@ class EmpowerDashboardClient:
                 data = json.load(f)
 
             self.csrf = data.get("csrf", "")
+            if data.get("username"):
+                self.username = data["username"]
             if data.get("base_url"):
                 self.base_url = data["base_url"].rstrip("/")
                 self.api_endpoint = f"{self.base_url}/api"

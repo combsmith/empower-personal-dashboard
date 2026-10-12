@@ -405,6 +405,128 @@ class TestClientAuthentication(unittest.TestCase):
         self.assertTrue(res["spHeader"]["success"])
         self.assertEqual(self.client.csrf, "authed-csrf")
 
+    @patch("requests.Session.get")
+    @patch("requests.Session.post")
+    def test_identify_user_success_user_remembered(self, mock_post, mock_get):
+        mock_get_resp = MagicMock()
+        mock_get_resp.text = "<html>window.csrf = 'init-csrf';</html>"
+        mock_get.return_value = mock_get_resp
+
+        mock_post_resp = MagicMock()
+        mock_post_resp.status_code = 200
+        mock_post_resp.json.return_value = {
+            "spHeader": {
+                "success": True,
+                "csrf": "csrf-user-rem",
+                "authLevel": "USER_REMEMBERED",
+                "status": "ACTIVE",
+                "deviceName": "Empower CLI Client",
+                "username": "user@example.com",
+            },
+            "spData": {
+                "allCredentials": [],
+            },
+        }
+        mock_post.return_value = mock_post_resp
+
+        res = self.client.identify_user("user@example.com")
+        self.assertEqual(res["spHeader"]["authLevel"], "USER_REMEMBERED")
+        self.assertEqual(res["spHeader"]["deviceName"], "Empower CLI Client")
+        self.assertEqual(self.client.username, "user@example.com")
+        self.assertEqual(self.client.csrf, "csrf-user-rem")
+
+    @patch("requests.Session.get")
+    @patch("requests.Session.post")
+    def test_login_user_remembered_skips_2fa_and_authenticates_password(self, mock_post, mock_get):
+        mock_get_resp = MagicMock()
+        mock_get_resp.text = "<html>window.csrf = 'init-csrf';</html>"
+        mock_get.return_value = mock_get_resp
+
+        resp_identify = MagicMock()
+        resp_identify.status_code = 200
+        resp_identify.json.return_value = {
+            "spHeader": {
+                "success": True,
+                "csrf": "csrf-rem",
+                "authLevel": "USER_REMEMBERED",
+                "deviceName": "Empower CLI Client",
+            },
+            "spData": {},
+        }
+
+        resp_auth_pw = MagicMock()
+        resp_auth_pw.status_code = 200
+        resp_auth_pw.json.return_value = {
+            "spHeader": {
+                "success": True,
+                "csrf": "csrf-authed",
+                "authLevel": "SESSION_AUTHENTICATED",
+            },
+            "spData": {},
+        }
+
+        mock_post.side_effect = [resp_identify, resp_auth_pw]
+
+        # Should NOT raise RequireTwoFactorException
+        res = self.client.login("user@example.com", "password123")
+        self.assertEqual(res["spHeader"]["authLevel"], "SESSION_AUTHENTICATED")
+        self.assertEqual(self.client.csrf, "csrf-authed")
+        self.assertEqual(mock_post.call_count, 2)
+        # Verify first call was /login/identifyUser and second was /credential/authenticatePassword
+        self.assertTrue(mock_post.call_args_list[0][0][0].endswith("/login/identifyUser"))
+        self.assertTrue(mock_post.call_args_list[1][0][0].endswith("/credential/authenticatePassword"))
+
+    @patch("requests.Session.get")
+    @patch("requests.Session.post")
+    def test_login_user_remembered_without_password_returns_response(self, mock_post, mock_get):
+        mock_get_resp = MagicMock()
+        mock_get_resp.text = "<html>window.csrf = 'init-csrf';</html>"
+        mock_get.return_value = mock_get_resp
+
+        resp_identify = MagicMock()
+        resp_identify.status_code = 200
+        resp_identify.json.return_value = {
+            "spHeader": {
+                "success": True,
+                "csrf": "csrf-rem",
+                "authLevel": "USER_REMEMBERED",
+                "deviceName": "Empower CLI Client",
+            },
+            "spData": {},
+        }
+        mock_post.return_value = resp_identify
+
+        res = self.client.login("user@example.com")
+        self.assertEqual(res["spHeader"]["authLevel"], "USER_REMEMBERED")
+        self.assertEqual(mock_post.call_count, 1)
+
+    @patch("requests.Session.post")
+    def test_fetch_raises_session_expired_on_code_201(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "spHeader": {
+                "success": False,
+                "errors": [{"code": 201, "message": "Session expired"}],
+            }
+        }
+        mock_post.return_value = mock_resp
+
+        with self.assertRaises(SessionExpiredError):
+            self.client.fetch("/test/endpoint")
+
+    def test_save_and_load_session_preserves_username(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sess_path = Path(tmpdir) / "test_session.json"
+            self.client.username = "synthetic-user@example.com"
+            self.client.csrf = "synthetic-csrf"
+            self.client.save_session(sess_path)
+
+            new_client = EmpowerDashboardClient(session_file=sess_path, mock_mode=False)
+            self.assertEqual(new_client.username, "synthetic-user@example.com")
+            self.assertEqual(new_client.csrf, "synthetic-csrf")
+
 
 class TestClientDataParsing(unittest.TestCase):
     def setUp(self):
