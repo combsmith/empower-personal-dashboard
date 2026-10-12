@@ -786,6 +786,32 @@ class TestCliMerge(unittest.TestCase):
                 self.assertTrue(executed)
                 self.assertGreaterEqual(calls, 2)
 
+    def test_archive_lock_final_attempt_after_last_sleep(self):
+        import errno
+        from empower_personal_dashboard.cli import _archive_lock
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            calls = 0
+
+            def mock_flock(fd, op):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    e = OSError("busy")
+                    e.errno = errno.EAGAIN
+                    raise e
+
+            # Timeout shorter than poll interval: the single post-sleep retry must still run.
+            with patch("fcntl.flock", side_effect=mock_flock):
+                with _archive_lock(out, timeout=0.01, poll_interval=0.5, quiet=True):
+                    pass
+            self.assertEqual(calls, 2)
+
     def test_archive_lock_retries_on_eacces(self):
         import errno
         from empower_personal_dashboard.cli import _archive_lock

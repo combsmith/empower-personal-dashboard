@@ -1056,8 +1056,7 @@ def _wait_for_archive_lock(
         sleep_time = min(poll_interval, max(0.0, deadline - time.monotonic()))
         if sleep_time > 0:
             time.sleep(sleep_time)
-        if time.monotonic() >= deadline:
-            break
+        # Always retry after the sleep, even when it ran to the deadline.
         if _try_acquire_flock(fcntl_module, fd):
             return True
     return False
