@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Prune stale pending records from authoritative `--merge` windows ([#75](https://github.com/petry-projects/empower-personal-dashboard/issues/75)):
+  - During an authoritative transaction merge, archived pending records whose `transaction_date` falls within the queried date range `[start_date, end_date]` and that are absent from the freshly fetched window are automatically pruned. This prevents posted replacements with re-issued transaction IDs from leaving stale duplicate pending records in the archive.
+  - Historical records outside the queried window, posted records inside the window, and undated records are strictly preserved.
+  - Pruning is automatically bypassed when the fetch is partial (filtered via `--limit` or `--account-id`).
+  - Added `--no-prune` (`--no-merge-prune`) opt-out CLI flag for users wanting strictly additive merge behavior.
+  - The merge progress summary reports the count of pruned records.
 - `--merge-lock-timeout` option for transaction archive merges ([#74](https://github.com/petry-projects/empower-personal-dashboard/issues/74)):
   - Retries lock acquisition with a waiting notice (`[*] Another --merge is running for this archive; waiting...`) if the archive lock is busy.
   - Times out cleanly after a configurable duration (default: 60s) with a non-zero exit code while leaving the existing archive untouched, preventing unattended cron jobs or agents from hanging indefinitely on stalled merges.

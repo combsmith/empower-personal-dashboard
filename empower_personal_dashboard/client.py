@@ -803,7 +803,9 @@ class EmpowerDashboardClient:
         raw_txs = sp_data.get("transactions", [])
         # Sort in reverse chronological order (newest first)
         raw_txs.sort(key=lambda x: str(x.get("transactionDate", "")), reverse=True)
+        is_complete = True
         if limit and limit > 0:
+            is_complete = len(raw_txs) <= limit
             raw_txs = raw_txs[:limit]
 
         normalized_txs = []
@@ -845,6 +847,7 @@ class EmpowerDashboardClient:
             net_cashflow=net_cashflow,
             transactions=normalized_txs,
             mode="live",
+            is_complete=is_complete,
         )
 
     def fetch_histories(

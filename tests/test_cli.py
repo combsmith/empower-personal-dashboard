@@ -442,6 +442,86 @@ class TestMergeTransactionRecords(unittest.TestCase):
         self.assertEqual(second, [keyless, other_keyless])
         self.assertEqual(third, [keyless, other_keyless])
 
+    def test_prune_stale_pending_records_inside_window(self):
+        from empower_personal_dashboard.cli import (
+            merge_transaction_records,
+            prune_stale_pending_records,
+        )
+
+        existing = [
+            {"user_transaction_id": "P1", "transaction_date": "2026-09-10", "status": "pending", "amount": 12.50},
+            {"user_transaction_id": "P2", "transaction_date": "2026-09-15", "status": "pending", "amount": 25.00},
+        ]
+        incoming = [
+            {"user_transaction_id": "POSTED1", "transaction_date": "2026-09-10", "status": "posted", "amount": 12.50},
+            {"user_transaction_id": "P2", "transaction_date": "2026-09-15", "status": "posted", "amount": 25.00},
+        ]
+
+        retained, pruned_count = prune_stale_pending_records(existing, incoming, "2026-09-01", "2026-09-30")
+        self.assertEqual(pruned_count, 1)
+        self.assertEqual([r["user_transaction_id"] for r in retained], ["P2"])
+
+        merged = merge_transaction_records(retained, incoming)
+        ids = [m["user_transaction_id"] for m in merged]
+        self.assertNotIn("P1", ids)
+        self.assertIn("P2", ids)
+        self.assertIn("POSTED1", ids)
+
+    def test_prune_preserves_records_outside_window(self):
+        from empower_personal_dashboard.cli import prune_stale_pending_records
+
+        existing = [
+            {"user_transaction_id": "P_BEFORE", "transaction_date": "2026-08-31", "status": "pending"},
+            {"user_transaction_id": "P_AFTER", "transaction_date": "2026-10-01", "status": "pending"},
+            {"user_transaction_id": "P_INSIDE", "transaction_date": "2026-09-15", "status": "pending"},
+        ]
+        incoming = []
+
+        retained, pruned_count = prune_stale_pending_records(existing, incoming, "2026-09-01", "2026-09-30")
+        self.assertEqual(pruned_count, 1)
+        retained_ids = [r["user_transaction_id"] for r in retained]
+        self.assertIn("P_BEFORE", retained_ids)
+        self.assertIn("P_AFTER", retained_ids)
+        self.assertNotIn("P_INSIDE", retained_ids)
+
+    def test_prune_preserves_posted_records_inside_window(self):
+        from empower_personal_dashboard.cli import prune_stale_pending_records
+
+        existing = [
+            {"user_transaction_id": "POSTED_OLD", "transaction_date": "2026-09-15", "status": "posted"},
+        ]
+        incoming = []
+
+        retained, pruned_count = prune_stale_pending_records(existing, incoming, "2026-09-01", "2026-09-30")
+        self.assertEqual(pruned_count, 0)
+        self.assertEqual([r["user_transaction_id"] for r in retained], ["POSTED_OLD"])
+
+    def test_prune_preserves_undated_records(self):
+        from empower_personal_dashboard.cli import prune_stale_pending_records
+
+        existing = [
+            {"user_transaction_id": "P_UNDATED", "transaction_date": None, "status": "pending"},
+            {"user_transaction_id": "P_BAD_DATE", "transaction_date": "invalid-date", "status": "pending"},
+        ]
+        incoming = []
+
+        retained, pruned_count = prune_stale_pending_records(existing, incoming, "2026-09-01", "2026-09-30")
+        self.assertEqual(pruned_count, 0)
+        self.assertEqual(len(retained), 2)
+
+    def test_prune_unkeyed_pending_records(self):
+        from empower_personal_dashboard.cli import prune_stale_pending_records
+
+        existing = [
+            {"transaction_date": "2026-09-15", "description": "Keyless pending", "status": "pending"},
+        ]
+        incoming = []
+
+        retained, pruned_count = prune_stale_pending_records(existing, incoming, "2026-09-01", "2026-09-30")
+        self.assertEqual(pruned_count, 1)
+        self.assertEqual(len(retained), 0)
+
+
 
 class TestCliMerge(unittest.TestCase):
     def _mk_result(self, transactions):
@@ -1185,6 +1265,316 @@ class TestCliMerge(unittest.TestCase):
 
             records = [json.loads(line) for line in default_out.read_text(encoding="utf-8").splitlines() if line.strip()]
             self.assertEqual([r["user_transaction_id"] for r in records], ["TX3", "OLD1"])
+
+    @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
+    def test_merge_cli_prunes_stale_pending_and_reports_count_in_summary(self, mock_txs):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text(
+                json.dumps({"user_transaction_id": "OLD1", "transaction_date": "2020-01-15", "status": "posted", "amount": 10.0}) + "\n"
+                + json.dumps({"user_transaction_id": "PENDING_STALE", "transaction_date": "2026-09-10", "status": "pending", "amount": 25.0}) + "\n",
+                encoding="utf-8",
+            )
+            mock_txs.return_value = self._mk_result([
+                {"user_transaction_id": "POSTED_REPLACEMENT", "transaction_date": "2026-09-10", "status": "posted", "amount": 25.0},
+                {"user_transaction_id": "NEW_TX", "transaction_date": "2026-09-20", "status": "posted", "amount": 7.0},
+            ])
+
+            stdout_buf = io.StringIO()
+            stderr_buf = io.StringIO()
+            argv = [
+                "empower", "--transactions", "--merge",
+                "--output-transactions", str(out),
+                "--session-file", "/nonexistent/session.json", "--mock",
+            ]
+            with patch.object(sys, "argv", argv), patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+                code = cli_main()
+
+            self.assertEqual(code, 0, stderr_buf.getvalue())
+            records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+            by_id = {r["user_transaction_id"]: r for r in records}
+            self.assertIn("OLD1", by_id)
+            self.assertIn("POSTED_REPLACEMENT", by_id)
+            self.assertIn("NEW_TX", by_id)
+            self.assertNotIn("PENDING_STALE", by_id)
+            self.assertEqual(len(records), 3)
+
+            out_text = stdout_buf.getvalue()
+            self.assertIn("[+] Merge:", out_text)
+            self.assertIn("1 pruned", out_text)
+
+    @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
+    def test_merge_cli_records_outside_window_never_removed(self, mock_txs):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text(
+                json.dumps({"user_transaction_id": "PEND_BEFORE", "transaction_date": "2026-08-15", "status": "pending", "amount": 10.0}) + "\n"
+                + json.dumps({"user_transaction_id": "PEND_INSIDE", "transaction_date": "2026-09-10", "status": "pending", "amount": 20.0}) + "\n",
+                encoding="utf-8",
+            )
+            # Query range explicitly set to 2026-09-01 to 2026-09-30
+            mock_txs.return_value = self._mk_result([
+                {"user_transaction_id": "TX_IN", "transaction_date": "2026-09-10", "status": "posted", "amount": 20.0},
+            ])
+
+            argv = [
+                "empower", "--transactions", "--merge",
+                "--start-date", "2026-09-01",
+                "--end-date", "2026-09-30",
+                "--output-transactions", str(out),
+                "--quiet", "--session-file", "/nonexistent/session.json", "--mock",
+            ]
+            with patch.object(sys, "argv", argv):
+                self.assertEqual(cli_main(), 0)
+
+            records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+            by_id = {r["user_transaction_id"]: r for r in records}
+            # Record before the queried window is preserved
+            self.assertIn("PEND_BEFORE", by_id)
+            # Record inside the queried window is pruned
+            self.assertNotIn("PEND_INSIDE", by_id)
+            self.assertIn("TX_IN", by_id)
+            self.assertEqual(len(records), 2)
+
+    @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
+    def test_merge_cli_no_prune_when_limited(self, mock_txs):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text(
+                json.dumps({"user_transaction_id": "PENDING_STALE", "transaction_date": "2026-09-10", "status": "pending", "amount": 25.0}) + "\n",
+                encoding="utf-8",
+            )
+            mock_txs.return_value = self._mk_result([
+                {"user_transaction_id": "NEW_TX", "transaction_date": "2026-09-20", "status": "posted", "amount": 7.0},
+            ])
+
+            stdout_buf = io.StringIO()
+            argv = [
+                "empower", "--transactions", "--merge",
+                "--limit", "10",
+                "--output-transactions", str(out),
+                "--session-file", "/nonexistent/session.json", "--mock",
+            ]
+            with patch.object(sys, "argv", argv), patch("sys.stdout", stdout_buf):
+                self.assertEqual(cli_main(), 0)
+
+            records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+            by_id = {r["user_transaction_id"]: r for r in records}
+            # Stale pending record is NOT pruned because fetch was limited
+            self.assertIn("PENDING_STALE", by_id)
+            self.assertIn("NEW_TX", by_id)
+            self.assertNotIn("pruned", stdout_buf.getvalue())
+
+    @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
+    def test_merge_cli_no_prune_when_account_filtered(self, mock_txs):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text(
+                json.dumps({"user_transaction_id": "PENDING_STALE", "transaction_date": "2026-09-10", "status": "pending", "amount": 25.0}) + "\n",
+                encoding="utf-8",
+            )
+            mock_txs.return_value = self._mk_result([
+                {"user_transaction_id": "NEW_TX", "transaction_date": "2026-09-20", "status": "posted", "amount": 7.0},
+            ])
+
+            stdout_buf = io.StringIO()
+            argv = [
+                "empower", "--transactions", "--merge",
+                "--account-id", "12345",
+                "--output-transactions", str(out),
+                "--session-file", "/nonexistent/session.json", "--mock",
+            ]
+            with patch.object(sys, "argv", argv), patch("sys.stdout", stdout_buf):
+                self.assertEqual(cli_main(), 0)
+
+            records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+            by_id = {r["user_transaction_id"]: r for r in records}
+            # Stale pending record is NOT pruned because fetch was account-filtered
+            self.assertIn("PENDING_STALE", by_id)
+            self.assertIn("NEW_TX", by_id)
+            self.assertNotIn("pruned", stdout_buf.getvalue())
+
+    @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
+    def test_merge_cli_no_prune_with_opt_out_flag(self, mock_txs):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text(
+                json.dumps({"user_transaction_id": "PENDING_STALE", "transaction_date": "2026-09-10", "status": "pending", "amount": 25.0}) + "\n",
+                encoding="utf-8",
+            )
+            mock_txs.return_value = self._mk_result([
+                {"user_transaction_id": "NEW_TX", "transaction_date": "2026-09-20", "status": "posted", "amount": 7.0},
+            ])
+
+            stdout_buf = io.StringIO()
+            argv = [
+                "empower", "--transactions", "--merge",
+                "--no-prune",
+                "--output-transactions", str(out),
+                "--session-file", "/nonexistent/session.json", "--mock",
+            ]
+            with patch.object(sys, "argv", argv), patch("sys.stdout", stdout_buf):
+                self.assertEqual(cli_main(), 0)
+
+            records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+            by_id = {r["user_transaction_id"]: r for r in records}
+            # Stale pending record is NOT pruned because --no-prune was specified
+            self.assertIn("PENDING_STALE", by_id)
+            self.assertIn("NEW_TX", by_id)
+            self.assertNotIn("pruned", stdout_buf.getvalue())
+
+    @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
+    def test_merge_cli_no_prune_when_fetch_incomplete(self, mock_txs):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text(
+                json.dumps({"user_transaction_id": "PENDING_STALE", "transaction_date": "2026-09-10", "status": "pending", "amount": 25.0}) + "\n",
+                encoding="utf-8",
+            )
+            res = self._mk_result([
+                {"user_transaction_id": "NEW_TX", "transaction_date": "2026-09-20", "status": "posted", "amount": 7.0},
+            ])
+            res.is_complete = False
+            mock_txs.return_value = res
+
+            stdout_buf = io.StringIO()
+            argv = [
+                "empower", "--transactions", "--merge",
+                "--output-transactions", str(out),
+                "--session-file", "/nonexistent/session.json", "--mock",
+            ]
+            with patch.object(sys, "argv", argv), patch("sys.stdout", stdout_buf):
+                self.assertEqual(cli_main(), 0)
+
+            records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+            by_id = {r["user_transaction_id"]: r for r in records}
+            # Not pruned: the fetch is not proven to cover the whole window
+            self.assertIn("PENDING_STALE", by_id)
+            self.assertIn("NEW_TX", by_id)
+            self.assertNotIn("pruned", stdout_buf.getvalue())
+
+    @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
+    def test_merge_cli_reports_zero_pruned_when_none_pruned(self, mock_txs):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text(
+                json.dumps({"user_transaction_id": "OLD_POSTED", "transaction_date": "2026-09-05", "status": "posted", "amount": 10.0}) + "\n",
+                encoding="utf-8",
+            )
+            mock_txs.return_value = self._mk_result([
+                {"user_transaction_id": "NEW_TX", "transaction_date": "2026-09-20", "status": "posted", "amount": 7.0},
+            ])
+
+            stdout_buf = io.StringIO()
+            argv = [
+                "empower", "--transactions", "--merge",
+                "--output-transactions", str(out),
+                "--session-file", "/nonexistent/session.json", "--mock",
+            ]
+            with patch.object(sys, "argv", argv), patch("sys.stdout", stdout_buf):
+                self.assertEqual(cli_main(), 0)
+
+            out_text = stdout_buf.getvalue()
+            self.assertIn("[+] Merge:", out_text)
+            self.assertIn("0 pruned", out_text)
+
+    @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
+    def test_merge_cli_prunes_when_beancount_and_limit_present(self, mock_txs):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out_bean = Path(tmpdir) / "ledger.bean"
+            out.write_text(
+                json.dumps({"user_transaction_id": "PENDING_STALE", "transaction_date": "2026-09-10", "status": "pending", "amount": 25.0}) + "\n",
+                encoding="utf-8",
+            )
+            mock_txs.return_value = self._mk_result([
+                {"user_transaction_id": "NEW_TX", "transaction_date": "2026-09-20", "status": "posted", "amount": 7.0},
+            ])
+
+            stdout_buf = io.StringIO()
+            argv = [
+                "empower", "--transactions", "--merge",
+                "--beancount",
+                "--output-beancount", str(out_bean),
+                "--limit", "10",
+                "--output-transactions", str(out),
+                "--session-file", "/nonexistent/session.json", "--mock",
+            ]
+            with patch.object(sys, "argv", argv), patch("sys.stdout", stdout_buf):
+                self.assertEqual(cli_main(), 0)
+
+            records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+            by_id = {r["user_transaction_id"]: r for r in records}
+            # Because --beancount fetches complete window without limit (tx_limit=None),
+            # the fetch is complete and stale pending record is pruned.
+            self.assertNotIn("PENDING_STALE", by_id)
+            self.assertIn("NEW_TX", by_id)
+            self.assertIn("1 pruned", stdout_buf.getvalue())
+
+    @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
+    def test_merge_cli_skips_pruning_for_sandbox_mode(self, mock_txs):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text(
+                json.dumps({"user_transaction_id": "PENDING_STALE", "transaction_date": "2026-09-10", "status": "pending", "amount": 25.0}) + "\n",
+                encoding="utf-8",
+            )
+            res = self._mk_result([
+                {"user_transaction_id": "NEW_TX", "transaction_date": "2026-09-20", "status": "posted", "amount": 7.0},
+            ])
+            res.mode = "sandbox_mock"
+            mock_txs.return_value = res
+
+            stdout_buf = io.StringIO()
+            argv = [
+                "empower", "--transactions", "--merge",
+                "--output-transactions", str(out),
+                "--session-file", "/nonexistent/session.json", "--mock",
+            ]
+            with patch.object(sys, "argv", argv), patch("sys.stdout", stdout_buf):
+                self.assertEqual(cli_main(), 0)
+
+            records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+            by_id = {r["user_transaction_id"]: r for r in records}
+            self.assertIn("PENDING_STALE", by_id)
+            self.assertIn("NEW_TX", by_id)
+            self.assertNotIn("pruned", stdout_buf.getvalue())
+
+    @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
+    def test_merge_cli_pruning_honors_returned_bounds_when_narrower(self, mock_txs):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text(
+                json.dumps({"user_transaction_id": "PENDING_EARLY", "transaction_date": "2026-09-05", "status": "pending", "amount": 25.0}) + "\n" +
+                json.dumps({"user_transaction_id": "PENDING_IN_BOUNDS", "transaction_date": "2026-09-20", "status": "pending", "amount": 15.0}) + "\n",
+                encoding="utf-8",
+            )
+            res = self._mk_result([
+                {"user_transaction_id": "NEW_TX", "transaction_date": "2026-09-25", "status": "posted", "amount": 7.0},
+            ])
+            res.start_date = "2026-09-15"
+            res.end_date = "2026-10-01"
+            mock_txs.return_value = res
+
+            stdout_buf = io.StringIO()
+            argv = [
+                "empower", "--transactions", "--merge",
+                "--start-date", "2026-09-01",
+                "--end-date", "2026-10-01",
+                "--output-transactions", str(out),
+                "--session-file", "/nonexistent/session.json", "--mock",
+            ]
+            with patch.object(sys, "argv", argv), patch("sys.stdout", stdout_buf):
+                self.assertEqual(cli_main(), 0)
+
+            records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+            by_id = {r["user_transaction_id"]: r for r in records}
+            # PENDING_EARLY (2026-09-05) is before response start_date (2026-09-15), so it is preserved
+            self.assertIn("PENDING_EARLY", by_id)
+            # PENDING_IN_BOUNDS (2026-09-20) is within returned window and missing from fetch, so it is pruned
+            self.assertNotIn("PENDING_IN_BOUNDS", by_id)
+            self.assertIn("NEW_TX", by_id)
+            self.assertIn("1 pruned", stdout_buf.getvalue())
 
 
 class TestSafeOutputPath(unittest.TestCase):
