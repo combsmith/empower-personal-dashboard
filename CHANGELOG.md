@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-12
+
+### Added
+- Distinguish `USER_REMEMBERED` from `MFA_REQUIRED` and streamline password-only re-auth ([#54](https://github.com/petry-projects/empower-personal-dashboard/issues/54), [#81](https://github.com/petry-projects/empower-personal-dashboard/pull/81)):
+  - Added dedicated `identify_user(username: str)` method querying `/login/identifyUser` to probe device recognition before 2FA challenge dispatch.
+  - Streamlined `login()` to recognize `USER_REMEMBERED` device-bound state and authenticate with password alone without prompting for SMS/Email 2FA.
+  - Updated CLI `interactive_login` to probe user identity first, display device recognition diagnostics, and cleanly prompt for password.
+  - Added username persistence in `save_session()` and `load_session()`, allowing CLI to retrieve username from existing session file when `--email` is omitted.
+  - Added session expiry Error Code 201 handling across client and OpenAPI contract schemas.
+  - Added sanitization and type validation for session username loading.
+
 ## [0.4.0] - 2026-10-12
 
 ### Added
@@ -102,7 +113,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Authoritative OpenAPI 3.1 specification (`docs/openapi.yaml`) with Redocly CI linting and hermetic contract tests.
 - PyPI onboarding probe, build verification, and Trusted Publishing OIDC workflow.
 
-[Unreleased]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.1.2...v0.2.0
