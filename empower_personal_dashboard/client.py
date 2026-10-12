@@ -328,6 +328,21 @@ class EmpowerDashboardClient:
 
         return res_json
 
+    def _validate_login_response(self, res_json: Any, endpoint_name: str = "login endpoint") -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Validate and extract spHeader and spData from a login response.
+
+        Returns a tuple of (spHeader, spData), raising LoginFailedException if validation fails.
+        """
+        if not isinstance(res_json, dict):
+            raise LoginFailedException(f"Malformed response from {endpoint_name}: expected JSON object")
+        sp_header = res_json.get("spHeader", {})
+        if not isinstance(sp_header, dict):
+            raise LoginFailedException(f"Malformed response from {endpoint_name}: expected spHeader object")
+        sp_data = res_json.get("spData", {})
+        if not isinstance(sp_data, dict):
+            sp_data = {}
+        return sp_header, sp_data
+
     def identify_user(self, username: str) -> Dict[str, Any]:
         """
         Identify user and determine device binding / authentication state.
@@ -374,14 +389,7 @@ class EmpowerDashboardClient:
             res_json = resp.json()
         except ValueError as e:
             raise LoginFailedException(f"Malformed response from login endpoint: {e}") from e
-        if not isinstance(res_json, dict):
-            raise LoginFailedException("Malformed response from login endpoint: expected JSON object")
-        sp_header = res_json.get("spHeader", {})
-        if not isinstance(sp_header, dict):
-            raise LoginFailedException("Malformed response from login endpoint: expected spHeader object")
-        sp_data = res_json.get("spData", {})
-        if not isinstance(sp_data, dict):
-            sp_data = {}
+        sp_header, sp_data = self._validate_login_response(res_json, "login endpoint")
 
         # Handle Account Migration (Error Code 920)
         errors = sp_header.get("errors", [])
@@ -398,14 +406,7 @@ class EmpowerDashboardClient:
                         res_json = resp.json()
                     except (requests.RequestException, ValueError) as e:
                         raise LoginFailedException(f"Failed to reach migrated login endpoint: {e}") from e
-                    if not isinstance(res_json, dict):
-                        raise LoginFailedException("Malformed response from migrated login endpoint: expected JSON object")
-                    sp_header = res_json.get("spHeader", {})
-                    if not isinstance(sp_header, dict):
-                        raise LoginFailedException("Malformed response from migrated login endpoint: expected spHeader object")
-                    sp_data = res_json.get("spData", {})
-                    if not isinstance(sp_data, dict):
-                        sp_data = {}
+                    sp_header, sp_data = self._validate_login_response(res_json, "migrated login endpoint")
                     break
 
         if not sp_header.get("success", False):
