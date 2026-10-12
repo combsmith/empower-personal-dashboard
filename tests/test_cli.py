@@ -6,13 +6,19 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 from empower_personal_dashboard.cli import main as cli_main
+
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+_SUBPROCESS_ENV = dict(os.environ, PYTHONPATH=str(_REPO_ROOT))
 
 class TestCLI(unittest.TestCase):
     def test_cli_sandbox_all_with_csv(self):
@@ -663,6 +669,228 @@ class TestCliMerge(unittest.TestCase):
             # Released on exit: the same lock can be taken again.
             try_lock()
 
+    def test_archive_lock_free_acquires_immediately_without_waiting_message(self):
+        from empower_personal_dashboard.cli import _archive_lock
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            progress_buf = io.StringIO()
+            executed = False
+            with _archive_lock(out, timeout=1.0, progress_file=progress_buf):
+                executed = True
+            self.assertTrue(executed)
+            self.assertEqual(progress_buf.getvalue(), "")
+
+    def test_archive_lock_busy_then_released_within_timeout(self):
+        from empower_personal_dashboard.cli import _archive_lock
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            fd = os.open(tmpdir, os.O_RDONLY)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def delayed_release():
+                time.sleep(0.02)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+            t = threading.Thread(target=delayed_release)
+            t.start()
+            try:
+                progress_buf = io.StringIO()
+                executed = False
+                with _archive_lock(out, timeout=1.0, poll_interval=0.005, progress_file=progress_buf):
+                    executed = True
+                self.assertTrue(executed)
+                self.assertIn("[*] Another --merge is running for this archive; waiting...", progress_buf.getvalue())
+            finally:
+                t.join()
+
+    def test_archive_lock_busy_past_timeout_raises_and_reports_waiting(self):
+        from empower_personal_dashboard.cli import _archive_lock, _ArchiveLockTimeoutError
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            fd = os.open(tmpdir, os.O_RDONLY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                progress_buf = io.StringIO()
+                with self.assertRaises(_ArchiveLockTimeoutError) as ctx:
+                    with _archive_lock(out, timeout=0.03, poll_interval=0.005, progress_file=progress_buf):
+                        pass
+                self.assertIn("Timed out waiting for archive lock", str(ctx.exception))
+                self.assertIn("[*] Another --merge is running for this archive; waiting...", progress_buf.getvalue())
+            finally:
+                os.close(fd)
+
+    def test_archive_lock_closes_fd_on_timeout(self):
+        from empower_personal_dashboard.cli import _archive_lock, _ArchiveLockTimeoutError
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            fd = os.open(tmpdir, os.O_RDONLY)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            closed_fds = []
+            orig_close = os.close
+
+            def tracking_close(f):
+                closed_fds.append(f)
+                orig_close(f)
+
+            try:
+                with patch("empower_personal_dashboard.cli.os.close", side_effect=tracking_close):
+                    with self.assertRaises(_ArchiveLockTimeoutError):
+                        with _archive_lock(out, timeout=0.01, poll_interval=0.005, quiet=True):
+                            pass
+                self.assertGreater(len(closed_fds), 0)
+            finally:
+                orig_close(fd)
+
+    def test_archive_lock_retries_on_eintr(self):
+        import errno
+        from empower_personal_dashboard.cli import _archive_lock
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            calls = 0
+
+            def mock_flock(fd, op):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    e = OSError("Interrupted system call")
+                    e.errno = errno.EINTR
+                    raise e
+
+            with patch("fcntl.flock", side_effect=mock_flock):
+                progress_buf = io.StringIO()
+                executed = False
+                with _archive_lock(out, timeout=1.0, poll_interval=0.005, progress_file=progress_buf):
+                    executed = True
+                self.assertTrue(executed)
+                self.assertGreaterEqual(calls, 2)
+
+    def test_archive_lock_final_attempt_after_last_sleep(self):
+        import errno
+        from empower_personal_dashboard.cli import _archive_lock
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            calls = 0
+
+            def mock_flock(fd, op):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    e = OSError("busy")
+                    e.errno = errno.EAGAIN
+                    raise e
+
+            # Timeout shorter than poll interval: the single post-sleep retry must still run.
+            with patch("fcntl.flock", side_effect=mock_flock):
+                with _archive_lock(out, timeout=0.01, poll_interval=0.5, quiet=True):
+                    pass
+            self.assertEqual(calls, 2)
+
+    def test_archive_lock_retries_on_eacces(self):
+        import errno
+        from empower_personal_dashboard.cli import _archive_lock
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            calls = 0
+
+            def mock_flock(fd, op):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    e = OSError("Permission denied")
+                    e.errno = errno.EACCES
+                    raise e
+
+            with patch("fcntl.flock", side_effect=mock_flock):
+                progress_buf = io.StringIO()
+                executed = False
+                with _archive_lock(out, timeout=1.0, poll_interval=0.005, progress_file=progress_buf):
+                    executed = True
+                self.assertTrue(executed)
+                self.assertGreaterEqual(calls, 2)
+
+    def test_cli_merge_lock_busy_past_timeout_exits_nonzero_and_leaves_archive_untouched(self):
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            original_content = json.dumps({"user_transaction_id": "OLD1", "description": "Coffee", "amount": 5.0}) + "\n"
+            out.write_text(original_content, encoding="utf-8")
+
+            fd = os.open(tmpdir, os.O_RDONLY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                stdout_buf = io.StringIO()
+                stderr_buf = io.StringIO()
+                argv = [
+                    "empower", "--transactions", "--merge",
+                    "--output-transactions", str(out),
+                    "--merge-lock-timeout", "0.03",
+                    "--session-file", "/nonexistent/session.json", "--mock",
+                ]
+                with patch.object(sys, "argv", argv), patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+                    code = cli_main()
+
+                self.assertEqual(code, 1)
+                self.assertIn("[*] Another --merge is running for this archive; waiting...", stdout_buf.getvalue())
+                self.assertIn("Timed out waiting for archive lock", stderr_buf.getvalue())
+                self.assertIn("The archive was left unchanged.", stderr_buf.getvalue())
+                # Archive must be completely untouched!
+                self.assertEqual(out.read_text(encoding="utf-8"), original_content)
+            finally:
+                os.close(fd)
+
+    def test_cli_merge_lock_timeout_invalid_rejected(self):
+        for invalid_val in ["-5", "nan", "inf", "+inf", "-inf", "1e309"]:
+            stderr_buf = io.StringIO()
+            argv = [
+                "empower", "--transactions", "--merge",
+                "--merge-lock-timeout", invalid_val,
+            ]
+            with patch.object(sys, "argv", argv), patch("sys.stderr", stderr_buf):
+                with self.assertRaises(SystemExit) as ctx:
+                    cli_main()
+                self.assertEqual(ctx.exception.code, 2)
+            self.assertIn("--merge-lock-timeout", stderr_buf.getvalue())
+
     def test_archive_lock_does_not_follow_a_symlinked_directory(self):
         # The lock only ever opens a validated path. A symlinked parent is
         # refused by the read and write steps with their own messages, so the
@@ -1025,6 +1253,142 @@ class TestCliLoginChaining(unittest.TestCase):
             self.assertEqual(ret, 0)
             mock_interactive_login.assert_called_once()
             client_mock.fetch_balances.assert_called_once()
+
+
+class TestCliProcessConcurrency(unittest.TestCase):
+    """Multi-process end-to-end concurrency tests verifying OS flock serialization."""
+
+    def test_subprocess_merge_lock_timeout_exits_nonzero(self):
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            original = '{"user_transaction_id": "INIT"}\n'
+            out.write_text(original, encoding="utf-8")
+            fd = os.open(tmpdir, os.O_RDONLY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                res = subprocess.run([
+                    sys.executable, "-u", "-m", "empower_personal_dashboard.cli",
+                    "--transactions", "--merge",
+                    "--output-transactions", str(out),
+                    "--merge-lock-timeout", "0.1",
+                    "--mock",
+                ], capture_output=True, text=True, env=_SUBPROCESS_ENV)
+                self.assertEqual(res.returncode, 1)
+                self.assertIn("[*] Another --merge is running for this archive; waiting...", res.stdout)
+                self.assertIn("Timed out waiting for archive lock", res.stderr)
+                self.assertIn("The archive was left unchanged.", res.stderr)
+                self.assertEqual(out.read_text(encoding="utf-8"), original)
+            finally:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    def test_subprocess_merge_lock_released_in_flight(self):
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text('{"user_transaction_id": "INIT"}\n', encoding="utf-8")
+            fd = os.open(tmpdir, os.O_RDONLY)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            p = subprocess.Popen([
+                sys.executable, "-u", "-m", "empower_personal_dashboard.cli",
+                "--transactions", "--merge",
+                "--output-transactions", str(out),
+                "--merge-lock-timeout", "10.0",
+                "--mock",
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_SUBPROCESS_ENV)
+            collected = []
+            lock_released = False
+            try:
+                while True:
+                    line = p.stdout.readline()
+                    if not line:
+                        break
+                    collected.append(line)
+                    if "[*] Another --merge is running for this archive; waiting..." in line:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        os.close(fd)
+                        lock_released = True
+                        break
+            finally:
+                if not lock_released:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                        os.close(fd)
+                    except OSError:
+                        pass
+
+            rest_stdout, stderr = p.communicate()
+            full_stdout = "".join(collected) + rest_stdout
+            self.assertTrue(lock_released)
+            self.assertEqual(p.returncode, 0, f"Error: {stderr}")
+            self.assertIn("[*] Another --merge is running for this archive; waiting...", full_stdout)
+            self.assertIn("Transactions saved to:", full_stdout)
+
+    def test_subprocess_merge_lock_quiet_suppresses_waiting_notice(self):
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            fd = os.open(tmpdir, os.O_RDONLY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                res = subprocess.run([
+                    sys.executable, "-u", "-m", "empower_personal_dashboard.cli",
+                    "--transactions", "--merge",
+                    "--output-transactions", str(out),
+                    "--merge-lock-timeout", "0.1",
+                    "--quiet",
+                    "--mock",
+                ], capture_output=True, text=True, env=_SUBPROCESS_ENV)
+                self.assertEqual(res.returncode, 1)
+                self.assertNotIn("[*] Another --merge is running", res.stdout)
+                self.assertIn("Timed out waiting for archive lock", res.stderr)
+            finally:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    os.close(fd)
+                except OSError:
+                    pass
+
+    def test_subprocess_concurrent_merges_serialize_cleanly(self):
+        try:
+            import fcntl
+        except ImportError:
+            return
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text('{"user_transaction_id": "T_INIT", "amount": 1.0}\n', encoding="utf-8")
+            cmd = [
+                sys.executable, "-u", "-m", "empower_personal_dashboard.cli",
+                "--transactions", "--merge",
+                "--output-transactions", str(out),
+                "--merge-lock-timeout", "10.0",
+                "--mock",
+            ]
+            p1 = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_SUBPROCESS_ENV)
+            p2 = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=_SUBPROCESS_ENV)
+            out1, err1 = p1.communicate()
+            out2, err2 = p2.communicate()
+            self.assertEqual(p1.returncode, 0, f"P1 error: {err1}")
+            self.assertEqual(p2.returncode, 0, f"P2 error: {err2}")
+            lines = [l for l in out.read_text(encoding="utf-8").strip().split("\n") if l]
+            self.assertEqual(len(lines), 5)
 
 
 if __name__ == "__main__":
