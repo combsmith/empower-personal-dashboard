@@ -527,6 +527,38 @@ class TestClientAuthentication(unittest.TestCase):
             self.assertEqual(new_client.username, "synthetic-user@example.com")
             self.assertEqual(new_client.csrf, "synthetic-csrf")
 
+    def test_load_session_with_non_string_username_leaves_username_unset(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sess_path = Path(tmpdir) / "test_session.json"
+            sess_path.write_text(
+                json.dumps({"version": 1, "username": 12345, "csrf": "synthetic-csrf"}),
+                encoding="utf-8",
+            )
+            client = EmpowerDashboardClient(session_file=sess_path, mock_mode=False)
+            self.assertIsNone(client.username)
+            self.assertEqual(client.csrf, "synthetic-csrf")
+
+            # Also verify list/dict values leave username unset
+            sess_path.write_text(
+                json.dumps({"version": 1, "username": ["invalid", "user"], "csrf": "synthetic-csrf"}),
+                encoding="utf-8",
+            )
+            client = EmpowerDashboardClient(session_file=sess_path, mock_mode=False)
+            self.assertIsNone(client.username)
+
+    def test_load_session_sanitizes_mojibake_username(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sess_path = Path(tmpdir) / "test_session.json"
+            sess_path.write_text(
+                json.dumps({"version": 1, "username": "user\ufffd@example.com", "csrf": "synthetic-csrf"}),
+                encoding="utf-8",
+            )
+            client = EmpowerDashboardClient(session_file=sess_path, mock_mode=False)
+            self.assertEqual(client.username, "user@example.com")
+
+
     @patch("requests.Session.get")
     @patch("requests.Session.post")
     def test_identify_user_mfa_required(self, mock_post, mock_get):

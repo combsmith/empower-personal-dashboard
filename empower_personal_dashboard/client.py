@@ -725,10 +725,11 @@ class EmpowerDashboardClient:
             with open(target_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            self.csrf = data.get("csrf", "")
-            if data.get("username"):
-                self.username = data["username"]
-            if data.get("base_url"):
+            self.csrf = data.get("csrf", "") if isinstance(data.get("csrf"), str) else ""
+            raw_username = data.get("username")
+            if isinstance(raw_username, str):
+                self.username = clean_api_text(raw_username)
+            if data.get("base_url") and isinstance(data.get("base_url"), str):
                 self.base_url = data["base_url"].rstrip("/")
                 self.api_endpoint = f"{self.base_url}/api"
 
