@@ -452,7 +452,7 @@ class EmpowerDashboardClient:
         """Request 2FA code via SMS or Email."""
         mode_upper = mode.upper()
         if mode_upper not in ("SMS", "PHONE", "EMAIL"):
-            raise ValueError(f"Unsupported 2FA mode: {mode}. Must be 'SMS' or 'EMAIL'.")
+            raise ValueError(f"Unsupported 2FA mode: {mode}. Must be 'SMS', 'PHONE', or 'EMAIL'.")
         if self.mock_mode:
             return {"spHeader": {"success": True, "csrf": "mock-csrf-challenge"}}
 
@@ -496,7 +496,7 @@ class EmpowerDashboardClient:
         """Submit 2FA verification code."""
         mode_upper = mode.upper()
         if mode_upper not in ("SMS", "PHONE", "EMAIL"):
-            raise ValueError(f"Unsupported 2FA mode: {mode}. Must be 'SMS' or 'EMAIL'.")
+            raise ValueError(f"Unsupported 2FA mode: {mode}. Must be 'SMS', 'PHONE', or 'EMAIL'.")
         if self.mock_mode:
             self.csrf = "mock-csrf-authed"
             return {"spHeader": {"success": True, "csrf": "mock-csrf-authed"}}
