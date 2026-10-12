@@ -284,7 +284,7 @@ def create_mcp_server(
                 "error_code": "AUTH_REQUIRED",
                 "message": (
                     "Empower session has expired or is not initialized. "
-                    "Please run 'empower --login' in your local terminal to re-authenticate with 2FA."
+                    "Please run 'empower --login' in your local terminal to re-authenticate."
                 ),
             }
         except EmpowerError as e:
@@ -403,7 +403,7 @@ def create_mcp_server(
                 "error_code": "AUTH_REQUIRED",
                 "message": (
                     "Empower session has expired or is not initialized. "
-                    "Please run 'empower --login' in your local terminal to re-authenticate with 2FA."
+                    "Please run 'empower --login' in your local terminal to re-authenticate."
                 ),
             }
         except EmpowerError as e:
@@ -544,7 +544,7 @@ def create_mcp_server(
                 "error_code": "AUTH_REQUIRED",
                 "message": (
                     "Empower session has expired or is not initialized. "
-                    "Please run 'empower --login' in your local terminal to re-authenticate with 2FA."
+                    "Please run 'empower --login' in your local terminal to re-authenticate."
                 ),
             }
         except EmpowerError as e:
@@ -707,7 +707,7 @@ def create_mcp_server(
                 "error_code": "AUTH_REQUIRED",
                 "message": (
                     "Empower session has expired or is not initialized. "
-                    "Please run 'empower --login' in your local terminal to re-authenticate with 2FA."
+                    "Please run 'empower --login' in your local terminal to re-authenticate."
                 ),
             }
         except EmpowerError as e:
@@ -987,7 +987,7 @@ def create_mcp_server(
                 "error_code": "AUTH_REQUIRED",
                 "message": (
                     "Empower session has expired or is not initialized. "
-                    "Please run 'empower --login' in your local terminal to re-authenticate with 2FA."
+                    "Please run 'empower --login' in your local terminal to re-authenticate."
                 ),
             }
         except Exception as e:
@@ -1051,7 +1051,7 @@ def create_mcp_server(
         except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError):
             return (
                 ";; ERROR [AUTH_REQUIRED]: Empower session has expired or is not initialized.\n"
-                ";; Please run 'empower --login' in your local terminal to re-authenticate with 2FA.\n"
+                ";; Please run 'empower --login' in your local terminal to re-authenticate.\n"
             )
         except EmpowerError as e:
             return f";; ERROR [API_ERROR]: Empower API error: {e}\n"
@@ -1072,7 +1072,7 @@ def create_mcp_server(
         except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError):
             return (
                 ";; ERROR [AUTH_REQUIRED]: Empower session has expired or is not initialized.\n"
-                ";; Please run 'empower --login' in your local terminal to re-authenticate with 2FA.\n"
+                ";; Please run 'empower --login' in your local terminal to re-authenticate.\n"
             )
         except EmpowerError as e:
             return f";; ERROR [API_ERROR]: Empower API error: {e}\n"
@@ -1100,7 +1100,7 @@ def create_mcp_server(
         except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError):
             return (
                 ";; ERROR [AUTH_REQUIRED]: Empower session has expired or is not initialized.\n"
-                ";; Please run 'empower --login' in your local terminal to re-authenticate with 2FA.\n"
+                ";; Please run 'empower --login' in your local terminal to re-authenticate.\n"
             )
         except EmpowerError as e:
             return f";; ERROR [API_ERROR]: Empower API error: {e}\n"

@@ -42,6 +42,7 @@ from .client import (
     DEFAULT_SESSION_FILE,
     MIGRATED_BASE_URL,
     EmpowerDashboardClient,
+    _safe_fs_path,
 )
 from .exceptions import (
     EmpowerError,
@@ -49,6 +50,7 @@ from .exceptions import (
     RequireTwoFactorException,
     SessionExpiredError,
 )
+from .sanitizers import clean_api_text
 from .models import DashboardBalances, DashboardHoldings, DashboardTransactions
 
 logger = logging.getLogger(__name__)
@@ -521,6 +523,15 @@ def render_transactions_table(transactions: DashboardTransactions, limit: Option
     return f"{divider}\n{md}\n{divider}"
 
 
+def _prompt_for_password() -> Optional[str]:
+    """Prompt user for password, returning None if canceled."""
+    try:
+        return getpass.getpass("Empower Password: ")
+    except (EOFError, KeyboardInterrupt):
+        print("\n[!] Canceled.", file=sys.stderr)
+        return None
+
+
 def interactive_login(
     client: EmpowerDashboardClient,
     session_file: Path,
@@ -534,7 +545,24 @@ def interactive_login(
     print("  Empower Personal Dashboard — Login & 2FA Setup")
     print("=" * 68)
 
-    email = cli_email or os.environ.get("EMPOWER_USERNAME") or os.environ.get("PERSONAL_CAPITAL_EMAIL")
+    email = (
+        cli_email
+        or os.environ.get("EMPOWER_USERNAME")
+        or os.environ.get("PERSONAL_CAPITAL_EMAIL")
+        or getattr(client, "username", None)
+    )
+    if not email:
+        try:
+            # Validate the (possibly CLI/LLM-supplied) path: rejects NUL bytes and symlinks.
+            safe_session = _safe_fs_path(session_file, description="session file path")
+            if safe_session.exists():
+                with open(safe_session, "r", encoding="utf-8") as f:
+                    saved_sess = json.load(f)
+                if isinstance(saved_sess, dict) and isinstance(saved_sess.get("username"), str):
+                    email = clean_api_text(saved_sess["username"])
+        except (OSError, ValueError) as e:
+            print(f"[!] Ignoring unreadable session file: {e}", file=sys.stderr)
+
     if not email:
         try:
             email = input("Empower Email / Username: ").strip()
@@ -542,20 +570,27 @@ def interactive_login(
             print("\n[!] Canceled.", file=sys.stderr)
             return 1
 
-    password = cli_password or os.environ.get("EMPOWER_PASSWORD") or os.environ.get("PERSONAL_CAPITAL_PASSWORD")
-    if not password:
-        try:
-            password = getpass.getpass("Empower Password: ")
-        except (EOFError, KeyboardInterrupt):
-            print("\n[!] Canceled.", file=sys.stderr)
-            return 1
-
     try:
         print(f"[*] Identifying user '{email}'...")
-        try:
-            client.login(username=email, password=password)
-            print("[+] Login successful! No additional 2FA needed for this device.")
-        except RequireTwoFactorException:
+        ident_res = client.identify_user(username=email)
+        sp_header = ident_res.get("spHeader", {})
+        auth_level = sp_header.get("authLevel", "")
+        device_name = clean_api_text(sp_header.get("deviceName")) or "Empower CLI Client"
+
+        password = cli_password or os.environ.get("EMPOWER_PASSWORD") or os.environ.get("PERSONAL_CAPITAL_PASSWORD")
+
+        if auth_level == "USER_REMEMBERED":
+            print(f"[+] Device recognized ('{device_name}'). No SMS/Email 2FA challenge required.")
+            if not password:
+                password = _prompt_for_password()
+                if password is None:
+                    return 1
+
+            print("[*] Authenticating password to resume session...")
+            client.authenticate_password(password=password)
+            print("[+] Login successful! Password authenticated and session resumed.")
+
+        elif auth_level in ("MFA_REQUIRED", "USER_IDENTIFIED", "NONE", ""):
             print("[*] Two-factor authentication (2FA) is required.")
 
             mode = cli_mode
@@ -575,9 +610,29 @@ def interactive_login(
             client.submit_2fa_code(code=code, mode=mode)
             print("[+] 2FA verified successfully.")
 
+            if not password:
+                password = _prompt_for_password()
+                if password is None:
+                    return 1
+
             print("[*] Finalizing device registration with password...")
             client.authenticate_password(password=password)
             print("[+] Password authenticated and device registered.")
+
+        elif auth_level == "SESSION_AUTHENTICATED":
+            print("[+] Session is already active and authenticated.")
+
+        else:
+            if not password:
+                password = _prompt_for_password()
+                if password is None:
+                    return 1
+            client.authenticate_password(password=password)
+            print("[+] Login successful! Password authenticated.")
+
+        if getattr(client, "mock_mode", False) is True:
+            print("[+] Sandbox mode: synthetic session not persisted.")
+            return 0
 
         saved_path = client.save_session(session_file)
         print(f"[+] Session saved successfully to: {saved_path} (mode 0600)")

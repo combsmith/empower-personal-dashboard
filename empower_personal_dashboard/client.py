@@ -167,6 +167,7 @@ class EmpowerDashboardClient:
         self.log_file = Path(log_file) if log_file else None
         self.session = requests.Session()
         self.csrf: str = ""
+        self.username: Optional[str] = None
         self.available_challenge_methods: List[Dict[str, Any]] = []
 
         # Configure logger
@@ -320,20 +321,47 @@ class EmpowerDashboardClient:
                     err_msg = first_err.get("message", err_msg)
                     err_code = first_err.get("code")
 
-            if err_code in (202, 203) or "session" in err_msg.lower():
+            if err_code in (201, 202, 203) or "session" in err_msg.lower():
                 raise SessionExpiredError(f"Session expired ({err_msg})", status_code=200, error_code=err_code)
 
             raise EmpowerError(f"API request failed: {err_msg}", status_code=200, error_code=err_code, response_body=resp.text)
 
         return res_json
 
-    def login(self, username: str, password: Optional[str] = None) -> Dict[str, Any]:
+    def _validate_login_response(self, res_json: Any, endpoint_name: str = "login endpoint") -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Validate and extract spHeader and spData from a login response.
+
+        Returns a tuple of (spHeader, spData), raising LoginFailedException if validation fails.
         """
-        Authenticate user with username and password, or initiate 2FA.
+        if not isinstance(res_json, dict):
+            raise LoginFailedException(f"Malformed response from {endpoint_name}: expected JSON object")
+        sp_header = res_json.get("spHeader", {})
+        if not isinstance(sp_header, dict):
+            raise LoginFailedException(f"Malformed response from {endpoint_name}: expected spHeader object")
+        sp_data = res_json.get("spData", {})
+        if not isinstance(sp_data, dict):
+            sp_data = {}
+        return sp_header, sp_data
+
+    def identify_user(self, username: str) -> Dict[str, Any]:
+        """
+        Identify user and determine device binding / authentication state.
         Automatically handles unified platform migration (Code 920).
         """
         if self.mock_mode:
-            return {"spHeader": {"success": True, "authLevel": "USER_REMEMBERED"}}
+            self.username = username
+            return {
+                "spHeader": {
+                    "success": True,
+                    "authLevel": "USER_REMEMBERED",
+                    "status": "ACTIVE",
+                    "deviceName": "Empower CLI Client",
+                    "username": username,
+                },
+                "spData": {
+                    "allCredentials": [],
+                },
+            }
 
         initial_csrf = self._get_csrf_from_homepage()
         if not initial_csrf:
@@ -350,13 +378,18 @@ class EmpowerDashboardClient:
             "referrerId": "",
         }
 
-        resp = self.post("/login/identifyUser", payload)
+        try:
+            resp = self.post("/login/identifyUser", payload)
+        except requests.RequestException as e:
+            raise LoginFailedException(f"Failed to reach login endpoint: {e}") from e
         if resp.status_code != 200:
             raise LoginFailedException(f"Failed to reach login endpoint (HTTP {resp.status_code})")
 
-        res_json = resp.json()
-        sp_header = res_json.get("spHeader", {})
-        sp_data = res_json.get("spData", {})
+        try:
+            res_json = resp.json()
+        except ValueError as e:
+            raise LoginFailedException(f"Malformed response from login endpoint: {e}") from e
+        sp_header, sp_data = self._validate_login_response(res_json, "login endpoint")
 
         # Handle Account Migration (Error Code 920)
         errors = sp_header.get("errors", [])
@@ -368,10 +401,12 @@ class EmpowerDashboardClient:
                     self.api_endpoint = f"{self.base_url}/api"
                     new_csrf = self._get_csrf_from_homepage() or initial_csrf
                     payload["csrf"] = new_csrf
-                    resp = self.post("/login/identifyUser", payload)
-                    res_json = resp.json()
-                    sp_header = res_json.get("spHeader", {})
-                    sp_data = res_json.get("spData", {})
+                    try:
+                        resp = self.post("/login/identifyUser", payload)
+                        res_json = resp.json()
+                    except (requests.RequestException, ValueError) as e:
+                        raise LoginFailedException(f"Failed to reach migrated login endpoint: {e}") from e
+                    sp_header, sp_data = self._validate_login_response(res_json, "migrated login endpoint")
                     break
 
         if not sp_header.get("success", False):
@@ -388,10 +423,21 @@ class EmpowerDashboardClient:
         if sp_header.get("csrf"):
             self.csrf = sp_header["csrf"]
 
+        raw_user = sp_header.get("username") or username
+        self.username = clean_api_text(raw_user) if raw_user else None
         # Parse challenge options
         self.available_challenge_methods = sp_data.get("allCredentials", []) or sp_data.get("challengeMethods", [])
+        return res_json
 
+    def login(self, username: str, password: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Authenticate user with username and password, or initiate 2FA.
+        Skips 2FA challenge when the device is recognized (USER_REMEMBERED).
+        """
+        res_json = self.identify_user(username)
+        sp_header = res_json.get("spHeader", {})
         auth_level = sp_header.get("authLevel", "")
+
         if auth_level in ("MFA_REQUIRED", "USER_IDENTIFIED", "NONE", ""):
             raise RequireTwoFactorException(
                 "Two-factor authentication required for this device.",
@@ -406,14 +452,17 @@ class EmpowerDashboardClient:
     def request_2fa_challenge(self, mode: str = "SMS") -> Dict[str, Any]:
         """Request 2FA code via SMS or Email."""
         mode_upper = mode.upper()
+        if mode_upper not in ("SMS", "PHONE", "EMAIL"):
+            raise ValueError(f"Unsupported 2FA mode: {mode}. Must be 'SMS', 'PHONE', or 'EMAIL'.")
+        if self.mock_mode:
+            return {"spHeader": {"success": True, "csrf": "mock-csrf-challenge"}}
+
         if mode_upper in ("SMS", "PHONE"):
             endpoint = "/credential/challengeSms"
             challenge_type = "challengeSMS"
-        elif mode_upper == "EMAIL":
+        else:
             endpoint = "/credential/challengeEmail"
             challenge_type = "challengeEmail"
-        else:
-            raise ValueError(f"Unsupported 2FA mode: {mode}. Must be 'SMS' or 'EMAIL'.")
 
         payload = {
             "challengeReason": "DEVICE_AUTH",
@@ -447,12 +496,16 @@ class EmpowerDashboardClient:
     def submit_2fa_code(self, code: str, mode: str = "SMS") -> Dict[str, Any]:
         """Submit 2FA verification code."""
         mode_upper = mode.upper()
+        if mode_upper not in ("SMS", "PHONE", "EMAIL"):
+            raise ValueError(f"Unsupported 2FA mode: {mode}. Must be 'SMS', 'PHONE', or 'EMAIL'.")
+        if self.mock_mode:
+            self.csrf = "mock-csrf-authed"
+            return {"spHeader": {"success": True, "csrf": "mock-csrf-authed"}}
+
         if mode_upper in ("SMS", "PHONE"):
             endpoint = "/credential/authenticateSms"
-        elif mode_upper == "EMAIL":
-            endpoint = "/credential/authenticateEmailByCode"
         else:
-            raise ValueError(f"Unsupported 2FA mode: {mode}. Must be 'SMS' or 'EMAIL'.")
+            endpoint = "/credential/authenticateEmailByCode"
 
         payload = {
             "challengeReason": "DEVICE_AUTH",
@@ -485,6 +538,20 @@ class EmpowerDashboardClient:
 
     def authenticate_password(self, password: str, device_name: str = "Empower CLI Client") -> Dict[str, Any]:
         """Submit account password and bind device for persistent sessions."""
+        if self.mock_mode:
+            self.csrf = "mock-csrf-token"
+            return {
+                "spHeader": {
+                    "success": True,
+                    "authLevel": "SESSION_AUTHENTICATED",
+                    "status": "ACTIVE",
+                    "deviceName": device_name,
+                    "username": self.username or "user@example.com",
+                    "csrf": "mock-csrf-token",
+                },
+                "spData": {},
+            }
+
         payload = {
             "bindDevice": "true",
             "deviceName": device_name,
@@ -498,8 +565,11 @@ class EmpowerDashboardClient:
         }
 
         resp = self.post("/credential/authenticatePassword", payload)
-        res_json = resp.json()
-        sp_header = res_json.get("spHeader", {})
+        try:
+            res_json = resp.json()
+        except ValueError as e:
+            raise LoginFailedException(f"Malformed response from authentication endpoint: {e}") from e
+        sp_header, sp_data = self._validate_login_response(res_json, "authentication endpoint")
 
         if not sp_header.get("success", False):
             errors = sp_header.get("errors", [])
@@ -514,6 +584,8 @@ class EmpowerDashboardClient:
 
         if sp_header.get("csrf"):
             self.csrf = sp_header["csrf"]
+        if sp_header.get("username"):
+            self.username = clean_api_text(sp_header["username"])
 
         return res_json
 
@@ -526,13 +598,15 @@ class EmpowerDashboardClient:
         target_path = _safe_fs_path(filepath or self.session_file, description="session file path")
         target_path.parent.mkdir(parents=True, exist_ok=True)
 
-        session_data = {
+        session_data: Dict[str, Any] = {
             "version": 2,
             "saved_at": datetime.now(timezone.utc).isoformat(),
             "base_url": self.base_url,
             "csrf": self.csrf,
             "cookies": self._serialize_cookies(),
         }
+        if self.username:
+            session_data["username"] = self.username
 
         fd, tmp_file = tempfile.mkstemp(dir=target_path.parent, prefix=".session_", suffix=".tmp")
         try:
@@ -651,8 +725,11 @@ class EmpowerDashboardClient:
             with open(target_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            self.csrf = data.get("csrf", "")
-            if data.get("base_url"):
+            self.csrf = data.get("csrf", "") if isinstance(data.get("csrf"), str) else ""
+            raw_username = data.get("username")
+            if isinstance(raw_username, str):
+                self.username = clean_api_text(raw_username)
+            if data.get("base_url") and isinstance(data.get("base_url"), str):
                 self.base_url = data["base_url"].rstrip("/")
                 self.api_endpoint = f"{self.base_url}/api"
 
