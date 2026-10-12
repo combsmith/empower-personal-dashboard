@@ -840,6 +840,23 @@ def _is_valid_iso_date(value):
         return False
 
 
+def _is_record_in_incoming(rec, incoming_ids, incoming_unkeyed):
+    """Check if record is present in incoming data by id or canonical form."""
+    tid = rec.get("user_transaction_id")
+    if tid:
+        return str(tid) in incoming_ids
+    return _canonical_record(rec) in incoming_unkeyed
+
+
+def _is_pending_in_window(rec, start_date, end_date):
+    """Check if record has pending status and falls within [start_date, end_date]."""
+    status = str(rec.get("status") or "").strip().lower()
+    if status != "pending":
+        return False
+    tx_date = rec.get("transaction_date")
+    return bool(_is_valid_iso_date(tx_date) and start_date <= tx_date <= end_date)
+
+
 def prune_stale_pending_records(existing, incoming, start_date, end_date):
     """Filter out archived pending records within [start_date, end_date] that are absent from incoming.
 
@@ -850,9 +867,7 @@ def prune_stale_pending_records(existing, incoming, start_date, end_date):
     Returns:
         tuple[list[dict], int]: A tuple of (retained_records, pruned_count).
     """
-    if not (_is_valid_iso_date(start_date) and _is_valid_iso_date(end_date)):
-        return list(existing), 0
-    if start_date > end_date:
+    if not (_is_valid_iso_date(start_date) and _is_valid_iso_date(end_date)) or start_date > end_date:
         return list(existing), 0
 
     incoming_ids = {
@@ -870,25 +885,12 @@ def prune_stale_pending_records(existing, incoming, start_date, end_date):
     pruned_count = 0
 
     for rec in existing:
-        tid = rec.get("user_transaction_id")
-        if tid and str(tid) in incoming_ids:
+        if _is_record_in_incoming(rec, incoming_ids, incoming_unkeyed):
             retained.append(rec)
-            continue
-        if not tid and _canonical_record(rec) in incoming_unkeyed:
-            retained.append(rec)
-            continue
-
-        status = str(rec.get("status") or "").strip().lower()
-        if status != "pending":
-            retained.append(rec)
-            continue
-
-        tx_date = rec.get("transaction_date")
-        if _is_valid_iso_date(tx_date) and start_date <= tx_date <= end_date:
+        elif _is_pending_in_window(rec, start_date, end_date):
             pruned_count += 1
-            continue
-
-        retained.append(rec)
+        else:
+            retained.append(rec)
 
     return retained, pruned_count
 
@@ -1229,12 +1231,18 @@ def _load_merge_archive(args, start_date, progress_file):
     return existing_records, start_date
 
 
-def _merge_into_archive(args, existing_records, transactions_res, progress_file, start_date=None, end_date=None):
+def _merge_into_archive(args, existing_records, transactions_res, progress_file, start_date=None, end_date=None, is_limited=None):
     """Delta-merge the fetched window into the archive, newest-first."""
     fetched_count = len(transactions_res.transactions)
+    if is_limited is None:
+        is_limited = bool(
+            getattr(args, "limit", None)
+            and not (getattr(args, "beancount", False) or getattr(args, "format", None) == "beancount")
+        )
+
     prune_enabled = bool(
         not getattr(args, "no_prune", False)
-        and not getattr(args, "limit", None)
+        and not is_limited
         and not getattr(args, "account_id", None)
         and start_date
         and end_date
@@ -1316,6 +1324,7 @@ def _fetch_transactions(args, client, progress_file):
                     progress_file,
                     start_date=eff_start,
                     end_date=eff_end,
+                    is_limited=bool(tx_limit),
                 )
 
             t_data = transactions_res.to_dict()

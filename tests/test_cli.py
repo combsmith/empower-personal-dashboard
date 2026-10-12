@@ -1448,6 +1448,39 @@ class TestCliMerge(unittest.TestCase):
             self.assertIn("[+] Merge:", out_text)
             self.assertIn("0 pruned", out_text)
 
+    @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
+    def test_merge_cli_prunes_when_beancount_and_limit_present(self, mock_txs):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out_bean = Path(tmpdir) / "ledger.bean"
+            out.write_text(
+                json.dumps({"user_transaction_id": "PENDING_STALE", "transaction_date": "2026-09-10", "status": "pending", "amount": 25.0}) + "\n",
+                encoding="utf-8",
+            )
+            mock_txs.return_value = self._mk_result([
+                {"user_transaction_id": "NEW_TX", "transaction_date": "2026-09-20", "status": "posted", "amount": 7.0},
+            ])
+
+            stdout_buf = io.StringIO()
+            argv = [
+                "empower", "--transactions", "--merge",
+                "--beancount",
+                "--output-beancount", str(out_bean),
+                "--limit", "10",
+                "--output-transactions", str(out),
+                "--session-file", "/nonexistent/session.json", "--mock",
+            ]
+            with patch.object(sys, "argv", argv), patch("sys.stdout", stdout_buf):
+                self.assertEqual(cli_main(), 0)
+
+            records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+            by_id = {r["user_transaction_id"]: r for r in records}
+            # Because --beancount fetches complete window without limit (tx_limit=None),
+            # the fetch is complete and stale pending record is pruned.
+            self.assertNotIn("PENDING_STALE", by_id)
+            self.assertIn("NEW_TX", by_id)
+            self.assertIn("1 pruned", stdout_buf.getvalue())
+
 
 class TestSafeOutputPath(unittest.TestCase):
     def test_resolves_regular_path_and_rejects_symlink(self):
