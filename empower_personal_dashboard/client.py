@@ -374,8 +374,14 @@ class EmpowerDashboardClient:
             res_json = resp.json()
         except ValueError as e:
             raise LoginFailedException(f"Malformed response from login endpoint: {e}") from e
+        if not isinstance(res_json, dict):
+            raise LoginFailedException("Malformed response from login endpoint: expected JSON object")
         sp_header = res_json.get("spHeader", {})
+        if not isinstance(sp_header, dict):
+            raise LoginFailedException("Malformed response from login endpoint: expected spHeader object")
         sp_data = res_json.get("spData", {})
+        if not isinstance(sp_data, dict):
+            sp_data = {}
 
         # Handle Account Migration (Error Code 920)
         errors = sp_header.get("errors", [])
@@ -392,8 +398,14 @@ class EmpowerDashboardClient:
                         res_json = resp.json()
                     except (requests.RequestException, ValueError) as e:
                         raise LoginFailedException(f"Failed to reach migrated login endpoint: {e}") from e
+                    if not isinstance(res_json, dict):
+                        raise LoginFailedException("Malformed response from migrated login endpoint: expected JSON object")
                     sp_header = res_json.get("spHeader", {})
+                    if not isinstance(sp_header, dict):
+                        raise LoginFailedException("Malformed response from migrated login endpoint: expected spHeader object")
                     sp_data = res_json.get("spData", {})
+                    if not isinstance(sp_data, dict):
+                        sp_data = {}
                     break
 
         if not sp_header.get("success", False):
@@ -556,8 +568,15 @@ class EmpowerDashboardClient:
         }
 
         resp = self.post("/credential/authenticatePassword", payload)
-        res_json = resp.json()
+        try:
+            res_json = resp.json()
+        except ValueError as e:
+            raise LoginFailedException(f"Malformed response from authentication endpoint: {e}") from e
+        if not isinstance(res_json, dict):
+            raise LoginFailedException("Malformed response from authentication endpoint: expected JSON object")
         sp_header = res_json.get("spHeader", {})
+        if not isinstance(sp_header, dict):
+            raise LoginFailedException("Malformed response from authentication endpoint: expected spHeader object")
 
         if not sp_header.get("success", False):
             errors = sp_header.get("errors", [])

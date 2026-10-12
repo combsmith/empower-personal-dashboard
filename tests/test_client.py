@@ -700,6 +700,30 @@ class TestClientAuthentication(unittest.TestCase):
 
     @patch("requests.Session.get")
     @patch("requests.Session.post")
+    def test_identify_user_non_dict_json_raises_login_failed(self, mock_post, mock_get):
+        mock_get.return_value = MagicMock(text="<html>window.csrf = 'csrf';</html>")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = ["not", "a", "dict"]
+        mock_post.return_value = mock_resp
+
+        with self.assertRaises(LoginFailedException):
+            self.client.identify_user("user@example.com")
+
+    @patch("requests.Session.get")
+    @patch("requests.Session.post")
+    def test_identify_user_non_dict_spheader_raises_login_failed(self, mock_post, mock_get):
+        mock_get.return_value = MagicMock(text="<html>window.csrf = 'csrf';</html>")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"spHeader": "not a dict"}
+        mock_post.return_value = mock_resp
+
+        with self.assertRaises(LoginFailedException):
+            self.client.identify_user("user@example.com")
+
+    @patch("requests.Session.get")
+    @patch("requests.Session.post")
     def test_identify_user_spheader_error_raises_login_failed(self, mock_post, mock_get):
         mock_get.return_value = MagicMock(text="<html>window.csrf = 'csrf';</html>")
         mock_resp = MagicMock()
@@ -731,6 +755,26 @@ class TestClientAuthentication(unittest.TestCase):
         with self.assertRaises(LoginFailedException) as ctx:
             self.client.authenticate_password("wrong-password")
         self.assertEqual(ctx.exception.error_code, 102)
+
+    @patch("requests.Session.post")
+    def test_authenticate_password_non_dict_json_raises_login_failed(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = ["not", "a", "dict"]
+        mock_post.return_value = mock_resp
+
+        with self.assertRaises(LoginFailedException):
+            self.client.authenticate_password("test-password")
+
+    @patch("requests.Session.post")
+    def test_authenticate_password_non_dict_spheader_raises_login_failed(self, mock_post):
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"spHeader": "not a dict"}
+        mock_post.return_value = mock_resp
+
+        with self.assertRaises(LoginFailedException):
+            self.client.authenticate_password("test-password")
 
     @patch("requests.Session.post")
     def test_request_2fa_challenge_error_raises_empower_error(self, mock_post):
