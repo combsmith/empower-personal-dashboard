@@ -893,14 +893,7 @@ def prune_stale_pending_records(existing, incoming, start_date, end_date):
     return retained, pruned_count
 
 
-def merge_transaction_records(
-    existing,
-    incoming,
-    *,
-    start_date=None,
-    end_date=None,
-    prune=False,
-):
+def merge_transaction_records(existing, incoming):
     """Merge ``incoming`` transaction records into ``existing`` by ``user_transaction_id``.
 
     - Records whose ``user_transaction_id`` matches an existing record are updated in
@@ -910,18 +903,12 @@ def merge_transaction_records(
     - Records carrying a new ``user_transaction_id`` are appended.
     - Existing records absent from ``incoming`` — older historical transactions outside
       the queried window — are preserved untouched.
-    - When ``prune`` is True and ``start_date`` and ``end_date`` are provided, archived
-      pending records within [start_date, end_date] that are absent from ``incoming``
-      are dropped before merging.
 
     Records lacking a ``user_transaction_id`` cannot be keyed, so they are preserved as-is
     (existing ones kept, incoming ones appended). An incoming one that is identical to a
     record already present is not appended again, so re-fetching the same window on every
     run does not pile up copies.
     """
-    if prune and start_date and end_date:
-        existing, _ = prune_stale_pending_records(existing, incoming, start_date, end_date)
-
     merged = []
     index = {}  # user_transaction_id -> position in merged
     unkeyed = set()  # canonical form of every record that has no id

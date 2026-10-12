@@ -461,9 +461,7 @@ class TestMergeTransactionRecords(unittest.TestCase):
         self.assertEqual(pruned_count, 1)
         self.assertEqual([r["user_transaction_id"] for r in retained], ["P2"])
 
-        merged = merge_transaction_records(
-            existing, incoming, start_date="2026-09-01", end_date="2026-09-30", prune=True
-        )
+        merged = merge_transaction_records(retained, incoming)
         ids = [m["user_transaction_id"] for m in merged]
         self.assertNotIn("P1", ids)
         self.assertIn("P2", ids)
