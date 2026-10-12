@@ -569,11 +569,7 @@ class EmpowerDashboardClient:
             res_json = resp.json()
         except ValueError as e:
             raise LoginFailedException(f"Malformed response from authentication endpoint: {e}") from e
-        if not isinstance(res_json, dict):
-            raise LoginFailedException("Malformed response from authentication endpoint: expected JSON object")
-        sp_header = res_json.get("spHeader", {})
-        if not isinstance(sp_header, dict):
-            raise LoginFailedException("Malformed response from authentication endpoint: expected spHeader object")
+        sp_header, sp_data = self._validate_login_response(res_json, "authentication endpoint")
 
         if not sp_header.get("success", False):
             errors = sp_header.get("errors", [])
