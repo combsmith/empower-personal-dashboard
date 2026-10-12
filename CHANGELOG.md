@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-12
+
 ### Added
 - Prune stale pending records from authoritative `--merge` windows ([#75](https://github.com/petry-projects/empower-personal-dashboard/issues/75)):
   - During an authoritative transaction merge, archived pending records whose `transaction_date` falls within the queried date range `[start_date, end_date]` and that are absent from the freshly fetched window are automatically pruned. This prevents posted replacements with re-issued transaction IDs from leaving stale duplicate pending records in the archive.
@@ -100,7 +102,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Authoritative OpenAPI 3.1 specification (`docs/openapi.yaml`) with Redocly CI linting and hermetic contract tests.
 - PyPI onboarding probe, build verification, and Trusted Publishing OIDC workflow.
 
-[Unreleased]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.1.2...v0.2.0
 [0.1.2]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.1.1...v0.1.2
