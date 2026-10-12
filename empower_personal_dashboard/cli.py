@@ -35,7 +35,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from .client import (
     DEFAULT_BASE_URL,
@@ -71,7 +71,7 @@ _JSONL_SUFFIX = ".jsonl"
 DEFAULT_MERGE_LOCK_TIMEOUT = 60.0
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="empower",
         description="Extract account balances, investment holdings, and transaction history via Empower Personal Dashboard.",
@@ -104,8 +104,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--session-file",
         type=Path,
-        default=DEFAULT_SESSION_FILE,
-        help=f"Path to session storage file (default: {DEFAULT_SESSION_FILE}).",
+        default=None,
+        help=f"Path to session storage file (default: $EMPOWER_SESSION_FILE or {DEFAULT_SESSION_FILE}).",
     )
     parser.add_argument(
         "--sandbox",
@@ -329,7 +329,9 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Suppress console output, only writing files.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.session_file is None:
+        args.session_file = Path(os.environ.get("EMPOWER_SESSION_FILE", DEFAULT_SESSION_FILE)).expanduser()
     if not math.isfinite(args.merge_lock_timeout) or args.merge_lock_timeout < 0:
         parser.error("--merge-lock-timeout must be a non-negative finite number.")
     return args
@@ -679,12 +681,17 @@ def interactive_login(
             cli_password
             or os.environ.get("EMPOWER_PASSWORD")
             or os.environ.get("PERSONAL_CAPITAL_PASSWORD")
-            or resolve_password(
-                username=email,
-                credential_helper=cli_credential_helper,
-                use_keyring=cli_keyring,
-            )
         )
+        if not password:
+            try:
+                password = resolve_password(
+                    username=email,
+                    credential_helper=cli_credential_helper,
+                    use_keyring=cli_keyring,
+                )
+            except LoginFailedException as e:
+                print(f"[!] Credential helper warning: {e}", file=sys.stderr)
+                password = None
 
         if auth_level == "USER_REMEMBERED":
             print(f"[+] Device recognized ('{device_name}'). No SMS/Email 2FA challenge required.")
@@ -737,12 +744,15 @@ def interactive_login(
             client.authenticate_password(password=password)
             print("[+] Login successful! Password authenticated.")
 
-        if cli_set_keyring and password:
-            try:
-                set_password_in_keyring(username=email, password=password)
-                print(f"[+] Password for '{email}' securely saved to system keyring.")
-            except Exception as e:
-                print(f"[!] Warning: Could not save password to keyring: {e}", file=sys.stderr)
+        if cli_set_keyring:
+            if not password:
+                password = _resolve_or_prompt_password(f"Empower Password for '{email}': ")
+            if password:
+                try:
+                    set_password_in_keyring(username=email, password=password)
+                    print(f"[+] Password for '{email}' securely saved to system keyring.")
+                except Exception as e:
+                    print(f"[!] Warning: Could not save password to keyring: {e}", file=sys.stderr)
 
         if getattr(client, "mock_mode", False) is True:
             print("[+] Sandbox mode: synthetic session not persisted.")
@@ -777,17 +787,26 @@ def _build_client(args: argparse.Namespace) -> EmpowerDashboardClient:
     if not base_url and getattr(args, "migrated", False):
         base_url = MIGRATED_BASE_URL
 
-    session_file = getattr(args, "session_file", DEFAULT_SESSION_FILE)
+    session_file = getattr(args, "session_file", None)
+    if session_file is None:
+        session_file = Path(os.environ.get("EMPOWER_SESSION_FILE", DEFAULT_SESSION_FILE)).expanduser()
+        args.session_file = session_file
+
+    client: Optional[EmpowerDashboardClient] = None
 
     def _password_provider() -> Optional[str]:
+        username = client.username if client is not None else None
+        if not username:
+            username = _resolve_cli_username(args)
         return resolve_password(
             cli_password=getattr(args, "password", None),
-            username=_resolve_cli_username(args),
+            username=username,
             credential_helper=getattr(args, "credential_helper", None),
             use_keyring=bool(getattr(args, "keyring", False)),
         )
 
-    return EmpowerDashboardClient(
+    cli_user = _resolve_cli_username(args)
+    client = EmpowerDashboardClient(
         session_file=session_file,
         base_url=base_url or DEFAULT_BASE_URL,
         timeout_seconds=getattr(args, "timeout", 90),
@@ -795,7 +814,11 @@ def _build_client(args: argparse.Namespace) -> EmpowerDashboardClient:
         debug=getattr(args, "debug", False),
         log_file=getattr(args, "log_file", None),
         password_provider=_password_provider,
+        username=cli_user,
     )
+    if not client.username and cli_user:
+        client.username = cli_user
+    return client
 
 
 def _first_existing(candidates):

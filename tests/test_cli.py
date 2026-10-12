@@ -2478,8 +2478,82 @@ class TestCliCredentialsAndKeyring(unittest.TestCase):
                     mock_auth_pw.assert_called_once_with(password="keyring-retrieved-pw")
                     self.assertTrue(out_path.exists())
 
+    @patch.dict(os.environ, {"EMPOWER_SESSION_FILE": "/custom/env/session.json"}, clear=True)
+    def test_parse_args_respects_empower_session_file_env_var(self):
+        from empower_personal_dashboard.cli import parse_args
+        args = parse_args(["--balances"])
+        self.assertEqual(args.session_file, Path("/custom/env/session.json"))
+
+    @patch.dict(os.environ, {"EMPOWER_SESSION_FILE": "/custom/env/session.json"}, clear=True)
+    def test_parse_args_cli_flag_overrides_empower_session_file_env_var(self):
+        from empower_personal_dashboard.cli import parse_args
+        args = parse_args(["--session-file", "/flag/session.json", "--balances"])
+        self.assertEqual(args.session_file, Path("/flag/session.json"))
+
+    @patch("empower_personal_dashboard.cli.set_password_in_keyring")
+    @patch("empower_personal_dashboard.cli._resolve_or_prompt_password")
+    def test_interactive_login_already_authenticated_prompts_password_for_set_keyring(
+        self, mock_prompt_pw, mock_set_keyring
+    ):
+        from empower_personal_dashboard.cli import interactive_login
+        mock_client = MagicMock()
+        mock_client.identify_user.return_value = {
+            "spHeader": {"success": True, "authLevel": "SESSION_AUTHENTICATED"}
+        }
+        mock_prompt_pw.return_value = "new-keyring-pass"
+
+        ret = interactive_login(
+            client=mock_client,
+            session_file=Path("/tmp/sess.json"),
+            cli_email="active@example.com",
+            cli_set_keyring=True,
+        )
+        self.assertEqual(ret, 0)
+        mock_prompt_pw.assert_called_once_with("Empower Password for 'active@example.com': ")
+        mock_set_keyring.assert_called_once_with(username="active@example.com", password="new-keyring-pass")
+
+    @patch("empower_personal_dashboard.cli.resolve_password")
+    @patch("empower_personal_dashboard.cli._prompt_for_password")
+    def test_interactive_login_helper_failure_warns_and_prompts(self, mock_prompt, mock_resolve):
+        from empower_personal_dashboard.cli import interactive_login
+        from empower_personal_dashboard.exceptions import LoginFailedException
+        mock_resolve.side_effect = LoginFailedException("Helper executable not found")
+        mock_prompt.return_value = "fallback-pw"
+        mock_client = MagicMock()
+        mock_client.identify_user.return_value = {
+            "spHeader": {"success": True, "authLevel": "USER_REMEMBERED", "deviceName": "CLI"}
+        }
+
+        err = io.StringIO()
+        with patch("sys.stderr", err):
+            ret = interactive_login(
+                client=mock_client,
+                session_file=Path("/tmp/sess.json"),
+                cli_email="user@example.com",
+                cli_credential_helper="broken-helper",
+            )
+        self.assertEqual(ret, 0)
+        self.assertIn("Credential helper warning: Helper executable not found", err.getvalue())
+        mock_prompt.assert_called_once()
+        mock_client.authenticate_password.assert_called_once_with(password="fallback-pw")
+
+    def test_build_client_password_provider_prefers_client_session_username(self):
+        from empower_personal_dashboard.cli import _build_client, parse_args
+        args = parse_args(["--balances", "--keyring"])
+        with patch("empower_personal_dashboard.cli.resolve_password") as mock_resolve:
+            client = _build_client(args)
+            client.username = "session_user@example.com"
+            client.password_provider()
+            mock_resolve.assert_called_with(
+                cli_password=None,
+                username="session_user@example.com",
+                credential_helper=None,
+                use_keyring=True,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

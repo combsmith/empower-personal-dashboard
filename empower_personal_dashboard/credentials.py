@@ -111,8 +111,13 @@ def get_password_from_helper(
     if not command or not command.strip():
         raise ValueError("Credential helper command cannot be empty.")
 
-    cmd_args = shlex.split(command.strip())
-    helper_bin = cmd_args[0] if cmd_args else command
+    try:
+        cmd_args = shlex.split(command.strip())
+    except ValueError as e:
+        raise LoginFailedException(f"Invalid credential helper command: {e}") from e
+    if not cmd_args:
+        raise ValueError("Credential helper command cannot be empty.")
+    helper_bin = cmd_args[0]
 
     try:
         proc = subprocess.run(
@@ -134,9 +139,10 @@ def get_password_from_helper(
         err_msg = proc.stderr.strip() if proc.stderr else f"process exited with status {proc.returncode}"
         raise LoginFailedException(f"Credential helper '{helper_bin}' exited with status {proc.returncode}: {err_msg}")
 
-    # Strip trailing CR/LF output (standard for CLI password managers like pass, op, lpass)
-    password = proc.stdout.rstrip("\r\n")
-    return password
+    # Standard convention for password managers (pass, 1Password, etc.) outputs
+    # the password on the first line, followed by optional metadata or keys.
+    lines = proc.stdout.splitlines()
+    return lines[0] if lines else ""
 
 
 def resolve_password(

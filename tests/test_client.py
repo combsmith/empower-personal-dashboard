@@ -1492,6 +1492,61 @@ class TestClientReauthenticateAndAutoRefresh(unittest.TestCase):
             self.client.fetch("/newaccount/getAccounts")
         self.assertIn("Helper exited with 1", str(ctx.exception))
 
+    @patch.object(EmpowerDashboardClient, "reauthenticate")
+    @patch.object(EmpowerDashboardClient, "post")
+    def test_fetch_auto_reauth_on_http_401(self, mock_post, mock_reauth):
+        unauth_resp = MagicMock()
+        unauth_resp.status_code = 401
+        unauth_resp.text = '{"message": "Unauthorized"}'
+
+        ok_resp = MagicMock()
+        ok_resp.status_code = 200
+        ok_resp.json.return_value = {
+            "spHeader": {"success": True, "authLevel": "USER_REMEMBERED"},
+            "spData": {"accounts": []},
+        }
+
+        mock_post.side_effect = [unauth_resp, ok_resp]
+        self.client.password_provider = MagicMock(return_value="vault-pw")
+
+        res = self.client.fetch("/newaccount/getAccounts")
+        self.assertEqual(res["spData"], {"accounts": []})
+        mock_reauth.assert_called_once()
+
+    @patch.object(EmpowerDashboardClient, "reauthenticate")
+    @patch.object(EmpowerDashboardClient, "post")
+    def test_fetch_http_401_without_password_provider_raises_session_expired(self, mock_post, mock_reauth):
+        unauth_resp = MagicMock()
+        unauth_resp.status_code = 401
+        unauth_resp.text = '{"message": "Unauthorized"}'
+        mock_post.return_value = unauth_resp
+        self.client.password_provider = None
+
+        with self.assertRaises(SessionExpiredError) as ctx:
+            self.client.fetch("/newaccount/getAccounts")
+        self.assertEqual(ctx.exception.status_code, 401)
+        mock_reauth.assert_not_called()
+
+    def test_client_init_seeds_username_from_constructor(self):
+        c = EmpowerDashboardClient(username="test_constructor@example.com", mock_mode=True)
+        self.assertEqual(c.username, "test_constructor@example.com")
+
+    @patch.dict(os.environ, {"EMPOWER_USERNAME": "env_user@example.com"}, clear=True)
+    def test_client_init_seeds_username_from_env(self):
+        c = EmpowerDashboardClient(mock_mode=True)
+        self.assertEqual(c.username, "env_user@example.com")
+
+    @patch.object(EmpowerDashboardClient, "authenticate_password")
+    @patch.object(EmpowerDashboardClient, "identify_user")
+    def test_reauthenticate_uses_provided_username_when_client_username_is_none(self, mock_ident, mock_auth):
+        self.client.username = None
+        mock_ident.return_value = {"spHeader": {"success": True, "authLevel": "USER_REMEMBERED"}}
+        mock_auth.return_value = {"spHeader": {"success": True, "authLevel": "SESSION_AUTHENTICATED"}}
+
+        res = self.client.reauthenticate(password="pw123", username="override@example.com")
+        self.assertEqual(self.client.username, "override@example.com")
+        mock_ident.assert_called_once_with(username="override@example.com")
+
 
 if __name__ == "__main__":
     unittest.main()

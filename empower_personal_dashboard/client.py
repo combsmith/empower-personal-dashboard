@@ -156,6 +156,7 @@ class EmpowerDashboardClient:
         debug: bool = False,
         log_file: Optional[Union[str, Path]] = None,
         password_provider: Optional[Callable[[], Optional[str]]] = None,
+        username: Optional[str] = None,
     ):
         # `.expanduser()` so a `~`-prefixed EMPOWER_SESSION_FILE resolves to the
         # home directory rather than a literal "~" folder in the CWD.
@@ -170,7 +171,11 @@ class EmpowerDashboardClient:
         self._reauthenticating: bool = False
         self.session = requests.Session()
         self.csrf: str = ""
-        self.username: Optional[str] = None
+        self.username: Optional[str] = (
+            clean_api_text(username)
+            if username
+            else clean_api_text(os.environ.get("EMPOWER_USERNAME") or os.environ.get("PERSONAL_CAPITAL_EMAIL") or "") or None
+        )
         self.available_challenge_methods: List[Dict[str, Any]] = []
 
         # Configure logger
@@ -298,6 +303,17 @@ class EmpowerDashboardClient:
             payload.update(data)
 
         resp = self.post(endpoint, payload)
+        if resp.status_code == 401:
+            reauth_res = self._attempt_auto_reauth(endpoint, data, "HTTP 401 Unauthorized", 401)
+            if reauth_res is not None:
+                return reauth_res
+            raise SessionExpiredError(
+                f"HTTP 401 Unauthorized from {endpoint}",
+                status_code=401,
+                error_code=401,
+                response_body=resp.text,
+            )
+
         if resp.status_code != 200:
             raise EmpowerError(
                 f"HTTP {resp.status_code} error from {endpoint}",
@@ -348,10 +364,11 @@ class EmpowerDashboardClient:
             except RequireTwoFactorException:
                 raise
             except Exception as e:
-                self._log_debug(f"Automatic re-authentication failed: {e}")
+                self.logger.warning("Automatic re-authentication failed: %s", e)
+                status = 401 if err_code == 401 else 200
                 raise SessionExpiredError(
                     f"Session expired ({err_msg}); automatic re-authentication failed: {e}",
-                    status_code=200,
+                    status_code=status,
                     error_code=err_code,
                 ) from e
             return self.fetch(endpoint, data)
@@ -626,15 +643,17 @@ class EmpowerDashboardClient:
             return self.password_provider()
         return None
 
-    def reauthenticate(self, password: Optional[str] = None) -> Dict[str, Any]:
+    def reauthenticate(self, password: Optional[str] = None, username: Optional[str] = None) -> Dict[str, Any]:
         """Re-authenticate an existing session using password when device is remembered.
 
         Useful for unattended background syncs (cron, agents) where the session
         cookie (JSESSIONID) has expired, but the device registration is remembered
         (authLevel: USER_REMEMBERED), avoiding 2FA SMS challenges.
         """
-        if not self.username:
+        user = username or self.username or os.environ.get("EMPOWER_USERNAME") or os.environ.get("PERSONAL_CAPITAL_EMAIL")
+        if not user:
             raise LoginFailedException("Cannot re-authenticate: username is not known.")
+        self.username = clean_api_text(user)
 
         ident_res = self.identify_user(username=self.username)
         sp_header, _ = self._validate_login_response(ident_res, "user identification endpoint")

@@ -123,6 +123,21 @@ class TestCredentials(unittest.TestCase):
             get_password_from_helper("op read op://finance/empower/password", timeout=30.0)
         self.assertIn("timed out", str(ctx.exception))
 
+    @patch("subprocess.run")
+    def test_get_password_from_helper_multiline_takes_first_line(self, mock_run):
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="my-secret-vault-password\nusername: user@example.com\nurl: https://empower.com\n",
+            stderr="",
+        )
+        pw = get_password_from_helper("pass show finance/empower")
+        self.assertEqual(pw, "my-secret-vault-password")
+
+    def test_get_password_from_helper_unbalanced_quotes(self):
+        with self.assertRaises(LoginFailedException) as ctx:
+            get_password_from_helper('op read "unbalanced quote')
+        self.assertIn("Invalid credential helper command", str(ctx.exception))
+
     def test_resolve_password_explicit_cli(self):
         pw = resolve_password(
             cli_password="cli-provided-password",

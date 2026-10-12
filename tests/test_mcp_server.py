@@ -75,6 +75,14 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    def test_create_mcp_server_configures_password_provider(self) -> None:
+        if not self._require_server():
+            return
+        client = EmpowerDashboardClient(mock_mode=True)
+        self.assertIsNone(client.password_provider)
+        create_mcp_server(client=client)
+        self.assertIsNotNone(client.password_provider)
+
     def test_tool_get_net_worth_summary(self) -> None:
         if not self._require_server():
             return
