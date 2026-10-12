@@ -188,6 +188,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--no-prune",
+        "--no-merge-prune",
+        dest="no_prune",
+        action="store_true",
+        help=(
+            "Disable automatic pruning of stale pending records during --merge "
+            "(strictly additive behavior)."
+        ),
+    )
+    parser.add_argument(
         "--overwrite-ledger",
         "--overwrite",
         action="store_true",
@@ -819,7 +829,78 @@ def _parse_transactions_jsonl(in_t):
     return _summarize_transactions(tx_list)
 
 
-def merge_transaction_records(existing, incoming):
+def _is_valid_iso_date(value):
+    """Return True if value is a canonical ISO YYYY-MM-DD date string."""
+    if not isinstance(value, str) or len(value) != 10:
+        return False
+    try:
+        parsed = datetime.strptime(value, "%Y-%m-%d")
+        return parsed.strftime("%Y-%m-%d") == value
+    except ValueError:
+        return False
+
+
+def prune_stale_pending_records(existing, incoming, start_date, end_date):
+    """Filter out archived pending records within [start_date, end_date] that are absent from incoming.
+
+    Records whose ``transaction_date`` falls outside [start_date, end_date], records
+    whose status is not ``pending`` (e.g. posted records), and records matching an incoming
+    transaction are preserved.
+
+    Returns:
+        tuple[list[dict], int]: A tuple of (retained_records, pruned_count).
+    """
+    if not (_is_valid_iso_date(start_date) and _is_valid_iso_date(end_date)):
+        return list(existing), 0
+    if start_date > end_date:
+        return list(existing), 0
+
+    incoming_ids = {
+        str(rec["user_transaction_id"])
+        for rec in incoming
+        if rec.get("user_transaction_id")
+    }
+    incoming_unkeyed = {
+        _canonical_record(rec)
+        for rec in incoming
+        if not rec.get("user_transaction_id")
+    }
+
+    retained = []
+    pruned_count = 0
+
+    for rec in existing:
+        tid = rec.get("user_transaction_id")
+        if tid and str(tid) in incoming_ids:
+            retained.append(rec)
+            continue
+        if not tid and _canonical_record(rec) in incoming_unkeyed:
+            retained.append(rec)
+            continue
+
+        status = str(rec.get("status") or "").strip().lower()
+        if status != "pending":
+            retained.append(rec)
+            continue
+
+        tx_date = rec.get("transaction_date")
+        if _is_valid_iso_date(tx_date) and start_date <= tx_date <= end_date:
+            pruned_count += 1
+            continue
+
+        retained.append(rec)
+
+    return retained, pruned_count
+
+
+def merge_transaction_records(
+    existing,
+    incoming,
+    *,
+    start_date=None,
+    end_date=None,
+    prune=False,
+):
     """Merge ``incoming`` transaction records into ``existing`` by ``user_transaction_id``.
 
     - Records whose ``user_transaction_id`` matches an existing record are updated in
@@ -829,12 +910,18 @@ def merge_transaction_records(existing, incoming):
     - Records carrying a new ``user_transaction_id`` are appended.
     - Existing records absent from ``incoming`` — older historical transactions outside
       the queried window — are preserved untouched.
+    - When ``prune`` is True and ``start_date`` and ``end_date`` are provided, archived
+      pending records within [start_date, end_date] that are absent from ``incoming``
+      are dropped before merging.
 
     Records lacking a ``user_transaction_id`` cannot be keyed, so they are preserved as-is
     (existing ones kept, incoming ones appended). An incoming one that is identical to a
     record already present is not appended again, so re-fetching the same window on every
     run does not pile up copies.
     """
+    if prune and start_date and end_date:
+        existing, _ = prune_stale_pending_records(existing, incoming, start_date, end_date)
+
     merged = []
     index = {}  # user_transaction_id -> position in merged
     unkeyed = set()  # canonical form of every record that has no id
@@ -947,13 +1034,7 @@ def _earliest_transaction_date(records):
     dates = []
     for record in records:
         value = record.get("transaction_date")
-        if not isinstance(value, str):
-            continue
-        try:
-            parsed = datetime.strptime(value, "%Y-%m-%d")
-        except ValueError:
-            continue
-        if parsed.strftime("%Y-%m-%d") == value:
+        if _is_valid_iso_date(value):
             dates.append(value)
     return min(dates) if dates else None
 
@@ -1161,16 +1242,37 @@ def _load_merge_archive(args, start_date, progress_file):
     return existing_records, start_date
 
 
-def _merge_into_archive(args, existing_records, transactions_res, progress_file):
+def _merge_into_archive(args, existing_records, transactions_res, progress_file, start_date=None, end_date=None):
     """Delta-merge the fetched window into the archive, newest-first."""
     fetched_count = len(transactions_res.transactions)
-    merged = _newest_first(merge_transaction_records(existing_records, transactions_res.transactions))
-    if not args.quiet:
-        print(
-            f"[+] Merge: {fetched_count} fetched transaction(s) merged into "
-            f"{len(existing_records)} archived ({len(merged)} total).",
-            file=progress_file,
+    prune_enabled = bool(
+        not getattr(args, "no_prune", False)
+        and not getattr(args, "limit", None)
+        and not getattr(args, "account_id", None)
+        and start_date
+        and end_date
+    )
+    pruned_count = 0
+    records_to_merge = existing_records
+    if prune_enabled:
+        records_to_merge, pruned_count = prune_stale_pending_records(
+            existing_records,
+            transactions_res.transactions,
+            start_date=start_date,
+            end_date=end_date,
         )
+
+    merged = _newest_first(merge_transaction_records(records_to_merge, transactions_res.transactions))
+    if not args.quiet:
+        summary = (
+            f"[+] Merge: {fetched_count} fetched transaction(s) merged into "
+            f"{len(existing_records)} archived ({len(merged)} total"
+        )
+        if prune_enabled:
+            summary += f", {pruned_count} pruned)."
+        else:
+            summary += ")."
+        print(summary, file=progress_file)
     return _summarize_transactions(merged, mode=transactions_res.mode)
 
 
@@ -1218,7 +1320,16 @@ def _fetch_transactions(args, client, progress_file):
             )
 
             if existing_records:
-                transactions_res = _merge_into_archive(args, existing_records, transactions_res, progress_file)
+                eff_start = start_date or getattr(transactions_res, "start_date", None)
+                eff_end = end_date or getattr(transactions_res, "end_date", None)
+                transactions_res = _merge_into_archive(
+                    args,
+                    existing_records,
+                    transactions_res,
+                    progress_file,
+                    start_date=eff_start,
+                    end_date=eff_end,
+                )
 
             t_data = transactions_res.to_dict()
             t_data["extracted_at"] = datetime.now(timezone.utc).isoformat()
