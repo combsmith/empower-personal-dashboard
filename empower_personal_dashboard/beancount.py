@@ -1384,6 +1384,12 @@ class BeancountGenerator:
             # six-decimal precision — acquired entirely within the window — so a
             # legitimate micro-position that still earns a balance assertion
             # (_emit_commodity_unit_assertions) is not dropped from the opening lot.
+            # If snapshot is long, baseline cannot cross zero to negative (short);
+            # if snapshot is short, baseline cannot cross zero to positive (long).
+            if snapshot_qty > 0 and round(baseline_qty, 6) <= 0:
+                continue
+            if snapshot_qty < 0 and round(baseline_qty, 6) >= 0:
+                continue
             if round(baseline_qty, 6) == 0:
                 continue
             holding_tag = f"{b_account}:{ticker}"
@@ -1418,7 +1424,12 @@ class BeancountGenerator:
         narration_esc = _escape_beancount_string(f"{ticker} Position")
         lines.append(f'{lot_date} * "{payee_esc}" "{narration_esc}"\n')
         lines.append(f'  empower_holding: "{holding_tag}"\n')
-        if cost_basis is not None and abs(float(cost_basis)) > 0 and abs(snapshot_qty) > 0:
+        # Only scale reported cost basis if the baseline opening lot has the same sign
+        # as the snapshot quantity (both long or both short). If the position flipped
+        # signs across the transaction window, the snapshot cost basis represents the
+        # current position rather than the historical baseline lot.
+        has_same_sign = (qty > 0 and snapshot_qty > 0) or (qty < 0 and snapshot_qty < 0)
+        if cost_basis is not None and abs(float(cost_basis)) > 0 and has_same_sign:
             scale_ratio = abs(qty) / abs(snapshot_qty)
             scaled_cost_basis = abs(float(cost_basis)) * scale_ratio
             lines.append(
@@ -1876,13 +1887,34 @@ class BeancountGenerator:
                 self._write_modular_transactions(stage, append, transactions, balances),
             ]
 
-            dest.mkdir(parents=True, exist_ok=True)
-            created_files: List[Path] = []
+            # Preflight validation: verify no destination file is a symlink before any write occurs
             for sf in staged_files:
                 target_file = dest / sf.name
                 _verify_not_symlink(target_file)
-                target_file.write_text(sf.read_text(encoding="utf-8"), encoding="utf-8")
-                created_files.append(target_file)
+
+            dest.mkdir(parents=True, exist_ok=True)
+            backup_contents: Dict[Path, Optional[str]] = {}
+            created_files: List[Path] = []
+            try:
+                for sf in staged_files:
+                    target_file = dest / sf.name
+                    if target_file.exists():
+                        backup_contents[target_file] = target_file.read_text(encoding="utf-8")
+                    else:
+                        backup_contents[target_file] = None
+
+                    tmp_file = dest / f".{sf.name}.tmp"
+                    tmp_file.write_text(sf.read_text(encoding="utf-8"), encoding="utf-8")
+                    tmp_file.replace(target_file)
+                    created_files.append(target_file)
+            except Exception:
+                # Rollback on write failure: restore previous contents
+                for target_file, orig in backup_contents.items():
+                    if orig is not None:
+                        target_file.write_text(orig, encoding="utf-8")
+                    elif target_file.exists():
+                        target_file.unlink(missing_ok=True)
+                raise
 
         return created_files
 

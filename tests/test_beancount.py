@@ -2187,6 +2187,53 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
             self.assertEqual((dest / "accounts.bean").read_text(encoding="utf-8"), "ORIGINAL_ACCOUNTS\n")
             self.assertEqual((dest / "balances.bean").read_text(encoding="utf-8"), "ORIGINAL_BALANCES\n")
 
+    def test_export_modular_ledger_preflight_symlink_rejection(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest = Path(tmp_dir) / "ledger"
+            dest.mkdir()
+            (dest / "main.bean").write_text("ORIGINAL_MAIN\n", encoding="utf-8")
+            # Create a symlink for holdings.bean
+            symlink_target = Path(tmp_dir) / "external_holdings.bean"
+            symlink_target.write_text("EXTERNAL\n", encoding="utf-8")
+            (dest / "holdings.bean").symlink_to(symlink_target)
+
+            with self.assertRaises(ValueError):
+                self.generator.export_modular_ledger(
+                    destination_dir=dest,
+                    balances=DashboardBalances(
+                        as_of_date="2026-10-01", net_worth=0.0, total_cash=0.0,
+                        total_investment=0.0, total_card_liabilities=0.0, total_loan=0.0,
+                        total_mortgage=0.0, accounts=[],
+                    ),
+                    holdings=DashboardHoldings(
+                        as_of_date="2026-10-01", total_value=100.0,
+                        holdings=[{"ticker": "VTI", "quantity": 1.0}],
+                    ),
+                )
+
+            # Assert main.bean was not overwritten before the symlink check fired
+            self.assertEqual((dest / "main.bean").read_text(encoding="utf-8"), "ORIGINAL_MAIN\n")
+
+    def test_short_position_opposite_sign_does_not_inherit_cost_basis(self):
+        lines = []
+        # qty is +10 (long), but snapshot_qty is -20 (short)
+        self.generator._append_snapshot_lot(
+            lines=lines,
+            lot_date="2026-01-01",
+            firm="Vanguard",
+            ticker="TSLA",
+            holding_tag="Assets:Vanguard:Brokerage:TSLA",
+            b_account="Assets:Vanguard:Brokerage",
+            qty=10.0,
+            snapshot_qty=-20.0,
+            price=150.0,
+            cost_basis=3000.0,
+        )
+        output = "".join(lines)
+        # Should not scale snapshot's short cost basis to the opposite-signed long lot
+        self.assertNotIn("{{", output)
+        self.assertIn("10.000000 TSLA @ 150.0000 USD", output)
+
 
 if __name__ == "__main__":
     unittest.main()
