@@ -1080,7 +1080,7 @@ class BeancountGenerator:
         for h in holdings.holdings:
             ticker = _clean_ticker(h.get("ticker"))
             qty = float(h.get("quantity") or 0.0)
-            if not ticker or round(qty, 6) == 0:
+            if not ticker or qty == 0.0:
                 continue
             firm, acct_name, acct_type, acct_id = _resolve_account_from_holding(h, acct_lookup)
             b_account = self.mapper.resolve_account(firm, acct_name, acct_id, account_type=acct_type, is_asset=True)
@@ -1319,7 +1319,7 @@ class BeancountGenerator:
         for h in holdings.holdings:
             ticker = _clean_ticker(h.get("ticker"))
             qty = float(h.get("quantity") or 0.0)
-            if not ticker or round(qty, 6) == 0:
+            if not ticker or qty == 0.0:
                 continue
             price = float(h.get("price") or 0.0)
             cost_basis = h.get("cost_basis")
@@ -1337,7 +1337,7 @@ class BeancountGenerator:
                 }
             else:
                 self._merge_holding(aggregated[key], qty, price, cost_basis)
-        return aggregated
+        return {k: v for k, v in aggregated.items() if round(v.get("quantity", 0.0), 6) != 0}
 
     @staticmethod
     def _merge_holding(agg: Dict[str, Any], qty: float, price: float, cost_basis: Any) -> None:
@@ -1860,17 +1860,25 @@ class BeancountGenerator:
         dest = _prepare_ledger_path(destination_dir, is_dir=True)
         effective_opening_date = _determine_opening_date(transactions, balances, opening_date)
 
+        standard_beans = {"main.bean", "accounts.bean", "balances.bean", "holdings.bean", "prices.bean", "transactions.bean"}
+        extra_beans = (
+            [p.name for p in dest.glob("*.bean") if p.name not in standard_beans and not p.name.startswith(".") and not p.is_symlink()]
+            if dest.exists()
+            else []
+        )
+
         with tempfile.TemporaryDirectory() as tmp_stage:
             stage = Path(tmp_stage) / "modular_ledger"
             stage.mkdir(parents=True, exist_ok=True)
 
-            if dest.exists():
-                for p in dest.glob("*.bean"):
-                    if not p.is_symlink():
-                        (stage / p.name).write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+            if append and dest.exists():
+                for fname in ("main.bean", "holdings.bean", "transactions.bean"):
+                    src_file = dest / fname
+                    if src_file.exists() and not src_file.is_symlink():
+                        (stage / fname).write_text(src_file.read_text(encoding="utf-8"), encoding="utf-8")
 
             staged_files: List[Path] = [
-                self._write_modular_main(stage, append),
+                self._write_modular_main(stage, append, extra_beans=extra_beans),
                 self._write_modular_section(
                     stage, "accounts.bean",
                     self.generate_accounts_bean(balances, holdings, transactions, include_pads=False),
@@ -1934,12 +1942,18 @@ class BeancountGenerator:
         path.write_text(content, encoding="utf-8")
         return path
 
-    def _write_modular_main(self, dest: Path, append: bool) -> Path:
+    def _write_modular_main(
+        self,
+        dest: Path,
+        append: bool,
+        extra_beans: Optional[List[str]] = None,
+    ) -> Path:
         """Write or patch main.bean, ensuring the holdings include and FIFO booking option."""
         main_path = dest / "main.bean"
         _verify_not_symlink(main_path)
         standard_beans = {"main.bean", "accounts.bean", "balances.bean", "holdings.bean", "prices.bean", "transactions.bean"}
-        extra_beans = [p.name for p in dest.glob("*.bean") if p.name not in standard_beans and not p.name.startswith(".")]
+        if extra_beans is None:
+            extra_beans = [p.name for p in dest.glob("*.bean") if p.name not in standard_beans and not p.name.startswith(".")]
 
         if not main_path.exists() or not append:
             main_path.write_text(self.generate_main_bean(additional_includes=extra_beans), encoding="utf-8")

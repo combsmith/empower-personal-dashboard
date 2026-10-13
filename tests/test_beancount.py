@@ -2255,6 +2255,56 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
             # Assert mode 0600 is preserved
             self.assertEqual(main_file.stat().st_mode & 0o777, 0o600)
 
+    def test_micro_holdings_aggregated_before_precision_rounding(self):
+        # Two sub-micro holdings of 0.0000004 share each sum to 0.0000008, which rounds to 0.000001
+        holdings = DashboardHoldings(
+            as_of_date="2026-10-01",
+            total_value=1.0,
+            holdings=[
+                {
+                    "account_name": "Brokerage",
+                    "ticker": "MICRO",
+                    "quantity": 0.0000004,
+                    "price": 100.0,
+                    "cost_basis": 0.00004,
+                    "firm": "Vanguard",
+                },
+                {
+                    "account_name": "Brokerage",
+                    "ticker": "MICRO",
+                    "quantity": 0.0000004,
+                    "price": 100.0,
+                    "cost_basis": 0.00004,
+                    "firm": "Vanguard",
+                },
+            ],
+        )
+        content = self.generator.generate_holdings_bean(holdings)
+        self.assertIn("MICRO", content)
+        self.assertIn("0.000001 MICRO", content)
+
+    def test_export_modular_ledger_overwrite_with_corrupt_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest = Path(tmp_dir) / "ledger"
+            dest.mkdir()
+            # Write invalid UTF-8 bytes to simulate corrupted existing balances.bean
+            (dest / "balances.bean").write_bytes(b"\xff\xfe\x00\x00corrupt")
+
+            # Overwrite export (append=False) should succeed without trying to decode balances.bean
+            created = self.generator.export_modular_ledger(
+                destination_dir=dest,
+                append=False,
+                balances=DashboardBalances(
+                    as_of_date="2026-10-01", net_worth=0.0, total_cash=0.0,
+                    total_investment=0.0, total_card_liabilities=0.0, total_loan=0.0,
+                    total_mortgage=0.0, accounts=[],
+                ),
+            )
+            self.assertTrue((dest / "balances.bean").exists())
+            # Should now be valid UTF-8
+            repaired_text = (dest / "balances.bean").read_text(encoding="utf-8")
+            self.assertIn("Empower Personal Dashboard - Balance Assertions", repaired_text)
+
 
 if __name__ == "__main__":
     unittest.main()
