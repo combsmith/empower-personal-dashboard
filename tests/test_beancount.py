@@ -2104,6 +2104,39 @@ class TestBeancountInvestmentGrowthReconstruction(unittest.TestCase):
             content = ledger.read_text(encoding="utf-8")
         self.assertEqual(content.count("Snapshot Shortfall Reconciliation"), 1)
 
+    def test_later_snapshot_does_not_reapply_shortfall_reconciliation(self):
+        """A later snapshot over the same window must not deduct the surplus twice."""
+        def holdings(as_of):
+            return DashboardHoldings(
+                as_of_date=as_of, total_value=60.0,
+                holdings=[{"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                           "ticker": "GE", "quantity": 5.0, "price": 12.0}],
+            )
+        txns = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-01", total_transactions=2,
+            money_in=100.0, money_out=120.0, net_cashflow=-20.0,
+            transactions=[
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "account_type": "investment", "transaction_date": "2024-03-01",
+                 "description": "Sell GE", "amount": 100.0, "is_cash_in": True,
+                 "is_credit": True, "transaction_type": "Sell", "symbol": "GE",
+                 "price": 10.0, "quantity": 10.0},
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "account_type": "investment", "transaction_date": "2024-08-01",
+                 "description": "Buy GE", "amount": 120.0, "is_cash_out": True,
+                 "transaction_type": "Buy", "symbol": "GE",
+                 "price": 12.0, "quantity": 10.0},
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ledger = Path(tmp_dir) / "ledger.bean"
+            for as_of in ("2024-10-01", "2024-10-15"):
+                self.generator.export_single_file(
+                    filepath=ledger, holdings=holdings(as_of), transactions=txns,
+                )
+            content = ledger.read_text(encoding="utf-8")
+        self.assertEqual(content.count("Snapshot Shortfall Reconciliation"), 1)
+
     def test_inferred_opening_date_never_precedes_account_opens(self):
         from empower_personal_dashboard.beancount import _determine_opening_date
         pre_2000 = DashboardTransactions(

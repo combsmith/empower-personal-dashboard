@@ -1589,11 +1589,12 @@ class BeancountGenerator:
                     force_cost,
                 )
             # Emit shortfall reconciliation even if the opening lot already exists
-            # (on append). The reconciliation is keyed by (holding_tag, reconciliation date),
-            # so it is idempotent across appends of the same snapshot.
-            reconciliation_key = (holding_tag, _reconciliation_date(snapshot_date))
+            # (on append). It is applied once per holding: if any reconciliation for
+            # this holding_tag is already in the ledger, a later snapshot must not
+            # deduct the surplus again (it would break balance assertions).
+            already_reconciled_tags = {k[0] for k in (existing_reconciled_keys or set())}
             if (round(floor_surplus, 6) > 0 and snapshot_date
-                    and reconciliation_key not in (existing_reconciled_keys or set())):
+                    and holding_tag not in already_reconciled_tags):
                 self._append_shortfall_reconciliation(
                     lines, snapshot_date, pos.get("firm", _FIRM_BROKERAGE), ticker,
                     holding_tag, b_account, floor_surplus, pos.get("price", 0.0),
