@@ -2031,6 +2031,164 @@ class TestOpeningDateClamp(unittest.TestCase):
             self.assertIn('include "broken_bow.bean"', content)
 
 
+class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
+    """Tests for Issue #70: Short position cost basis scaling and atomic modular export."""
+
+    def setUp(self):
+        self.generator = BeancountGenerator()
+
+    def test_short_position_preserves_cost_basis(self):
+        holdings = DashboardHoldings(
+            as_of_date="2026-10-01",
+            total_value=-3000.0,
+            holdings=[
+                {
+                    "user_account_id": 101,
+                    "account_name": "Brokerage",
+                    "firm_name": "Vanguard",
+                    "ticker": "TSLA",
+                    "quantity": -20.0,
+                    "price": 150.0,
+                    "cost_basis": 3000.0,
+                }
+            ],
+        )
+        output = self.generator.generate_holdings_bean(holdings)
+        self.assertIn("-20.000000 TSLA {{3000.000000 USD}}", output)
+
+    def test_short_position_scales_cost_basis_with_transactions(self):
+        holdings = DashboardHoldings(
+            as_of_date="2026-10-01",
+            total_value=-3000.0,
+            holdings=[
+                {
+                    "user_account_id": 101,
+                    "account_name": "Brokerage",
+                    "firm_name": "Vanguard",
+                    "ticker": "TSLA",
+                    "quantity": -20.0,
+                    "price": 150.0,
+                    "cost_basis": 3000.0,
+                }
+            ],
+        )
+        txs = DashboardTransactions(
+            start_date="2026-01-01",
+            end_date="2026-10-01",
+            total_transactions=1,
+            money_in=1500.0,
+            money_out=0.0,
+            net_cashflow=1500.0,
+            transactions=[
+                {
+                    "user_transaction_id": "tx-short-1",
+                    "user_account_id": 101,
+                    "account_name": "Brokerage",
+                    "firm_name": "Vanguard",
+                    "transaction_date": "2026-05-15",
+                    "description": "Short Sell TSLA",
+                    "amount": 1500.0,
+                    "is_cash_out": False,
+                    "transaction_type": "Sell",
+                    "investment_type": "Sell",
+                    "symbol": "TSLA",
+                    "price": 150.0,
+                    "quantity": -10.0,
+                }
+            ],
+        )
+        output = self.generator.generate_holdings_bean(holdings, transactions=txs)
+        # Baseline qty is -10.0, scaled cost basis is 3000.0 * |-10| / |-20| = 1500.0
+        self.assertIn("-10.000000 TSLA {{1500.000000 USD}}", output)
+
+    def test_short_position_handles_negative_cost_basis(self):
+        holdings = DashboardHoldings(
+            as_of_date="2026-10-01",
+            total_value=-3000.0,
+            holdings=[
+                {
+                    "user_account_id": 101,
+                    "account_name": "Brokerage",
+                    "firm_name": "Vanguard",
+                    "ticker": "TSLA",
+                    "quantity": -20.0,
+                    "price": 150.0,
+                    "cost_basis": -3000.0,
+                }
+            ],
+        )
+        output = self.generator.generate_holdings_bean(holdings)
+        self.assertIn("-20.000000 TSLA {{3000.000000 USD}}", output)
+
+    def test_short_position_unit_balance_assertion(self):
+        holdings = DashboardHoldings(
+            as_of_date="2026-10-01",
+            total_value=-3000.0,
+            holdings=[
+                {
+                    "user_account_id": 101,
+                    "account_name": "Brokerage",
+                    "firm_name": "Vanguard",
+                    "ticker": "TSLA",
+                    "quantity": -20.0,
+                    "price": 150.0,
+                    "cost_basis": 3000.0,
+                }
+            ],
+        )
+        balances = DashboardBalances(
+            as_of_date="2026-10-01",
+            net_worth=-3000.0,
+            total_cash=0.0,
+            total_investment=-3000.0,
+            total_card_liabilities=0.0,
+            total_loan=0.0,
+            total_mortgage=0.0,
+            accounts=[
+                {
+                    "user_account_id": 101,
+                    "account_name": "Brokerage",
+                    "firm_name": "Vanguard",
+                    "account_type": "investment",
+                    "balance": -3000.0,
+                    "is_asset": True,
+                    "currency": "USD",
+                }
+            ],
+        )
+        output = self.generator.generate_balances_bean(balances, holdings)
+        self.assertIn("balance Assets:Vanguard:Brokerage -20.000000 TSLA", output)
+
+    def test_export_modular_ledger_atomic_on_failure(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest = Path(tmp_dir) / "ledger"
+            dest.mkdir()
+            (dest / "main.bean").write_text("ORIGINAL_MAIN\n", encoding="utf-8")
+            (dest / "accounts.bean").write_text("ORIGINAL_ACCOUNTS\n", encoding="utf-8")
+            (dest / "balances.bean").write_text("ORIGINAL_BALANCES\n", encoding="utf-8")
+
+            with patch.object(self.generator, "generate_holdings_bean", side_effect=RuntimeError("Simulated Holdings Error")):
+                with self.assertRaises(RuntimeError):
+                    self.generator.export_modular_ledger(
+                        destination_dir=dest,
+                        balances=DashboardBalances(
+                            as_of_date="2026-10-01", net_worth=0.0, total_cash=0.0,
+                            total_investment=0.0, total_card_liabilities=0.0, total_loan=0.0,
+                            total_mortgage=0.0, accounts=[],
+                        ),
+                        holdings=DashboardHoldings(
+                            as_of_date="2026-10-01", total_value=100.0,
+                            holdings=[{"ticker": "VTI", "quantity": 1.0}],
+                        ),
+                    )
+
+            # Assert original files were not touched
+            self.assertEqual((dest / "main.bean").read_text(encoding="utf-8"), "ORIGINAL_MAIN\n")
+            self.assertEqual((dest / "accounts.bean").read_text(encoding="utf-8"), "ORIGINAL_ACCOUNTS\n")
+            self.assertEqual((dest / "balances.bean").read_text(encoding="utf-8"), "ORIGINAL_BALANCES\n")
+
+
 if __name__ == "__main__":
     unittest.main()
+
 

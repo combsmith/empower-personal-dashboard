@@ -13,6 +13,7 @@ import datetime
 import json
 import logging
 import re
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -1078,7 +1079,7 @@ class BeancountGenerator:
         for h in holdings.holdings:
             ticker = _clean_ticker(h.get("ticker"))
             qty = float(h.get("quantity") or 0.0)
-            if not (ticker and round(qty, 6) > 0):
+            if not ticker or round(qty, 6) == 0:
                 continue
             firm, acct_name, acct_type, acct_id = _resolve_account_from_holding(h, acct_lookup)
             b_account = self.mapper.resolve_account(firm, acct_name, acct_id, account_type=acct_type, is_asset=True)
@@ -1088,7 +1089,7 @@ class BeancountGenerator:
             # Skip aggregates that cancel to zero at six-decimal precision: the
             # opening-lot emitter uses the same rounding rule, so asserting a
             # commodity whose lot was not created would fail the ledger.
-            if round(total_qty, 6) <= 0:
+            if round(total_qty, 6) == 0:
                 continue
             lines.append(f"{assert_date} balance {b_account} {_format_quantity(total_qty)} {ticker}\n")
 
@@ -1317,7 +1318,7 @@ class BeancountGenerator:
         for h in holdings.holdings:
             ticker = _clean_ticker(h.get("ticker"))
             qty = float(h.get("quantity") or 0.0)
-            if not (ticker and qty > 0):
+            if not ticker or round(qty, 6) == 0:
                 continue
             price = float(h.get("price") or 0.0)
             cost_basis = h.get("cost_basis")
@@ -1374,14 +1375,16 @@ class BeancountGenerator:
             # floor the opening lot at the deepest intermediate deficit, mirroring
             # the reconstructed-lot path, so the earlier sale has inventory to book
             # against instead of failing the ledger before the later purchase.
-            if has_tx:
+            # The deficit floor is a long-only construct (a negative/short baseline
+            # must stay negative), so apply it only when snapshot_qty > 0.
+            if has_tx and snapshot_qty > 0:
                 max_deficit = net_buy_meta.get(key, {}).get("max_deficit", 0.0)
                 baseline_qty = max(baseline_qty, max_deficit)
             # Skip only positions whose baseline rounds to zero at the emitted
             # six-decimal precision — acquired entirely within the window — so a
             # legitimate micro-position that still earns a balance assertion
             # (_emit_commodity_unit_assertions) is not dropped from the opening lot.
-            if round(baseline_qty, 6) <= 0:
+            if round(baseline_qty, 6) == 0:
                 continue
             holding_tag = f"{b_account}:{ticker}"
             if holding_tag in existing_keys:
@@ -1415,8 +1418,9 @@ class BeancountGenerator:
         narration_esc = _escape_beancount_string(f"{ticker} Position")
         lines.append(f'{lot_date} * "{payee_esc}" "{narration_esc}"\n')
         lines.append(f'  empower_holding: "{holding_tag}"\n')
-        if cost_basis is not None and float(cost_basis) > 0 and snapshot_qty > 0:
-            scaled_cost_basis = float(cost_basis) * qty / snapshot_qty
+        if cost_basis is not None and abs(float(cost_basis)) > 0 and abs(snapshot_qty) > 0:
+            scale_ratio = abs(qty) / abs(snapshot_qty)
+            scaled_cost_basis = abs(float(cost_basis)) * scale_ratio
             lines.append(
                 f"  {b_account:<36} {_format_quantity(qty):>10} {ticker} "
                 f"{{{{{_format_cost(scaled_cost_basis)} USD}}}}\n"
@@ -1838,30 +1842,48 @@ class BeancountGenerator:
         """Export complete modular ledger directory (main.bean, accounts.bean, etc.).
 
         Safely avoids overwriting existing ledgers when append=True by preserving existing
-        transactions and accounts.
+        transactions and accounts. Writes are staged in a temporary directory so a failure
+        during generation leaves the destination directory untouched.
         """
         dest = _prepare_ledger_path(destination_dir, is_dir=True)
-        dest.mkdir(parents=True, exist_ok=True)
         effective_opening_date = _determine_opening_date(transactions, balances, opening_date)
 
-        created_files: List[Path] = [
-            self._write_modular_main(dest, append),
-            self._write_modular_section(
-                dest, "accounts.bean",
-                self.generate_accounts_bean(balances, holdings, transactions, include_pads=False),
-            ),
-            self._write_modular_section(
-                dest, "balances.bean",
-                self.generate_balances_bean(balances, holdings, transactions=transactions),
-            ),
-            self._write_modular_holdings(
-                dest, append, holdings, balances, transactions, effective_opening_date,
-            ),
-            self._write_modular_section(
-                dest, "prices.bean", self.generate_prices_bean(holdings),
-            ),
-            self._write_modular_transactions(dest, append, transactions, balances),
-        ]
+        with tempfile.TemporaryDirectory() as tmp_stage:
+            stage = Path(tmp_stage) / "modular_ledger"
+            stage.mkdir(parents=True, exist_ok=True)
+
+            if dest.exists():
+                for p in dest.glob("*.bean"):
+                    if not p.is_symlink():
+                        (stage / p.name).write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+
+            staged_files: List[Path] = [
+                self._write_modular_main(stage, append),
+                self._write_modular_section(
+                    stage, "accounts.bean",
+                    self.generate_accounts_bean(balances, holdings, transactions, include_pads=False),
+                ),
+                self._write_modular_section(
+                    stage, "balances.bean",
+                    self.generate_balances_bean(balances, holdings, transactions=transactions),
+                ),
+                self._write_modular_holdings(
+                    stage, append, holdings, balances, transactions, effective_opening_date,
+                ),
+                self._write_modular_section(
+                    stage, "prices.bean", self.generate_prices_bean(holdings),
+                ),
+                self._write_modular_transactions(stage, append, transactions, balances),
+            ]
+
+            dest.mkdir(parents=True, exist_ok=True)
+            created_files: List[Path] = []
+            for sf in staged_files:
+                target_file = dest / sf.name
+                _verify_not_symlink(target_file)
+                target_file.write_text(sf.read_text(encoding="utf-8"), encoding="utf-8")
+                created_files.append(target_file)
+
         return created_files
 
     def _write_modular_section(self, dest: Path, filename: str, content: str) -> Path:
