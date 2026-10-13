@@ -2238,6 +2238,25 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
         self.assertNotIn("{{", output)
         self.assertIn("10.000000 TSLA @ 150.0000 USD", output)
 
+    def test_long_position_negative_cost_basis_falls_back_to_price(self):
+        lines = []
+        self.generator._append_snapshot_lot(
+            lines=lines,
+            lot_date="2026-01-01",
+            firm="Vanguard",
+            ticker="VTI",
+            holding_tag="Assets:Vanguard:Brokerage:VTI",
+            b_account="Assets:Vanguard:Brokerage",
+            qty=10.0,
+            snapshot_qty=10.0,
+            price=200.0,
+            cost_basis=-500.0,
+        )
+        output = "".join(lines)
+        # Should not flip negative cost basis to positive on a long position
+        self.assertNotIn("{{", output)
+        self.assertIn("10.000000 VTI @ 200.0000 USD", output)
+
     def test_export_modular_ledger_preserves_file_permissions(self):
         import os
         with tempfile.TemporaryDirectory() as tmp_dir:

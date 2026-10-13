@@ -1449,7 +1449,11 @@ class BeancountGenerator:
         # signs across the transaction window, the snapshot cost basis represents the
         # current position rather than the historical baseline lot.
         has_same_sign = (qty > 0 and snapshot_qty > 0) or (qty < 0 and snapshot_qty < 0)
-        if cost_basis is not None and abs(float(cost_basis)) > 0 and has_same_sign:
+        if qty > 0:
+            has_valid_cost_basis = cost_basis is not None and float(cost_basis) > 0
+        else:
+            has_valid_cost_basis = cost_basis is not None and abs(float(cost_basis)) > 0
+        if has_valid_cost_basis and has_same_sign:
             scale_ratio = abs(qty) / abs(snapshot_qty)
             scaled_cost_basis = abs(float(cost_basis)) * scale_ratio
             lines.append(
