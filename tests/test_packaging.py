@@ -51,6 +51,7 @@ class TestPackaging(unittest.TestCase):
         self.assertIn("dev", opt_deps)
         self.assertIn("all", opt_deps)
         self.assertIn("mcp", opt_deps)
+        self.assertIn("keyring", opt_deps)
         self.assertIn("test", opt_deps)
         self.assertIn("beancount", opt_deps)
 

@@ -11,10 +11,11 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import requests
 
@@ -155,6 +156,8 @@ class EmpowerDashboardClient:
         mock_mode: bool = False,
         debug: bool = False,
         log_file: Optional[Union[str, Path]] = None,
+        password_provider: Optional[Callable[[], Optional[str]]] = None,
+        username: Optional[str] = None,
     ):
         # `.expanduser()` so a `~`-prefixed EMPOWER_SESSION_FILE resolves to the
         # home directory rather than a literal "~" folder in the CWD.
@@ -165,9 +168,17 @@ class EmpowerDashboardClient:
         self.mock_mode = mock_mode
         self.debug = debug or _env_flag(os.environ.get("EMPOWER_DEBUG"))
         self.log_file = Path(log_file) if log_file else None
+        self.password_provider = password_provider
+        self._local = threading.local()
+        self._reauth_lock = threading.Lock()
+        self._reauth_count: int = 0
         self.session = requests.Session()
         self.csrf: str = ""
-        self.username: Optional[str] = None
+        self.username: Optional[str] = (
+            clean_api_text(username)
+            if username
+            else clean_api_text(os.environ.get("EMPOWER_USERNAME") or os.environ.get("PERSONAL_CAPITAL_EMAIL") or "") or None
+        )
         self.available_challenge_methods: List[Dict[str, Any]] = []
 
         # Configure logger
@@ -180,6 +191,14 @@ class EmpowerDashboardClient:
                 self.load_session(self.session_file)
             except Exception as e:
                 self._log_debug(f"Failed to auto-load session from {self.session_file}: {e}")
+
+    @property
+    def _reauthenticating(self) -> bool:
+        return bool(getattr(self._local, "reauthenticating", False))
+
+    @_reauthenticating.setter
+    def _reauthenticating(self, val: bool) -> None:
+        self._local.reauthenticating = val
 
     def _setup_logging(self) -> None:
         """Configure debug logging handlers."""
@@ -295,6 +314,17 @@ class EmpowerDashboardClient:
             payload.update(data)
 
         resp = self.post(endpoint, payload)
+        if resp.status_code == 401:
+            reauth_res = self._attempt_auto_reauth(endpoint, data, "HTTP 401 Unauthorized", 401)
+            if reauth_res is not None:
+                return reauth_res
+            raise SessionExpiredError(
+                f"HTTP 401 Unauthorized from {endpoint}",
+                status_code=401,
+                error_code=401,
+                response_body=resp.text,
+            )
+
         if resp.status_code != 200:
             raise EmpowerError(
                 f"HTTP {resp.status_code} error from {endpoint}",
@@ -322,11 +352,45 @@ class EmpowerDashboardClient:
                     err_code = first_err.get("code")
 
             if err_code in (201, 202, 203) or "session" in err_msg.lower():
+                reauth_res = self._attempt_auto_reauth(endpoint, data, err_msg, err_code)
+                if reauth_res is not None:
+                    return reauth_res
                 raise SessionExpiredError(f"Session expired ({err_msg})", status_code=200, error_code=err_code)
 
             raise EmpowerError(f"API request failed: {err_msg}", status_code=200, error_code=err_code, response_body=resp.text)
 
         return res_json
+
+    def _attempt_auto_reauth(
+        self, endpoint: str, data: Optional[Dict[str, Any]], err_msg: str, err_code: Any
+    ) -> Optional[Dict[str, Any]]:
+        """Attempt automatic re-authentication when session expires."""
+        if getattr(self._local, "reauthenticating", False) or self.password_provider is None:
+            return None
+
+        current_count = self._reauth_count
+        with self._reauth_lock:
+            if self._reauth_count == current_count:
+                self._log_debug("Session expired during fetch; attempting automatic re-authentication...")
+                try:
+                    self.reauthenticate()
+                    self._reauth_count += 1
+                except RequireTwoFactorException:
+                    raise
+                except Exception as e:
+                    self.logger.warning("Automatic re-authentication failed: %s", e)
+                    status = 401 if err_code == 401 else 200
+                    raise SessionExpiredError(
+                        f"Session expired ({err_msg}); automatic re-authentication failed: {e}",
+                        status_code=status,
+                        error_code=err_code,
+                    ) from e
+
+        self._local.reauthenticating = True
+        try:
+            return self.fetch(endpoint, data)
+        finally:
+            self._local.reauthenticating = False
 
     def _validate_login_response(self, res_json: Any, endpoint_name: str = "login endpoint") -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Validate and extract spHeader and spData from a login response.
@@ -564,7 +628,13 @@ class EmpowerDashboardClient:
             "csrf": self.csrf,
         }
 
-        resp = self.post("/credential/authenticatePassword", payload)
+        try:
+            resp = self.post("/credential/authenticatePassword", payload)
+        except requests.RequestException as e:
+            raise LoginFailedException(f"Failed to reach login endpoint: {e}") from e
+        if resp.status_code != 200:
+            raise LoginFailedException(f"Failed to reach login endpoint (HTTP {resp.status_code})")
+
         try:
             res_json = resp.json()
         except ValueError as e:
@@ -588,6 +658,50 @@ class EmpowerDashboardClient:
             self.username = clean_api_text(sp_header["username"])
 
         return res_json
+
+    def _resolve_reauth_password(self, password: Optional[str]) -> Optional[str]:
+        if password:
+            return password
+        if self.password_provider:
+            return self.password_provider()
+        return None
+
+    def reauthenticate(self, password: Optional[str] = None, username: Optional[str] = None) -> Dict[str, Any]:
+        """Re-authenticate an existing session using password when device is remembered.
+
+        Useful for unattended background syncs (cron, agents) where the session
+        cookie (JSESSIONID) has expired, but the device registration is remembered
+        (authLevel: USER_REMEMBERED), avoiding 2FA SMS challenges.
+        """
+        user = username or self.username or os.environ.get("EMPOWER_USERNAME") or os.environ.get("PERSONAL_CAPITAL_EMAIL")
+        if not user:
+            raise LoginFailedException("Cannot re-authenticate: username is not known.")
+        self.username = clean_api_text(user)
+
+        ident_res = self.identify_user(username=self.username)
+        sp_header, _ = self._validate_login_response(ident_res, "user identification endpoint")
+        auth_level = sp_header.get("authLevel", "")
+
+        if auth_level == "SESSION_AUTHENTICATED":
+            self._log_debug("Session is already authenticated.")
+            if not self.mock_mode:
+                self.save_session(self.session_file)
+            return ident_res
+
+        if auth_level in ("MFA_REQUIRED", "USER_IDENTIFIED", "NONE", ""):
+            raise RequireTwoFactorException(
+                f"Two-factor authentication (2FA) is required (authLevel: {auth_level}). "
+                "Interactive login is required: run 'empower --login'."
+            )
+
+        pw = self._resolve_reauth_password(password)
+        if not pw:
+            raise LoginFailedException(f"Password required for {auth_level} re-authentication.")
+
+        auth_res = self.authenticate_password(password=pw)
+        if not self.mock_mode:
+            self.save_session(self.session_file)
+        return auth_res
 
     def save_session(self, filepath: Optional[Union[str, Path]] = None) -> Path:
         """
@@ -727,7 +841,7 @@ class EmpowerDashboardClient:
 
             self.csrf = data.get("csrf", "") if isinstance(data.get("csrf"), str) else ""
             raw_username = data.get("username")
-            if isinstance(raw_username, str):
+            if isinstance(raw_username, str) and not self.username:
                 self.username = clean_api_text(raw_username)
             if data.get("base_url") and isinstance(data.get("base_url"), str):
                 self.base_url = data["base_url"].rstrip("/")

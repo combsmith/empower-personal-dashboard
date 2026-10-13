@@ -60,6 +60,9 @@ This library provides full programmatic and CLI access to:
 # Core package and CLI
 pip install empower-personal-dashboard
 
+# With OS Keyring password storage:
+pip install "empower-personal-dashboard[keyring]"
+
 # With Model Context Protocol (MCP) agent support:
 pip install "empower-personal-dashboard[mcp]"
 
@@ -98,7 +101,40 @@ empower --login
 
 This binds the device and saves an authenticated session file to `~/.empower_personal_dashboard_session.json` with secure owner-only POSIX permissions (`0600`). Subsequent runs operate completely unattended without passwords or 2FA prompts.
 
-### 2. Unattended Data Extraction
+### 2. Unattended Background Sync (Keyring & Credential Helpers)
+
+Web sessions (`JSESSIONID`) expire after 15–30 minutes of inactivity. When running unattended background cron jobs or scheduled extractions, Empower recognizes the bound device (`authLevel: USER_REMEMBERED`) and only requires password re-authentication without 2FA SMS challenges.
+
+You can enable hands-free, secure password retrieval using either the OS system keychain or a pluggable credential helper:
+
+#### Option A: OS System Keyring (macOS Keychain, Linux SecretService, Windows Credential Manager)
+
+Store your password securely once in the system keychain:
+```bash
+empower --set-keyring
+```
+
+Then run unattended syncs with `--keyring` (or set `EMPOWER_KEYRING=1` in your crontab/environment):
+```bash
+empower --keyring --all --csv
+```
+
+#### Option B: Pluggable Credential Helper
+
+Retrieve your password directly from your preferred password manager using `--credential-helper` (or set `EMPOWER_CREDENTIAL_HELPER` in your environment):
+
+```bash
+# Using 1Password CLI:
+empower --credential-helper "op read op://personal/empower/password" --all --beancount
+
+# Using pass (Standard UNIX Password Manager):
+empower --credential-helper "pass show finance/empower" --balances
+
+# Using LastPass CLI:
+empower --credential-helper "lpass show --password empower" --transactions
+```
+
+### 3. Unattended Data Extraction
 
 ```bash
 # Extract balances and display aligned table
@@ -118,7 +154,7 @@ empower --format markdown
 empower --all --format json
 ```
 
-### 3. Beancount Plain-Text Accounting (PTA) Export
+### 4. Beancount Plain-Text Accounting (PTA) Export
 
 Export double-entry ledgers, ground-truth balance assertions, and commodity price points directly into [Beancount](https://github.com/beancount/beancount) format:
 

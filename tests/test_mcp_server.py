@@ -75,6 +75,29 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    def test_create_mcp_server_configures_password_provider(self) -> None:
+        if not self._require_server():
+            return
+        client = EmpowerDashboardClient(mock_mode=True)
+        self.assertIsNone(client.password_provider)
+        create_mcp_server(client=client)
+        self.assertIsNotNone(client.password_provider)
+
+    @patch("empower_personal_dashboard.mcp_server.resolve_password")
+    def test_mcp_password_provider_respects_falsy_empower_keyring(self, mock_resolve) -> None:
+        if not self._require_server():
+            return
+        client = EmpowerDashboardClient(mock_mode=True, username="mcp_user@example.com")
+        create_mcp_server(client=client)
+        self.assertIsNotNone(client.password_provider)
+
+        with patch.dict(os.environ, {"EMPOWER_KEYRING": "0"}, clear=True):
+            client.password_provider()
+            mock_resolve.assert_called_with(
+                username="mcp_user@example.com",
+                credential_helper=None,
+            )
+
     def test_tool_get_net_worth_summary(self) -> None:
         if not self._require_server():
             return

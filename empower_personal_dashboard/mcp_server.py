@@ -35,6 +35,7 @@ from empower_personal_dashboard.cli import (
     render_transactions_table,
 )
 from empower_personal_dashboard.client import EmpowerDashboardClient
+from empower_personal_dashboard.credentials import resolve_password
 from empower_personal_dashboard.exceptions import (
     EmpowerError,
     LoginFailedException,
@@ -142,7 +143,21 @@ def create_mcp_server(
     )
 
     # Initialize client and cache
-    empower_client = client or EmpowerDashboardClient()
+    empower_client: Optional[EmpowerDashboardClient] = None
+
+    def _default_mcp_password_provider() -> Optional[str]:
+        username = empower_client.username if empower_client is not None else None
+        if not username:
+            username = os.environ.get("EMPOWER_USERNAME") or os.environ.get("PERSONAL_CAPITAL_EMAIL")
+        return resolve_password(
+            username=username,
+            credential_helper=os.environ.get("EMPOWER_CREDENTIAL_HELPER"),
+        )
+
+    empower_client = client or EmpowerDashboardClient(password_provider=_default_mcp_password_provider)
+    if empower_client.password_provider is None:
+        empower_client.password_provider = _default_mcp_password_provider
+
     cache = _DataCache(ttl_seconds=cache_ttl_seconds)
 
     last_session_mtime: float = 0.0
@@ -1248,11 +1263,23 @@ Examples:
         )
         sys.exit(1)
 
+    client: Optional[EmpowerDashboardClient] = None
+
+    def _mcp_password_provider() -> Optional[str]:
+        username = client.username if client is not None else None
+        if not username:
+            username = os.environ.get("EMPOWER_USERNAME") or os.environ.get("PERSONAL_CAPITAL_EMAIL")
+        return resolve_password(
+            username=username,
+            credential_helper=os.environ.get("EMPOWER_CREDENTIAL_HELPER"),
+        )
+
     # Initialize client
     client = EmpowerDashboardClient(
         session_file=args.session_path,
         mock_mode=args.sandbox,
         debug=args.debug,
+        password_provider=_mcp_password_provider,
     )
 
     server = create_mcp_server(client=client)
