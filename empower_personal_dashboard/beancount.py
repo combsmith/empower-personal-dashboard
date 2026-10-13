@@ -12,6 +12,7 @@ Provides zero-heavy-dependency formatting for Beancount directives:
 import datetime
 import json
 import logging
+import os
 import re
 import tempfile
 from pathlib import Path
@@ -1893,27 +1894,35 @@ class BeancountGenerator:
                 _verify_not_symlink(target_file)
 
             dest.mkdir(parents=True, exist_ok=True)
-            backup_contents: Dict[Path, Optional[str]] = {}
-            created_files: List[Path] = []
+            temp_files: List[Tuple[Path, Path]] = []
             try:
+                # Stage 1: Write all temp files into dest using mkstemp (O_CREAT | O_EXCL,
+                # immune to pre-created symlinks), preserving existing restrictive file modes.
                 for sf in staged_files:
                     target_file = dest / sf.name
-                    if target_file.exists():
-                        backup_contents[target_file] = target_file.read_text(encoding="utf-8")
-                    else:
-                        backup_contents[target_file] = None
+                    target_mode = (target_file.stat().st_mode & 0o777) if target_file.exists() else 0o600
 
-                    tmp_file = dest / f".{sf.name}.tmp"
-                    tmp_file.write_text(sf.read_text(encoding="utf-8"), encoding="utf-8")
-                    tmp_file.replace(target_file)
+                    fd, tmp_path_str = tempfile.mkstemp(prefix=f".{sf.name}.", suffix=".tmp", dir=dest)
+                    tmp_path = Path(tmp_path_str)
+                    try:
+                        os.chmod(tmp_path, target_mode)
+                        with open(fd, "w", encoding="utf-8") as f:
+                            f.write(sf.read_text(encoding="utf-8"))
+                    except Exception:
+                        tmp_path.unlink(missing_ok=True)
+                        raise
+                    temp_files.append((tmp_path, target_file))
+
+                # Stage 2: All temp files successfully written. Commit atomically using os.replace,
+                # which requires no additional disk space allocation.
+                created_files: List[Path] = []
+                for tmp_path, target_file in temp_files:
+                    os.replace(tmp_path, target_file)
                     created_files.append(target_file)
             except Exception:
-                # Rollback on write failure: restore previous contents
-                for target_file, orig in backup_contents.items():
-                    if orig is not None:
-                        target_file.write_text(orig, encoding="utf-8")
-                    elif target_file.exists():
-                        target_file.unlink(missing_ok=True)
+                # Cleanup any uncommitted temp files on failure; target files remain untouched
+                for tmp_path, _ in temp_files:
+                    tmp_path.unlink(missing_ok=True)
                 raise
 
         return created_files

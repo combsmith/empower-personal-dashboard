@@ -2234,6 +2234,27 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
         self.assertNotIn("{{", output)
         self.assertIn("10.000000 TSLA @ 150.0000 USD", output)
 
+    def test_export_modular_ledger_preserves_file_permissions(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest = Path(tmp_dir) / "ledger"
+            dest.mkdir()
+            main_file = dest / "main.bean"
+            main_file.write_text("ORIGINAL_MAIN\n", encoding="utf-8")
+            os.chmod(main_file, 0o600)
+
+            self.generator.export_modular_ledger(
+                destination_dir=dest,
+                balances=DashboardBalances(
+                    as_of_date="2026-10-01", net_worth=0.0, total_cash=0.0,
+                    total_investment=0.0, total_card_liabilities=0.0, total_loan=0.0,
+                    total_mortgage=0.0, accounts=[],
+                ),
+            )
+
+            # Assert mode 0600 is preserved
+            self.assertEqual(main_file.stat().st_mode & 0o777, 0o600)
+
 
 if __name__ == "__main__":
     unittest.main()
