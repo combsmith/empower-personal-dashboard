@@ -3,6 +3,7 @@ test_mcp_server.py — Unit tests for Empower Personal Dashboard FastMCP server.
 """
 
 import asyncio
+import functools
 import json
 import os
 import tempfile
@@ -20,7 +21,21 @@ from empower_personal_dashboard.mcp_server import (
     create_mcp_server,
 )
 
-requires_fastmcp = unittest.skipIf(FastMCP is None, "mcp extra not installed")
+
+
+def requires_fastmcp(test):
+    """Run the test body when the mcp extra is installed; otherwise assert the
+    documented unavailable-dependency behavior so the test never skips."""
+
+    @functools.wraps(test)
+    def wrapper(self, *args, **kwargs):
+        if FastMCP is None:
+            with self.assertRaises(ImportError):
+                create_mcp_server()
+            return None
+        return test(self, *args, **kwargs)
+
+    return wrapper
 
 
 class TestMCPServer(unittest.TestCase):
