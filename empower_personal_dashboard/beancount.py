@@ -1913,10 +1913,19 @@ class BeancountGenerator:
     @staticmethod
     def _commit_staged_files(staged_files: List[Path], dest: Path) -> List[Path]:
         """Atomically commit staged files to destination directory."""
-        for sf in staged_files:
-            _verify_not_symlink(dest / sf.name)
+        def preflight() -> None:
+            for sf in staged_files:
+                target = dest / sf.name
+                _verify_not_symlink(target)
+                if target.exists() and not target.is_file():
+                    raise ValueError(f"Refusing to replace non-file ledger target: {target}")
 
+        preflight()
         dest.mkdir(parents=True, exist_ok=True)
+        # Pin the destination: a symlink planted during generation must not redirect writes.
+        if dest.is_symlink() or not dest.is_dir():
+            raise ValueError(f"Refusing to write to non-directory or symlinked destination: {dest}")
+        preflight()
         temp_files: List[Tuple[Path, Path]] = []
         backups: List[Tuple[Path, Path]] = []
         created_files: List[Path] = []

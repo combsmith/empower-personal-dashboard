@@ -2287,6 +2287,29 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
             # Assert main.bean was not overwritten before the symlink check fired
             self.assertEqual((dest / "main.bean").read_text(encoding="utf-8"), "ORIGINAL_MAIN\n")
 
+    def test_export_modular_ledger_rejects_directory_component_target(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest = Path(tmp_dir) / "ledger"
+            dest.mkdir()
+            (dest / "accounts.bean").mkdir()
+            (dest / "main.bean").write_text("ORIGINAL_MAIN\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                self.generator.export_modular_ledger(destination_dir=dest)
+            self.assertTrue((dest / "accounts.bean").is_dir())
+            self.assertEqual((dest / "main.bean").read_text(encoding="utf-8"), "ORIGINAL_MAIN\n")
+
+    def test_commit_staged_files_rejects_destination_symlinked_after_staging(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            real = Path(tmp_dir) / "real"
+            real.mkdir()
+            link = Path(tmp_dir) / "link"
+            link.symlink_to(real)
+            sf = Path(tmp_dir) / "main.bean"
+            sf.write_text("X\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                BeancountGenerator._commit_staged_files([sf], link)
+            self.assertEqual(list(real.iterdir()), [])
+
     def test_short_position_opposite_sign_does_not_inherit_cost_basis(self):
         lines = []
         # qty is +10 (long), but snapshot_qty is -20 (short)
