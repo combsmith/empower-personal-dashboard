@@ -2237,6 +2237,27 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
             leftovers = [f.name for f in dest.iterdir() if f.name.endswith(".bak") or f.name.endswith(".tmp")]
             self.assertEqual(leftovers, [])
 
+    def test_export_modular_ledger_backup_cleanup_failure_keeps_new_files(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest = Path(tmp_dir) / "ledger"
+            dest.mkdir()
+            (dest / "main.bean").write_text("ORIGINAL_MAIN\n", encoding="utf-8")
+            (dest / "accounts.bean").write_text("ORIGINAL_ACCOUNTS\n", encoding="utf-8")
+
+            test_holdings = DashboardHoldings(
+                as_of_date="2026-10-01", total_value=100.0,
+                holdings=[{"ticker": "VTI", "quantity": 1.0}],
+            )
+
+            with patch.object(Path, "unlink", side_effect=PermissionError("cleanup denied")):
+                paths = self.generator.export_modular_ledger(
+                    destination_dir=dest, holdings=test_holdings,
+                )
+
+            self.assertTrue(paths)
+            self.assertNotEqual((dest / "main.bean").read_text(encoding="utf-8"), "ORIGINAL_MAIN\n")
+            self.assertNotEqual((dest / "accounts.bean").read_text(encoding="utf-8"), "ORIGINAL_ACCOUNTS\n")
+
     def test_export_modular_ledger_preflight_symlink_rejection(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             dest = Path(tmp_dir) / "ledger"

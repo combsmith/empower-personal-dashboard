@@ -1930,12 +1930,16 @@ class BeancountGenerator:
                     backups.append((backup_file, target_file))
                 os.replace(tmp_path, target_file)
                 created_files.append(target_file)
-            for backup_file, _ in backups:
-                backup_file.unlink(missing_ok=True)
-            return created_files
         except Exception:
             BeancountGenerator._rollback_committed_files(backups, created_files, temp_files)
             raise
+        # Commit succeeded; backup cleanup is best-effort and must never trigger a rollback.
+        for backup_file, _ in backups:
+            try:
+                backup_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return created_files
 
     def export_modular_ledger(
         self,
