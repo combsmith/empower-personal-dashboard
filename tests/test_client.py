@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import requests
+
 from empower_personal_dashboard.client import EmpowerDashboardClient
 from empower_personal_dashboard.exceptions import (
     EmpowerError,
@@ -1546,6 +1548,36 @@ class TestClientReauthenticateAndAutoRefresh(unittest.TestCase):
         res = self.client.reauthenticate(password="pw123", username="override@example.com")
         self.assertEqual(self.client.username, "override@example.com")
         mock_ident.assert_called_once_with(username="override@example.com")
+
+    @patch.object(EmpowerDashboardClient, "post")
+    def test_authenticate_password_wraps_request_exception(self, mock_post):
+        self.client.mock_mode = False
+        mock_post.side_effect = requests.RequestException("Connection reset by peer")
+        with self.assertRaises(LoginFailedException) as ctx:
+            self.client.authenticate_password("pw123")
+        self.assertIn("Failed to reach login endpoint", str(ctx.exception))
+
+    @patch.object(EmpowerDashboardClient, "post")
+    def test_authenticate_password_non_200_raises_login_failed_exception(self, mock_post):
+        self.client.mock_mode = False
+        resp = MagicMock()
+        resp.status_code = 502
+        mock_post.return_value = resp
+        with self.assertRaises(LoginFailedException) as ctx:
+            self.client.authenticate_password("pw123")
+        self.assertIn("HTTP 502", str(ctx.exception))
+
+    @patch.object(EmpowerDashboardClient, "save_session")
+    @patch.object(EmpowerDashboardClient, "identify_user")
+    def test_reauthenticate_session_authenticated_saves_session(self, mock_ident, mock_save):
+        self.client.mock_mode = False
+        self.client.username = "user@example.com"
+        mock_ident.return_value = {
+            "spHeader": {"success": True, "authLevel": "SESSION_AUTHENTICATED"}
+        }
+        res = self.client.reauthenticate()
+        self.assertEqual(res["spHeader"]["authLevel"], "SESSION_AUTHENTICATED")
+        mock_save.assert_called_once_with(self.client.session_file)
 
 
 if __name__ == "__main__":

@@ -611,7 +611,13 @@ class EmpowerDashboardClient:
             "csrf": self.csrf,
         }
 
-        resp = self.post("/credential/authenticatePassword", payload)
+        try:
+            resp = self.post("/credential/authenticatePassword", payload)
+        except requests.RequestException as e:
+            raise LoginFailedException(f"Failed to reach login endpoint: {e}") from e
+        if resp.status_code != 200:
+            raise LoginFailedException(f"Failed to reach login endpoint (HTTP {resp.status_code})")
+
         try:
             res_json = resp.json()
         except ValueError as e:
@@ -661,6 +667,8 @@ class EmpowerDashboardClient:
 
         if auth_level == "SESSION_AUTHENTICATED":
             self._log_debug("Session is already authenticated.")
+            if not self.mock_mode:
+                self.save_session(self.session_file)
             return ident_res
 
         if auth_level in ("MFA_REQUIRED", "USER_IDENTIFIED", "NONE", ""):
