@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -1892,6 +1893,24 @@ class BeancountGenerator:
             raise
 
     @staticmethod
+    def _rollback_committed_files(
+        backups: List[Tuple[Path, Path]],
+        created_files: List[Path],
+        temp_files: List[Tuple[Path, Path]],
+    ) -> None:
+        """Roll back partially committed files on failure."""
+        for backup_file, target_file in backups:
+            try:
+                os.replace(backup_file, target_file)
+            except Exception:
+                pass
+        for cf in created_files:
+            if not any(cf == orig for _, orig in backups):
+                cf.unlink(missing_ok=True)
+        for tmp_path, _ in temp_files:
+            tmp_path.unlink(missing_ok=True)
+
+    @staticmethod
     def _commit_staged_files(staged_files: List[Path], dest: Path) -> List[Path]:
         """Atomically commit staged files to destination directory."""
         for sf in staged_files:
@@ -1899,17 +1918,23 @@ class BeancountGenerator:
 
         dest.mkdir(parents=True, exist_ok=True)
         temp_files: List[Tuple[Path, Path]] = []
+        backups: List[Tuple[Path, Path]] = []
+        created_files: List[Path] = []
         try:
             for sf in staged_files:
                 temp_files.append(BeancountGenerator._write_temp_file(sf, dest))
-            created_files: List[Path] = []
             for tmp_path, target_file in temp_files:
+                if target_file.exists():
+                    backup_file = dest / f".{target_file.name}.{uuid.uuid4().hex}.bak"
+                    os.replace(target_file, backup_file)
+                    backups.append((backup_file, target_file))
                 os.replace(tmp_path, target_file)
                 created_files.append(target_file)
+            for backup_file, _ in backups:
+                backup_file.unlink(missing_ok=True)
             return created_files
         except Exception:
-            for tmp_path, _ in temp_files:
-                tmp_path.unlink(missing_ok=True)
+            BeancountGenerator._rollback_committed_files(backups, created_files, temp_files)
             raise
 
     def export_modular_ledger(

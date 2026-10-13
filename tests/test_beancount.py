@@ -2,6 +2,7 @@
 test_beancount.py — Hermetic unit tests for Beancount plain-text accounting export engine.
 """
 
+import os
 import re
 import tempfile
 import unittest
@@ -2188,6 +2189,53 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
             self.assertEqual((dest / "main.bean").read_text(encoding="utf-8"), "ORIGINAL_MAIN\n")
             self.assertEqual((dest / "accounts.bean").read_text(encoding="utf-8"), "ORIGINAL_ACCOUNTS\n")
             self.assertEqual((dest / "balances.bean").read_text(encoding="utf-8"), "ORIGINAL_BALANCES\n")
+
+    def test_export_modular_ledger_rollback_on_replace_failure(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest = Path(tmp_dir) / "ledger"
+            dest.mkdir()
+            (dest / "main.bean").write_text("ORIGINAL_MAIN\n", encoding="utf-8")
+            (dest / "accounts.bean").write_text("ORIGINAL_ACCOUNTS\n", encoding="utf-8")
+            (dest / "balances.bean").write_text("ORIGINAL_BALANCES\n", encoding="utf-8")
+
+            test_balances = DashboardBalances(
+                as_of_date="2026-10-01", net_worth=0.0, total_cash=0.0,
+                total_investment=0.0, total_card_liabilities=0.0, total_loan=0.0,
+                total_mortgage=0.0, accounts=[],
+            )
+            test_holdings = DashboardHoldings(
+                as_of_date="2026-10-01", total_value=100.0,
+                holdings=[{"ticker": "VTI", "quantity": 1.0}],
+            )
+
+            real_replace = os.replace
+            replace_calls = 0
+
+            def failing_replace(src, dst):
+                nonlocal replace_calls
+                if ".bak" in str(dst) or ".bak" in str(src):
+                    return real_replace(src, dst)
+                replace_calls += 1
+                if replace_calls > 1:
+                    raise OSError("Simulated I/O commit error")
+                return real_replace(src, dst)
+
+            with patch("os.replace", side_effect=failing_replace):
+                with self.assertRaises(OSError):
+                    self.generator.export_modular_ledger(
+                        destination_dir=dest,
+                        balances=test_balances,
+                        holdings=test_holdings,
+                    )
+
+            # Assert original files were rolled back and preserved
+            self.assertEqual((dest / "main.bean").read_text(encoding="utf-8"), "ORIGINAL_MAIN\n")
+            self.assertEqual((dest / "accounts.bean").read_text(encoding="utf-8"), "ORIGINAL_ACCOUNTS\n")
+            self.assertEqual((dest / "balances.bean").read_text(encoding="utf-8"), "ORIGINAL_BALANCES\n")
+
+            # Assert no leftover temporary or backup files
+            leftovers = [f.name for f in dest.iterdir() if f.name.endswith(".bak") or f.name.endswith(".tmp")]
+            self.assertEqual(leftovers, [])
 
     def test_export_modular_ledger_preflight_symlink_rejection(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
