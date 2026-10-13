@@ -872,7 +872,7 @@ def _report_live_mode(args, client, progress_file) -> None:
 def _report_mode(args, client, offline_mode, progress_file) -> None:
     if offline_mode:
         if not args.quiet:
-            print(f"[*] Processing offline financial datasets...", file=progress_file)
+            print("[*] Processing offline financial datasets...", file=progress_file)
     else:
         _report_live_mode(args, client, progress_file)
 

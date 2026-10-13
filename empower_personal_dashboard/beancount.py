@@ -39,6 +39,7 @@ _ACCOUNT_OPEN_DATE = "2000-01-01"
 
 # Canonical Beancount account names reused across multiple generators.
 ACCT_OPENING_BALANCES = "Equity:Opening-Balances"
+ACCT_EQUITY_TRANSFERS = "Equity:Transfers"
 ACCT_INCOME_DIVIDENDS = "Income:Dividends"
 ACCT_INCOME_CAPITAL_GAINS = "Income:CapitalGains"
 ACCT_EXPENSES_FEES = "Expenses:Fees"
@@ -205,14 +206,14 @@ def _parse_simple_yaml(content: str) -> Dict[str, Any]:
 
         if current_section in ("accounts", "categories", "transaction_overrides"):
             if line.startswith('"'):
-                m = re.match(r'^"([^"]+)"\s*:\s*(.*)$', line)
+                m = re.match(r'^"([^"]+)"\s*:(.*)$', line)
                 if m:
                     k, v = m.group(1).strip(), m.group(2).strip().strip('"').strip("'")
                     if k and v:
                         result[current_section][k] = v
                     continue
             elif line.startswith("'"):
-                m = re.match(r"^'([^']+)'\s*:\s*(.*)$", line)
+                m = re.match(r"^'([^']+)'\s*:(.*)$", line)
                 if m:
                     k, v = m.group(1).strip(), m.group(2).strip().strip('"').strip("'")
                     if k and v:
@@ -530,7 +531,7 @@ class BeancountMapper:
             or "payment" in type_clean
         )
         if is_transfer:
-            return "Equity:Transfers"
+            return ACCT_EQUITY_TRANSFERS
 
         # 5. Fallbacks based on transaction type
         if is_income:
@@ -538,7 +539,7 @@ class BeancountMapper:
         if is_spending:
             return "Expenses:Uncategorized"
 
-        return "Equity:Transfers"
+        return ACCT_EQUITY_TRANSFERS
 
 
 def _calculate_account_transaction_totals(
@@ -802,7 +803,7 @@ class BeancountGenerator:
 
         seen_accounts: Set[str] = {
             "Equity:Opening-Balances",
-            "Equity:Transfers",
+            ACCT_EQUITY_TRANSFERS,
             "Expenses:Uncategorized",
             "Expenses:Fees",
             "Income:Uncategorized",
@@ -1756,8 +1757,10 @@ class BeancountGenerator:
             f"  {primary_account:<36} -{_format_quantity(qty)} {ticker} {{}} "
             f"@ {_format_price(price)} USD\n"
         )
-        lines.append(f"  {primary_account:<36} {amount:>8.2f} USD\n")
-        lines.append(f"  {cap_gains_acct}\n\n")
+        lines.extend([
+            f"  {primary_account:<36} {amount:>8.2f} USD\n",
+            f"  {cap_gains_acct}\n\n",
+        ])
 
     def _emit_investment_dividend(self, ctx: Dict[str, Any], lines: List[str]) -> None:
         dividend_acct = self.mapper.categories.get("Dividends") or ACCT_INCOME_DIVIDENDS

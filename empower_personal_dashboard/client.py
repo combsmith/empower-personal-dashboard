@@ -54,6 +54,10 @@ DEFAULT_HEADERS = {
 # would silently enable debug logging and expose sensitive auth details.
 _FALSY_ENV_VALUES = frozenset({"", "0", "false", "no", "off", "none"})
 
+# Synthetic account names shared by the offline mock generators.
+_MOCK_401K_ACCOUNT_NAME = "Horizon 401(k) Retirement Plan"
+_MOCK_IRA_ACCOUNT_NAME = "Pinnacle Traditional IRA"
+
 
 def _env_flag(value: Optional[str]) -> bool:
     """Interpret an environment-variable string as a boolean.
@@ -639,7 +643,7 @@ class EmpowerDashboardClient:
             res_json = resp.json()
         except ValueError as e:
             raise LoginFailedException(f"Malformed response from authentication endpoint: {e}") from e
-        sp_header, sp_data = self._validate_login_response(res_json, "authentication endpoint")
+        sp_header, _ = self._validate_login_response(res_json, "authentication endpoint")
 
         if not sp_header.get("success", False):
             errors = sp_header.get("errors", [])
@@ -1126,7 +1130,7 @@ class EmpowerDashboardClient:
         accounts = [
             {
                 "account_id": "ACC-INV-001",
-                "account_name": "Horizon 401(k) Retirement Plan",
+                "account_name": _MOCK_401K_ACCOUNT_NAME,
                 "firm_name": "Horizon Investments",
                 "account_type": "INVESTMENT",
                 "balance": 350000.00,
@@ -1137,7 +1141,7 @@ class EmpowerDashboardClient:
             },
             {
                 "account_id": "ACC-IRA-002",
-                "account_name": "Pinnacle Traditional IRA",
+                "account_name": _MOCK_IRA_ACCOUNT_NAME,
                 "firm_name": "Pinnacle Brokerage",
                 "account_type": "INVESTMENT",
                 "balance": 125000.00,
@@ -1203,7 +1207,7 @@ class EmpowerDashboardClient:
         mock_holdings = [
             {
                 "user_account_id": 1001,
-                "account_name": "Horizon 401(k) Retirement Plan",
+                "account_name": _MOCK_401K_ACCOUNT_NAME,
                 "ticker": "VTI",
                 "cusip": "922908769",
                 "description": "Vanguard Total Stock Market ETF",
@@ -1218,7 +1222,7 @@ class EmpowerDashboardClient:
             },
             {
                 "user_account_id": 1001,
-                "account_name": "Horizon 401(k) Retirement Plan",
+                "account_name": _MOCK_401K_ACCOUNT_NAME,
                 "ticker": "BND",
                 "cusip": "921937835",
                 "description": "Vanguard Total Bond Market ETF",
@@ -1233,7 +1237,7 @@ class EmpowerDashboardClient:
             },
             {
                 "user_account_id": 1002,
-                "account_name": "Pinnacle Traditional IRA",
+                "account_name": _MOCK_IRA_ACCOUNT_NAME,
                 "ticker": "SPY",
                 "cusip": "78462F103",
                 "description": "SPDR S&P 500 ETF Trust",
@@ -1248,7 +1252,7 @@ class EmpowerDashboardClient:
             },
             {
                 "user_account_id": 1002,
-                "account_name": "Pinnacle Traditional IRA",
+                "account_name": _MOCK_IRA_ACCOUNT_NAME,
                 "ticker": "AAPL",
                 "cusip": "037833100",
                 "description": "Apple Inc.",
@@ -1307,7 +1311,7 @@ class EmpowerDashboardClient:
                 "user_transaction_id": "TXN-002",
                 "account_id": "ACC-INV-001",
                 "user_account_id": 1001,
-                "account_name": "Horizon 401(k) Retirement Plan",
+                "account_name": _MOCK_401K_ACCOUNT_NAME,
                 "transaction_date": f"{today_str[:7]}-15",
                 "description": "Elective Payroll Contribution",
                 "original_description": "PLAN ELECTIVE CONTRIB",
@@ -1331,7 +1335,7 @@ class EmpowerDashboardClient:
                 "user_transaction_id": "TXN-003",
                 "account_id": "ACC-IRA-002",
                 "user_account_id": 1002,
-                "account_name": "Pinnacle Traditional IRA",
+                "account_name": _MOCK_IRA_ACCOUNT_NAME,
                 "transaction_date": f"{today_str[:7]}-10",
                 "description": "Dividend Received — SPDR S&P 500 ETF (SPY)",
                 "original_description": "DIVIDEND ON SPY",
