@@ -7,11 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-12
+
 ### Added
-- Support OS keyring and pluggable credential helpers for unattended background syncs ([#55](https://github.com/petry-projects/empower-personal-dashboard/issues/55)):
+- Support OS keyring and pluggable credential helpers for unattended background syncs ([#55](https://github.com/petry-projects/empower-personal-dashboard/issues/55), [#84](https://github.com/petry-projects/empower-personal-dashboard/pull/84)):
   - Added `empower_personal_dashboard.credentials` module with `get_password_from_helper`, `get_password_from_keyring`, `set_password_in_keyring`, and hierarchical `resolve_password`.
   - Added CLI flags `--keyring`, `--set-keyring`, and `--credential-helper <command>`, as well as support for environment variables `EMPOWER_KEYRING` and `EMPOWER_CREDENTIAL_HELPER`.
-  - Implemented `reauthenticate()` and automatic unattended session refresh in `EmpowerDashboardClient` on `SessionExpiredError` (Code 201/202/203) when `USER_REMEMBERED` device binding is active.
+  - Implemented `reauthenticate()` and automatic unattended session refresh in `EmpowerDashboardClient` on `SessionExpiredError` (Code 201/202/203) when `USER_REMEMBERED` device binding is active, with concurrent reauth synchronization.
   - Added optional dependency `keyring>=24.0.0` in `pyproject.toml` (`[keyring]`, `[dev]`, `[all]`).
 
 ## [0.5.0] - 2026-10-12
@@ -120,7 +122,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Authoritative OpenAPI 3.1 specification (`docs/openapi.yaml`) with Redocly CI linting and hermetic contract tests.
 - PyPI onboarding probe, build verification, and Trusted Publishing OIDC workflow.
 
-[Unreleased]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.2.0...v0.3.0
