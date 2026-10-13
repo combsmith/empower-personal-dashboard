@@ -45,6 +45,22 @@ ACCT_INCOME_DIVIDENDS = "Income:Dividends"
 ACCT_INCOME_CAPITAL_GAINS = "Income:CapitalGains"
 ACCT_EXPENSES_FEES = "Expenses:Fees"
 
+# Modular ledger standard filenames
+BEAN_MAIN = "main.bean"
+BEAN_ACCOUNTS = "accounts.bean"
+BEAN_BALANCES = "balances.bean"
+BEAN_HOLDINGS = "holdings.bean"
+BEAN_PRICES = "prices.bean"
+BEAN_TRANSACTIONS = "transactions.bean"
+STANDARD_MODULAR_BEANS = frozenset({
+    BEAN_MAIN,
+    BEAN_ACCOUNTS,
+    BEAN_BALANCES,
+    BEAN_HOLDINGS,
+    BEAN_PRICES,
+    BEAN_TRANSACTIONS,
+})
+
 # Default firm / account identity fallbacks used when upstream data is missing.
 _FIRM_INSTITUTION = "Institution"
 _FIRM_BROKERAGE = "Brokerage"
@@ -1080,7 +1096,7 @@ class BeancountGenerator:
         for h in holdings.holdings:
             ticker = _clean_ticker(h.get("ticker"))
             qty = float(h.get("quantity") or 0.0)
-            if not ticker or qty == 0.0:
+            if not ticker or abs(qty) < 1e-9:
                 continue
             firm, acct_name, acct_type, acct_id = _resolve_account_from_holding(h, acct_lookup)
             b_account = self.mapper.resolve_account(firm, acct_name, acct_id, account_type=acct_type, is_asset=True)
@@ -1319,7 +1335,7 @@ class BeancountGenerator:
         for h in holdings.holdings:
             ticker = _clean_ticker(h.get("ticker"))
             qty = float(h.get("quantity") or 0.0)
-            if not ticker or qty == 0.0:
+            if not ticker or abs(qty) < 1e-9:
                 continue
             price = float(h.get("price") or 0.0)
             cost_basis = h.get("cost_basis")
@@ -1349,6 +1365,29 @@ class BeancountGenerator:
         if price > 0:
             agg["price"] = price
 
+    @staticmethod
+    def _calculate_baseline_qty(
+        snapshot_qty: float,
+        has_tx: bool,
+        key: Tuple[str, str],
+        net_buys: Dict[Tuple[str, str], float],
+        net_buy_meta: Dict[Tuple[str, str], Dict[str, Any]],
+    ) -> Optional[float]:
+        """Compute opening baseline quantity, returning None if the position should be omitted."""
+        baseline_qty = snapshot_qty - net_buys.get(key, 0.0) if has_tx else snapshot_qty
+        if has_tx and snapshot_qty > 0:
+            max_deficit = net_buy_meta.get(key, {}).get("max_deficit", 0.0)
+            baseline_qty = max(baseline_qty, max_deficit)
+
+        # Baseline cannot flip sign across the window or round to zero
+        if snapshot_qty > 0 and round(baseline_qty, 6) <= 0:
+            return None
+        if snapshot_qty < 0 and round(baseline_qty, 6) >= 0:
+            return None
+        if round(baseline_qty, 6) == 0:
+            return None
+        return baseline_qty
+
     def _emit_snapshot_lots(
         self,
         aggregated_holdings: Dict[Tuple[str, str], Dict[str, Any]],
@@ -1367,38 +1406,18 @@ class BeancountGenerator:
         ):
             b_account = pos.get("b_account", "")
             ticker = pos.get("ticker", "")
-            snapshot_qty = pos.get("quantity", 0.0)
             key = (b_account, ticker)
-            # Baseline Opening Qty = Current Snapshot Qty - Net Buys within window.
-            baseline_qty = snapshot_qty - net_buys.get(key, 0.0) if has_tx else snapshot_qty
-            # A snapshot position that is still held can nonetheless dip below the
-            # opening quantity mid-window (e.g. a sell-then-buy whose net is zero):
-            # floor the opening lot at the deepest intermediate deficit, mirroring
-            # the reconstructed-lot path, so the earlier sale has inventory to book
-            # against instead of failing the ledger before the later purchase.
-            # The deficit floor is a long-only construct (a negative/short baseline
-            # must stay negative), so apply it only when snapshot_qty > 0.
-            if has_tx and snapshot_qty > 0:
-                max_deficit = net_buy_meta.get(key, {}).get("max_deficit", 0.0)
-                baseline_qty = max(baseline_qty, max_deficit)
-            # Skip only positions whose baseline rounds to zero at the emitted
-            # six-decimal precision — acquired entirely within the window — so a
-            # legitimate micro-position that still earns a balance assertion
-            # (_emit_commodity_unit_assertions) is not dropped from the opening lot.
-            # If snapshot is long, baseline cannot cross zero to negative (short);
-            # if snapshot is short, baseline cannot cross zero to positive (long).
-            if snapshot_qty > 0 and round(baseline_qty, 6) <= 0:
-                continue
-            if snapshot_qty < 0 and round(baseline_qty, 6) >= 0:
-                continue
-            if round(baseline_qty, 6) == 0:
-                continue
             holding_tag = f"{b_account}:{ticker}"
             if holding_tag in existing_keys:
                 continue
-            # A sale against this ticker in the window reduces the lot with an
-            # empty ``{}`` cost spec, which Beancount matches only against costed
-            # lots; emit the baseline lot with a cost basis so the sale can book.
+
+            snapshot_qty = pos.get("quantity", 0.0)
+            baseline_qty = self._calculate_baseline_qty(
+                snapshot_qty, has_tx, key, net_buys, net_buy_meta,
+            )
+            if baseline_qty is None:
+                continue
+
             force_cost = bool(net_buy_meta.get(key, {}).get("has_sell"))
             self._append_snapshot_lot(
                 lines, lot_date, pos.get("firm", _FIRM_BROKERAGE), ticker, holding_tag,
@@ -1842,6 +1861,53 @@ class BeancountGenerator:
         lines.append(f"  {primary_account:<36} {acct_amount:>8.2f} USD\n")
         lines.append(f"  {category_account:<36} {bal_amount:>8.2f} USD\n\n")
 
+    @staticmethod
+    def _stage_append_components(dest: Path, stage: Path) -> None:
+        """Copy existing appendable modular ledger components into stage."""
+        if not dest.exists():
+            return
+        for fname in (BEAN_MAIN, BEAN_HOLDINGS, BEAN_TRANSACTIONS):
+            src_file = dest / fname
+            if src_file.exists() and not src_file.is_symlink():
+                (stage / fname).write_text(src_file.read_text(encoding="utf-8"), encoding="utf-8")
+
+    @staticmethod
+    def _write_temp_file(sf: Path, dest: Path) -> Tuple[Path, Path]:
+        """Write staged file content to a temporary file in dest with target permissions."""
+        target_file = dest / sf.name
+        target_mode = (target_file.stat().st_mode & 0o777) if target_file.exists() else 0o600
+        fd, tmp_path_str = tempfile.mkstemp(prefix=f".{sf.name}.", suffix=".tmp", dir=dest)
+        tmp_path = Path(tmp_path_str)
+        try:
+            os.chmod(tmp_path, target_mode)
+            with open(fd, "w", encoding="utf-8") as f:
+                f.write(sf.read_text(encoding="utf-8"))
+            return tmp_path, target_file
+        except Exception:
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    @staticmethod
+    def _commit_staged_files(staged_files: List[Path], dest: Path) -> List[Path]:
+        """Atomically commit staged files to destination directory."""
+        for sf in staged_files:
+            _verify_not_symlink(dest / sf.name)
+
+        dest.mkdir(parents=True, exist_ok=True)
+        temp_files: List[Tuple[Path, Path]] = []
+        try:
+            for sf in staged_files:
+                temp_files.append(BeancountGenerator._write_temp_file(sf, dest))
+            created_files: List[Path] = []
+            for tmp_path, target_file in temp_files:
+                os.replace(tmp_path, target_file)
+                created_files.append(target_file)
+            return created_files
+        except Exception:
+            for tmp_path, _ in temp_files:
+                tmp_path.unlink(missing_ok=True)
+            raise
+
     def export_modular_ledger(
         self,
         destination_dir: Union[str, Path],
@@ -1859,10 +1925,8 @@ class BeancountGenerator:
         """
         dest = _prepare_ledger_path(destination_dir, is_dir=True)
         effective_opening_date = _determine_opening_date(transactions, balances, opening_date)
-
-        standard_beans = {"main.bean", "accounts.bean", "balances.bean", "holdings.bean", "prices.bean", "transactions.bean"}
         extra_beans = (
-            [p.name for p in dest.glob("*.bean") if p.name not in standard_beans and not p.name.startswith(".") and not p.is_symlink()]
+            [p.name for p in dest.glob("*.bean") if p.name not in STANDARD_MODULAR_BEANS and not p.name.startswith(".") and not p.is_symlink()]
             if dest.exists()
             else []
         )
@@ -1871,69 +1935,29 @@ class BeancountGenerator:
             stage = Path(tmp_stage) / "modular_ledger"
             stage.mkdir(parents=True, exist_ok=True)
 
-            if append and dest.exists():
-                for fname in ("main.bean", "holdings.bean", "transactions.bean"):
-                    src_file = dest / fname
-                    if src_file.exists() and not src_file.is_symlink():
-                        (stage / fname).write_text(src_file.read_text(encoding="utf-8"), encoding="utf-8")
+            if append:
+                self._stage_append_components(dest, stage)
 
             staged_files: List[Path] = [
                 self._write_modular_main(stage, append, extra_beans=extra_beans),
                 self._write_modular_section(
-                    stage, "accounts.bean",
+                    stage, BEAN_ACCOUNTS,
                     self.generate_accounts_bean(balances, holdings, transactions, include_pads=False),
                 ),
                 self._write_modular_section(
-                    stage, "balances.bean",
+                    stage, BEAN_BALANCES,
                     self.generate_balances_bean(balances, holdings, transactions=transactions),
                 ),
                 self._write_modular_holdings(
                     stage, append, holdings, balances, transactions, effective_opening_date,
                 ),
                 self._write_modular_section(
-                    stage, "prices.bean", self.generate_prices_bean(holdings),
+                    stage, BEAN_PRICES, self.generate_prices_bean(holdings),
                 ),
                 self._write_modular_transactions(stage, append, transactions, balances),
             ]
 
-            # Preflight validation: verify no destination file is a symlink before any write occurs
-            for sf in staged_files:
-                target_file = dest / sf.name
-                _verify_not_symlink(target_file)
-
-            dest.mkdir(parents=True, exist_ok=True)
-            temp_files: List[Tuple[Path, Path]] = []
-            try:
-                # Stage 1: Write all temp files into dest using mkstemp (O_CREAT | O_EXCL,
-                # immune to pre-created symlinks), preserving existing restrictive file modes.
-                for sf in staged_files:
-                    target_file = dest / sf.name
-                    target_mode = (target_file.stat().st_mode & 0o777) if target_file.exists() else 0o600
-
-                    fd, tmp_path_str = tempfile.mkstemp(prefix=f".{sf.name}.", suffix=".tmp", dir=dest)
-                    tmp_path = Path(tmp_path_str)
-                    try:
-                        os.chmod(tmp_path, target_mode)
-                        with open(fd, "w", encoding="utf-8") as f:
-                            f.write(sf.read_text(encoding="utf-8"))
-                    except Exception:
-                        tmp_path.unlink(missing_ok=True)
-                        raise
-                    temp_files.append((tmp_path, target_file))
-
-                # Stage 2: All temp files successfully written. Commit atomically using os.replace,
-                # which requires no additional disk space allocation.
-                created_files: List[Path] = []
-                for tmp_path, target_file in temp_files:
-                    os.replace(tmp_path, target_file)
-                    created_files.append(target_file)
-            except Exception:
-                # Cleanup any uncommitted temp files on failure; target files remain untouched
-                for tmp_path, _ in temp_files:
-                    tmp_path.unlink(missing_ok=True)
-                raise
-
-        return created_files
+            return self._commit_staged_files(staged_files, dest)
 
     def _write_modular_section(self, dest: Path, filename: str, content: str) -> Path:
         """Write a freshly generated modular component file (always overwritten)."""
@@ -1949,11 +1973,10 @@ class BeancountGenerator:
         extra_beans: Optional[List[str]] = None,
     ) -> Path:
         """Write or patch main.bean, ensuring the holdings include and FIFO booking option."""
-        main_path = dest / "main.bean"
+        main_path = dest / BEAN_MAIN
         _verify_not_symlink(main_path)
-        standard_beans = {"main.bean", "accounts.bean", "balances.bean", "holdings.bean", "prices.bean", "transactions.bean"}
         if extra_beans is None:
-            extra_beans = [p.name for p in dest.glob("*.bean") if p.name not in standard_beans and not p.name.startswith(".")]
+            extra_beans = [p.name for p in dest.glob("*.bean") if p.name not in STANDARD_MODULAR_BEANS and not p.name.startswith(".")]
 
         if not main_path.exists() or not append:
             main_path.write_text(self.generate_main_bean(additional_includes=extra_beans), encoding="utf-8")
@@ -1961,8 +1984,8 @@ class BeancountGenerator:
         current_main = main_path.read_text(encoding="utf-8")
         updated_main = current_main
         # Ensure holdings.bean include is present if missing
-        if 'include "holdings.bean"' not in updated_main:
-            updated_main += '\ninclude "holdings.bean"\n'
+        if f'include "{BEAN_HOLDINGS}"' not in updated_main:
+            updated_main += f'\ninclude "{BEAN_HOLDINGS}"\n'
         for b in sorted(set(extra_beans)):
             if f'include "{b}"' not in updated_main:
                 updated_main += f'include "{b}"\n'
@@ -1984,7 +2007,7 @@ class BeancountGenerator:
         effective_opening_date: Optional[str],
     ) -> Path:
         """Write holdings.bean, appending only the new lot body when appending to an existing file."""
-        holdings_path = dest / "holdings.bean"
+        holdings_path = dest / BEAN_HOLDINGS
         _verify_not_symlink(holdings_path)
         existing_h_text = (
             holdings_path.read_text(encoding="utf-8")
@@ -2025,7 +2048,7 @@ class BeancountGenerator:
         balances: Optional[DashboardBalances],
     ) -> Path:
         """Write transactions.bean, appending only non-duplicate transactions on append."""
-        tx_path = dest / "transactions.bean"
+        tx_path = dest / BEAN_TRANSACTIONS
         _verify_not_symlink(tx_path)
         if transactions and transactions.transactions:
             if tx_path.exists() and append:

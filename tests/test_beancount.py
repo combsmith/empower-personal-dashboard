@@ -2167,19 +2167,21 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
             (dest / "accounts.bean").write_text("ORIGINAL_ACCOUNTS\n", encoding="utf-8")
             (dest / "balances.bean").write_text("ORIGINAL_BALANCES\n", encoding="utf-8")
 
+            test_balances = DashboardBalances(
+                as_of_date="2026-10-01", net_worth=0.0, total_cash=0.0,
+                total_investment=0.0, total_card_liabilities=0.0, total_loan=0.0,
+                total_mortgage=0.0, accounts=[],
+            )
+            test_holdings = DashboardHoldings(
+                as_of_date="2026-10-01", total_value=100.0,
+                holdings=[{"ticker": "VTI", "quantity": 1.0}],
+            )
             with patch.object(self.generator, "generate_holdings_bean", side_effect=RuntimeError("Simulated Holdings Error")):
                 with self.assertRaises(RuntimeError):
                     self.generator.export_modular_ledger(
                         destination_dir=dest,
-                        balances=DashboardBalances(
-                            as_of_date="2026-10-01", net_worth=0.0, total_cash=0.0,
-                            total_investment=0.0, total_card_liabilities=0.0, total_loan=0.0,
-                            total_mortgage=0.0, accounts=[],
-                        ),
-                        holdings=DashboardHoldings(
-                            as_of_date="2026-10-01", total_value=100.0,
-                            holdings=[{"ticker": "VTI", "quantity": 1.0}],
-                        ),
+                        balances=test_balances,
+                        holdings=test_holdings,
                     )
 
             # Assert original files were not touched
@@ -2197,18 +2199,20 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
             symlink_target.write_text("EXTERNAL\n", encoding="utf-8")
             (dest / "holdings.bean").symlink_to(symlink_target)
 
+            test_balances = DashboardBalances(
+                as_of_date="2026-10-01", net_worth=0.0, total_cash=0.0,
+                total_investment=0.0, total_card_liabilities=0.0, total_loan=0.0,
+                total_mortgage=0.0, accounts=[],
+            )
+            test_holdings = DashboardHoldings(
+                as_of_date="2026-10-01", total_value=100.0,
+                holdings=[{"ticker": "VTI", "quantity": 1.0}],
+            )
             with self.assertRaises(ValueError):
                 self.generator.export_modular_ledger(
                     destination_dir=dest,
-                    balances=DashboardBalances(
-                        as_of_date="2026-10-01", net_worth=0.0, total_cash=0.0,
-                        total_investment=0.0, total_card_liabilities=0.0, total_loan=0.0,
-                        total_mortgage=0.0, accounts=[],
-                    ),
-                    holdings=DashboardHoldings(
-                        as_of_date="2026-10-01", total_value=100.0,
-                        holdings=[{"ticker": "VTI", "quantity": 1.0}],
-                    ),
+                    balances=test_balances,
+                    holdings=test_holdings,
                 )
 
             # Assert main.bean was not overwritten before the symlink check fired
