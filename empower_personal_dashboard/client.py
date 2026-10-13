@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -168,7 +169,9 @@ class EmpowerDashboardClient:
         self.debug = debug or _env_flag(os.environ.get("EMPOWER_DEBUG"))
         self.log_file = Path(log_file) if log_file else None
         self.password_provider = password_provider
-        self._reauthenticating: bool = False
+        self._local = threading.local()
+        self._reauth_lock = threading.Lock()
+        self._reauth_count: int = 0
         self.session = requests.Session()
         self.csrf: str = ""
         self.username: Optional[str] = (
@@ -188,6 +191,14 @@ class EmpowerDashboardClient:
                 self.load_session(self.session_file)
             except Exception as e:
                 self._log_debug(f"Failed to auto-load session from {self.session_file}: {e}")
+
+    @property
+    def _reauthenticating(self) -> bool:
+        return bool(getattr(self._local, "reauthenticating", False))
+
+    @_reauthenticating.setter
+    def _reauthenticating(self, val: bool) -> None:
+        self._local.reauthenticating = val
 
     def _setup_logging(self) -> None:
         """Configure debug logging handlers."""
@@ -354,26 +365,32 @@ class EmpowerDashboardClient:
         self, endpoint: str, data: Optional[Dict[str, Any]], err_msg: str, err_code: Any
     ) -> Optional[Dict[str, Any]]:
         """Attempt automatic re-authentication when session expires."""
-        if self._reauthenticating or self.password_provider is None:
+        if getattr(self._local, "reauthenticating", False) or self.password_provider is None:
             return None
-        self._log_debug("Session expired during fetch; attempting automatic re-authentication...")
-        self._reauthenticating = True
+
+        current_count = self._reauth_count
+        with self._reauth_lock:
+            if self._reauth_count == current_count:
+                self._log_debug("Session expired during fetch; attempting automatic re-authentication...")
+                try:
+                    self.reauthenticate()
+                    self._reauth_count += 1
+                except RequireTwoFactorException:
+                    raise
+                except Exception as e:
+                    self.logger.warning("Automatic re-authentication failed: %s", e)
+                    status = 401 if err_code == 401 else 200
+                    raise SessionExpiredError(
+                        f"Session expired ({err_msg}); automatic re-authentication failed: {e}",
+                        status_code=status,
+                        error_code=err_code,
+                    ) from e
+
+        self._local.reauthenticating = True
         try:
-            try:
-                self.reauthenticate()
-            except RequireTwoFactorException:
-                raise
-            except Exception as e:
-                self.logger.warning("Automatic re-authentication failed: %s", e)
-                status = 401 if err_code == 401 else 200
-                raise SessionExpiredError(
-                    f"Session expired ({err_msg}); automatic re-authentication failed: {e}",
-                    status_code=status,
-                    error_code=err_code,
-                ) from e
             return self.fetch(endpoint, data)
         finally:
-            self._reauthenticating = False
+            self._local.reauthenticating = False
 
     def _validate_login_response(self, res_json: Any, endpoint_name: str = "login endpoint") -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Validate and extract spHeader and spData from a login response.
@@ -824,7 +841,7 @@ class EmpowerDashboardClient:
 
             self.csrf = data.get("csrf", "") if isinstance(data.get("csrf"), str) else ""
             raw_username = data.get("username")
-            if isinstance(raw_username, str):
+            if isinstance(raw_username, str) and not self.username:
                 self.username = clean_api_text(raw_username)
             if data.get("base_url") and isinstance(data.get("base_url"), str):
                 self.base_url = data["base_url"].rstrip("/")

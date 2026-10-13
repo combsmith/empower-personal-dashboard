@@ -2557,9 +2557,57 @@ class TestCliCredentialsAndKeyring(unittest.TestCase):
                 use_keyring=True,
             )
 
+    def test_build_client_preserves_cli_username_over_session_username(self):
+        from empower_personal_dashboard.cli import _build_client, parse_args
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sess_path = Path(tmpdir) / "session.json"
+            sess_path.write_text(json.dumps({
+                "username": "stale_session_user@example.com",
+                "csrf": "tok",
+                "cookies": [],
+            }), encoding="utf-8")
+
+            # Invocation specifies --email override
+            args = parse_args(["--balances", "--email", "explicit_cli_user@example.com", "--session-file", str(sess_path)])
+            client = _build_client(args)
+            self.assertEqual(client.username, "explicit_cli_user@example.com")
+
+            # Password provider also uses the explicit override
+            with patch("empower_personal_dashboard.cli.resolve_password") as mock_resolve:
+                client.password_provider()
+                mock_resolve.assert_called_with(
+                    cli_password=None,
+                    username="explicit_cli_user@example.com",
+                    credential_helper=None,
+                    use_keyring=False,
+                )
+
+    @patch("empower_personal_dashboard.cli.set_password_in_keyring")
+    @patch("empower_personal_dashboard.cli.resolve_password", return_value="pass-123")
+    def test_interactive_login_set_keyring_failure_returns_exit_1(self, mock_resolve, mock_set_keyring):
+        from empower_personal_dashboard.cli import interactive_login
+        mock_set_keyring.side_effect = RuntimeError("No keyring backend available")
+        client = MagicMock()
+        client.identify_user.return_value = {
+            "spHeader": {"authLevel": "USER_REMEMBERED", "deviceName": "Test Device"}
+        }
+        client.mock_mode = True
+
+        err = io.StringIO()
+        with patch("sys.stderr", err):
+            ret = interactive_login(
+                client=client,
+                session_file=Path("/tmp/dummy.json"),
+                cli_email="user@example.com",
+                cli_set_keyring=True,
+            )
+        self.assertEqual(ret, 1)
+        self.assertIn("Failed to store password in keyring: No keyring backend available", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

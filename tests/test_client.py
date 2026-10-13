@@ -1579,8 +1579,108 @@ class TestClientReauthenticateAndAutoRefresh(unittest.TestCase):
         self.assertEqual(res["spHeader"]["authLevel"], "SESSION_AUTHENTICATED")
         mock_save.assert_called_once_with(self.client.session_file)
 
+    def test_load_session_preserves_explicit_constructor_username(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            sess_file = Path(tmpdir) / "session.json"
+            sess_file.write_text(json.dumps({
+                "username": "saved_in_file@example.com",
+                "csrf": "test-csrf",
+                "cookies": [],
+            }), encoding="utf-8")
+
+            # Explicit username takes precedence
+            client_override = EmpowerDashboardClient(
+                session_file=sess_file,
+                username="explicit_override@example.com",
+            )
+            self.assertEqual(client_override.username, "explicit_override@example.com")
+
+            # Missing constructor username falls back to session file
+            client_fallback = EmpowerDashboardClient(
+                session_file=sess_file,
+                username=None,
+            )
+            self.assertEqual(client_fallback.username, "saved_in_file@example.com")
+
+    def test_concurrent_auto_reauth_waits_and_retries(self):
+        import threading
+        import time
+
+        client = EmpowerDashboardClient(
+            password_provider=lambda: "secret_pw",
+            username="concurrent@example.com",
+        )
+        client.mock_mode = False
+
+        reauth_calls = 0
+        reauth_lock = threading.Lock()
+
+        def mock_reauthenticate():
+            nonlocal reauth_calls
+            with reauth_lock:
+                reauth_calls += 1
+            # Simulate a brief delay during reauth
+            time.sleep(0.05)
+            return {"spHeader": {"success": True, "authLevel": "SESSION_AUTHENTICATED"}}
+
+        client.reauthenticate = mock_reauthenticate
+
+        # First request on each thread sees expired session, then sees success
+        call_count_per_thread = {}
+        thread_lock = threading.Lock()
+
+        def mock_post(endpoint, payload=None, **kwargs):
+            tid = threading.get_ident()
+            with thread_lock:
+                cnt = call_count_per_thread.get(tid, 0)
+                call_count_per_thread[tid] = cnt + 1
+
+            resp = MagicMock()
+            if cnt == 0:
+                # Initial fetch gets session expired
+                resp.status_code = 200
+                resp.text = json.dumps({
+                    "spHeader": {
+                        "success": False,
+                        "errors": [{"code": 201, "message": "Session expired"}],
+                    }
+                })
+                resp.json.return_value = json.loads(resp.text)
+            else:
+                # Retried fetch gets success
+                resp.status_code = 200
+                resp.text = json.dumps({"spHeader": {"success": True}, "spData": {"status": "ok"}})
+                resp.json.return_value = json.loads(resp.text)
+            return resp
+
+        client.post = mock_post
+
+        results = []
+        errors = []
+
+        def worker():
+            try:
+                res = client.fetch("/api/test/endpoint", {})
+                results.append(res)
+            except Exception as e:
+                errors.append(e)
+
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(results), 2)
+        # Reauthentication was only performed once because the second thread coordinated and waited!
+        self.assertEqual(reauth_calls, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

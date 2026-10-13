@@ -747,12 +747,15 @@ def interactive_login(
         if cli_set_keyring:
             if not password:
                 password = _resolve_or_prompt_password(f"Empower Password for '{email}': ")
-            if password:
-                try:
-                    set_password_in_keyring(username=email, password=password)
-                    print(f"[+] Password for '{email}' securely saved to system keyring.")
-                except Exception as e:
-                    print(f"[!] Warning: Could not save password to keyring: {e}", file=sys.stderr)
+            if not password:
+                print(f"[!] Error: No password available to save in keyring for '{email}'.", file=sys.stderr)
+                return 1
+            try:
+                set_password_in_keyring(username=email, password=password)
+                print(f"[+] Password for '{email}' securely saved to system keyring.")
+            except Exception as e:
+                print(f"[!] Failed to store password in keyring: {e}", file=sys.stderr)
+                return 1
 
         if getattr(client, "mock_mode", False) is True:
             print("[+] Sandbox mode: synthetic session not persisted.")
@@ -816,7 +819,7 @@ def _build_client(args: argparse.Namespace) -> EmpowerDashboardClient:
         password_provider=_password_provider,
         username=cli_user,
     )
-    if not client.username and cli_user:
+    if cli_user:
         client.username = cli_user
     return client
 
