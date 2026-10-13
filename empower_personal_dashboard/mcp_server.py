@@ -152,7 +152,6 @@ def create_mcp_server(
         return resolve_password(
             username=username,
             credential_helper=os.environ.get("EMPOWER_CREDENTIAL_HELPER"),
-            use_keyring=bool(os.environ.get("EMPOWER_KEYRING")),
         )
 
     empower_client = client or EmpowerDashboardClient(password_provider=_default_mcp_password_provider)
@@ -1273,7 +1272,6 @@ Examples:
         return resolve_password(
             username=username,
             credential_helper=os.environ.get("EMPOWER_CREDENTIAL_HELPER"),
-            use_keyring=bool(os.environ.get("EMPOWER_KEYRING")),
         )
 
     # Initialize client

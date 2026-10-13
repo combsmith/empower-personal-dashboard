@@ -2490,6 +2490,12 @@ class TestCliCredentialsAndKeyring(unittest.TestCase):
         args = parse_args(["--session-file", "/flag/session.json", "--balances"])
         self.assertEqual(args.session_file, Path("/flag/session.json"))
 
+    @patch.dict(os.environ, {"EMPOWER_SESSION_FILE": ""}, clear=True)
+    def test_parse_args_empty_empower_session_file_falls_back_to_default(self):
+        from empower_personal_dashboard.cli import DEFAULT_SESSION_FILE, parse_args
+        args = parse_args(["--balances"])
+        self.assertEqual(args.session_file, DEFAULT_SESSION_FILE)
+
     @patch("empower_personal_dashboard.cli.set_password_in_keyring")
     @patch("empower_personal_dashboard.cli._resolve_or_prompt_password")
     def test_interactive_login_already_authenticated_prompts_password_for_set_keyring(

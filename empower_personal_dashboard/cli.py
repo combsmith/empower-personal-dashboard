@@ -331,7 +331,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     args = parser.parse_args(argv)
     if args.session_file is None:
-        args.session_file = Path(os.environ.get("EMPOWER_SESSION_FILE", DEFAULT_SESSION_FILE)).expanduser()
+        args.session_file = Path(os.environ.get("EMPOWER_SESSION_FILE") or DEFAULT_SESSION_FILE).expanduser()
     if not math.isfinite(args.merge_lock_timeout) or args.merge_lock_timeout < 0:
         parser.error("--merge-lock-timeout must be a non-negative finite number.")
     return args
@@ -789,7 +789,7 @@ def _build_client(args: argparse.Namespace) -> EmpowerDashboardClient:
 
     session_file = getattr(args, "session_file", None)
     if session_file is None:
-        session_file = Path(os.environ.get("EMPOWER_SESSION_FILE", DEFAULT_SESSION_FILE)).expanduser()
+        session_file = Path(os.environ.get("EMPOWER_SESSION_FILE") or DEFAULT_SESSION_FILE).expanduser()
         args.session_file = session_file
 
     client: Optional[EmpowerDashboardClient] = None
