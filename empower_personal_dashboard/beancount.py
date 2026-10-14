@@ -1172,7 +1172,7 @@ class BeancountGenerator:
             # A short position reports a negative quantity; assert it as-is so the
             # reconstructed inventory is checked end to end. Only a ticker-less or
             # zero-rounding row is skipped.
-            if not ticker or round(qty, 6) == 0:
+            if not ticker or abs(qty) < 1e-9:
                 continue
             firm, acct_name, acct_type, acct_id = _resolve_account_from_holding(h, acct_lookup)
             b_account = self.mapper.resolve_account(firm, acct_name, acct_id, account_type=acct_type, is_asset=True)
@@ -1488,7 +1488,7 @@ class BeancountGenerator:
             qty = float(h.get("quantity") or 0.0)
             # Preserve negative (short) quantities: only a ticker-less row or one
             # whose quantity rounds to zero at the emitted precision is dropped.
-            if not ticker or round(qty, 6) == 0:
+            if not ticker or abs(qty) < 1e-9:
                 continue
             price = float(h.get("price") or 0.0)
             cost_basis = h.get("cost_basis")
