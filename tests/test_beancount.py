@@ -2,6 +2,7 @@
 test_beancount.py — Hermetic unit tests for Beancount plain-text accounting export engine.
 """
 
+import os
 import re
 import tempfile
 import unittest
@@ -2031,6 +2032,396 @@ class TestOpeningDateClamp(unittest.TestCase):
             self.assertIn('include "broken_bow.bean"', content)
 
 
+class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
+    """Tests for Issue #70: Short position cost basis scaling and atomic modular export."""
+
+    def setUp(self):
+        self.generator = BeancountGenerator()
+
+    def test_short_position_preserves_cost_basis(self):
+        holdings = DashboardHoldings(
+            as_of_date="2026-10-01",
+            total_value=-3000.0,
+            holdings=[
+                {
+                    "user_account_id": 101,
+                    "account_name": "Brokerage",
+                    "firm_name": "Vanguard",
+                    "ticker": "TSLA",
+                    "quantity": -20.0,
+                    "price": 150.0,
+                    "cost_basis": 3000.0,
+                }
+            ],
+        )
+        output = self.generator.generate_holdings_bean(holdings)
+        self.assertIn("-20.000000 TSLA {{3000.000000 USD}}", output)
+
+    def test_short_position_scales_cost_basis_with_transactions(self):
+        holdings = DashboardHoldings(
+            as_of_date="2026-10-01",
+            total_value=-3000.0,
+            holdings=[
+                {
+                    "user_account_id": 101,
+                    "account_name": "Brokerage",
+                    "firm_name": "Vanguard",
+                    "ticker": "TSLA",
+                    "quantity": -20.0,
+                    "price": 150.0,
+                    "cost_basis": 3000.0,
+                }
+            ],
+        )
+        txs = DashboardTransactions(
+            start_date="2026-01-01",
+            end_date="2026-10-01",
+            total_transactions=1,
+            money_in=1500.0,
+            money_out=0.0,
+            net_cashflow=1500.0,
+            transactions=[
+                {
+                    "user_transaction_id": "tx-short-1",
+                    "user_account_id": 101,
+                    "account_name": "Brokerage",
+                    "firm_name": "Vanguard",
+                    "transaction_date": "2026-05-15",
+                    "description": "Short Sell TSLA",
+                    "amount": 1500.0,
+                    "is_cash_out": False,
+                    "transaction_type": "Sell",
+                    "investment_type": "Sell",
+                    "symbol": "TSLA",
+                    "price": 150.0,
+                    "quantity": -10.0,
+                }
+            ],
+        )
+        output = self.generator.generate_holdings_bean(holdings, transactions=txs)
+        # Baseline qty is -10.0, scaled cost basis is 3000.0 * |-10| / |-20| = 1500.0
+        self.assertIn("-10.000000 TSLA {{1500.000000 USD}}", output)
+
+    def test_short_position_handles_negative_cost_basis(self):
+        holdings = DashboardHoldings(
+            as_of_date="2026-10-01",
+            total_value=-3000.0,
+            holdings=[
+                {
+                    "user_account_id": 101,
+                    "account_name": "Brokerage",
+                    "firm_name": "Vanguard",
+                    "ticker": "TSLA",
+                    "quantity": -20.0,
+                    "price": 150.0,
+                    "cost_basis": -3000.0,
+                }
+            ],
+        )
+        output = self.generator.generate_holdings_bean(holdings)
+        self.assertIn("-20.000000 TSLA {{3000.000000 USD}}", output)
+
+    def test_short_position_unit_balance_assertion(self):
+        holdings = DashboardHoldings(
+            as_of_date="2026-10-01",
+            total_value=-3000.0,
+            holdings=[
+                {
+                    "user_account_id": 101,
+                    "account_name": "Brokerage",
+                    "firm_name": "Vanguard",
+                    "ticker": "TSLA",
+                    "quantity": -20.0,
+                    "price": 150.0,
+                    "cost_basis": 3000.0,
+                }
+            ],
+        )
+        balances = DashboardBalances(
+            as_of_date="2026-10-01",
+            net_worth=-3000.0,
+            total_cash=0.0,
+            total_investment=-3000.0,
+            total_card_liabilities=0.0,
+            total_loan=0.0,
+            total_mortgage=0.0,
+            accounts=[
+                {
+                    "user_account_id": 101,
+                    "account_name": "Brokerage",
+                    "firm_name": "Vanguard",
+                    "account_type": "investment",
+                    "balance": -3000.0,
+                    "is_asset": True,
+                    "currency": "USD",
+                }
+            ],
+        )
+        output = self.generator.generate_balances_bean(balances, holdings)
+        self.assertIn("balance Assets:Vanguard:Brokerage -20.000000 TSLA", output)
+
+    def test_export_modular_ledger_atomic_on_failure(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest = Path(tmp_dir) / "ledger"
+            dest.mkdir()
+            (dest / "main.bean").write_text("ORIGINAL_MAIN\n", encoding="utf-8")
+            (dest / "accounts.bean").write_text("ORIGINAL_ACCOUNTS\n", encoding="utf-8")
+            (dest / "balances.bean").write_text("ORIGINAL_BALANCES\n", encoding="utf-8")
+
+            test_balances = DashboardBalances(
+                as_of_date="2026-10-01", net_worth=0.0, total_cash=0.0,
+                total_investment=0.0, total_card_liabilities=0.0, total_loan=0.0,
+                total_mortgage=0.0, accounts=[],
+            )
+            test_holdings = DashboardHoldings(
+                as_of_date="2026-10-01", total_value=100.0,
+                holdings=[{"ticker": "VTI", "quantity": 1.0}],
+            )
+            with patch.object(self.generator, "generate_holdings_bean", side_effect=RuntimeError("Simulated Holdings Error")):
+                with self.assertRaises(RuntimeError):
+                    self.generator.export_modular_ledger(
+                        destination_dir=dest,
+                        balances=test_balances,
+                        holdings=test_holdings,
+                    )
+
+            # Assert original files were not touched
+            self.assertEqual((dest / "main.bean").read_text(encoding="utf-8"), "ORIGINAL_MAIN\n")
+            self.assertEqual((dest / "accounts.bean").read_text(encoding="utf-8"), "ORIGINAL_ACCOUNTS\n")
+            self.assertEqual((dest / "balances.bean").read_text(encoding="utf-8"), "ORIGINAL_BALANCES\n")
+
+    def test_export_modular_ledger_rollback_on_replace_failure(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest = Path(tmp_dir) / "ledger"
+            dest.mkdir()
+            (dest / "main.bean").write_text("ORIGINAL_MAIN\n", encoding="utf-8")
+            (dest / "accounts.bean").write_text("ORIGINAL_ACCOUNTS\n", encoding="utf-8")
+            (dest / "balances.bean").write_text("ORIGINAL_BALANCES\n", encoding="utf-8")
+
+            test_balances = DashboardBalances(
+                as_of_date="2026-10-01", net_worth=0.0, total_cash=0.0,
+                total_investment=0.0, total_card_liabilities=0.0, total_loan=0.0,
+                total_mortgage=0.0, accounts=[],
+            )
+            test_holdings = DashboardHoldings(
+                as_of_date="2026-10-01", total_value=100.0,
+                holdings=[{"ticker": "VTI", "quantity": 1.0}],
+            )
+
+            real_replace = os.replace
+            replace_calls = 0
+
+            def failing_replace(src, dst):
+                nonlocal replace_calls
+                if ".bak" in str(dst) or ".bak" in str(src):
+                    return real_replace(src, dst)
+                replace_calls += 1
+                if replace_calls > 1:
+                    raise OSError("Simulated I/O commit error")
+                return real_replace(src, dst)
+
+            with patch("os.replace", side_effect=failing_replace):
+                with self.assertRaises(OSError):
+                    self.generator.export_modular_ledger(
+                        destination_dir=dest,
+                        balances=test_balances,
+                        holdings=test_holdings,
+                    )
+
+            # Assert original files were rolled back and preserved
+            self.assertEqual((dest / "main.bean").read_text(encoding="utf-8"), "ORIGINAL_MAIN\n")
+            self.assertEqual((dest / "accounts.bean").read_text(encoding="utf-8"), "ORIGINAL_ACCOUNTS\n")
+            self.assertEqual((dest / "balances.bean").read_text(encoding="utf-8"), "ORIGINAL_BALANCES\n")
+
+            # Assert no leftover temporary or backup files
+            leftovers = [f.name for f in dest.iterdir() if f.name.endswith(".bak") or f.name.endswith(".tmp")]
+            self.assertEqual(leftovers, [])
+
+    def test_export_modular_ledger_backup_cleanup_failure_keeps_new_files(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest = Path(tmp_dir) / "ledger"
+            dest.mkdir()
+            (dest / "main.bean").write_text("ORIGINAL_MAIN\n", encoding="utf-8")
+            (dest / "accounts.bean").write_text("ORIGINAL_ACCOUNTS\n", encoding="utf-8")
+
+            test_holdings = DashboardHoldings(
+                as_of_date="2026-10-01", total_value=100.0,
+                holdings=[{"ticker": "VTI", "quantity": 1.0}],
+            )
+
+            with patch.object(Path, "unlink", side_effect=PermissionError("cleanup denied")):
+                paths = self.generator.export_modular_ledger(
+                    destination_dir=dest, holdings=test_holdings,
+                )
+
+            self.assertTrue(paths)
+            self.assertNotEqual((dest / "main.bean").read_text(encoding="utf-8"), "ORIGINAL_MAIN\n")
+            self.assertNotEqual((dest / "accounts.bean").read_text(encoding="utf-8"), "ORIGINAL_ACCOUNTS\n")
+
+    def test_export_modular_ledger_preflight_symlink_rejection(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest = Path(tmp_dir) / "ledger"
+            dest.mkdir()
+            (dest / "main.bean").write_text("ORIGINAL_MAIN\n", encoding="utf-8")
+            # Create a symlink for holdings.bean
+            symlink_target = Path(tmp_dir) / "external_holdings.bean"
+            symlink_target.write_text("EXTERNAL\n", encoding="utf-8")
+            (dest / "holdings.bean").symlink_to(symlink_target)
+
+            test_balances = DashboardBalances(
+                as_of_date="2026-10-01", net_worth=0.0, total_cash=0.0,
+                total_investment=0.0, total_card_liabilities=0.0, total_loan=0.0,
+                total_mortgage=0.0, accounts=[],
+            )
+            test_holdings = DashboardHoldings(
+                as_of_date="2026-10-01", total_value=100.0,
+                holdings=[{"ticker": "VTI", "quantity": 1.0}],
+            )
+            with self.assertRaises(ValueError):
+                self.generator.export_modular_ledger(
+                    destination_dir=dest,
+                    balances=test_balances,
+                    holdings=test_holdings,
+                )
+
+            # Assert main.bean was not overwritten before the symlink check fired
+            self.assertEqual((dest / "main.bean").read_text(encoding="utf-8"), "ORIGINAL_MAIN\n")
+
+    def test_export_modular_ledger_rejects_directory_component_target(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest = Path(tmp_dir) / "ledger"
+            dest.mkdir()
+            (dest / "accounts.bean").mkdir()
+            (dest / "main.bean").write_text("ORIGINAL_MAIN\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                self.generator.export_modular_ledger(destination_dir=dest)
+            self.assertTrue((dest / "accounts.bean").is_dir())
+            self.assertEqual((dest / "main.bean").read_text(encoding="utf-8"), "ORIGINAL_MAIN\n")
+
+    def test_commit_staged_files_rejects_destination_symlinked_after_staging(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            real = Path(tmp_dir) / "real"
+            real.mkdir()
+            link = Path(tmp_dir) / "link"
+            link.symlink_to(real)
+            sf = Path(tmp_dir) / "main.bean"
+            sf.write_text("X\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                BeancountGenerator._commit_staged_files([sf], link)
+            self.assertEqual(list(real.iterdir()), [])
+
+    def test_short_position_opposite_sign_does_not_inherit_cost_basis(self):
+        lines = []
+        # qty is +10 (long), but snapshot_qty is -20 (short)
+        self.generator._append_snapshot_lot(
+            lines=lines,
+            lot_date="2026-01-01",
+            firm="Vanguard",
+            ticker="TSLA",
+            holding_tag="Assets:Vanguard:Brokerage:TSLA",
+            b_account="Assets:Vanguard:Brokerage",
+            qty=10.0,
+            snapshot_qty=-20.0,
+            price=150.0,
+            cost_basis=3000.0,
+        )
+        output = "".join(lines)
+        # Should not scale snapshot's short cost basis to the opposite-signed long lot
+        self.assertNotIn("{{", output)
+        self.assertIn("10.000000 TSLA @ 150.0000 USD", output)
+
+    def test_long_position_negative_cost_basis_falls_back_to_price(self):
+        lines = []
+        self.generator._append_snapshot_lot(
+            lines=lines,
+            lot_date="2026-01-01",
+            firm="Vanguard",
+            ticker="VTI",
+            holding_tag="Assets:Vanguard:Brokerage:VTI",
+            b_account="Assets:Vanguard:Brokerage",
+            qty=10.0,
+            snapshot_qty=10.0,
+            price=200.0,
+            cost_basis=-500.0,
+        )
+        output = "".join(lines)
+        # Should not flip negative cost basis to positive on a long position
+        self.assertNotIn("{{", output)
+        self.assertIn("10.000000 VTI @ 200.0000 USD", output)
+
+    def test_export_modular_ledger_preserves_file_permissions(self):
+        import os
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest = Path(tmp_dir) / "ledger"
+            dest.mkdir()
+            main_file = dest / "main.bean"
+            main_file.write_text("ORIGINAL_MAIN\n", encoding="utf-8")
+            os.chmod(main_file, 0o600)
+
+            self.generator.export_modular_ledger(
+                destination_dir=dest,
+                balances=DashboardBalances(
+                    as_of_date="2026-10-01", net_worth=0.0, total_cash=0.0,
+                    total_investment=0.0, total_card_liabilities=0.0, total_loan=0.0,
+                    total_mortgage=0.0, accounts=[],
+                ),
+            )
+
+            # Assert mode 0600 is preserved
+            self.assertEqual(main_file.stat().st_mode & 0o777, 0o600)
+
+    def test_micro_holdings_aggregated_before_precision_rounding(self):
+        # Two sub-micro holdings of 0.0000004 share each sum to 0.0000008, which rounds to 0.000001
+        holdings = DashboardHoldings(
+            as_of_date="2026-10-01",
+            total_value=1.0,
+            holdings=[
+                {
+                    "account_name": "Brokerage",
+                    "ticker": "MICRO",
+                    "quantity": 0.0000004,
+                    "price": 100.0,
+                    "cost_basis": 0.00004,
+                    "firm": "Vanguard",
+                },
+                {
+                    "account_name": "Brokerage",
+                    "ticker": "MICRO",
+                    "quantity": 0.0000004,
+                    "price": 100.0,
+                    "cost_basis": 0.00004,
+                    "firm": "Vanguard",
+                },
+            ],
+        )
+        content = self.generator.generate_holdings_bean(holdings)
+        self.assertIn("MICRO", content)
+        self.assertIn("0.000001 MICRO", content)
+
+    def test_export_modular_ledger_overwrite_with_corrupt_existing_file(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest = Path(tmp_dir) / "ledger"
+            dest.mkdir()
+            # Write invalid UTF-8 bytes to simulate corrupted existing balances.bean
+            (dest / "balances.bean").write_bytes(b"\xff\xfe\x00\x00corrupt")
+
+            # Overwrite export (append=False) should succeed without trying to decode balances.bean
+            created = self.generator.export_modular_ledger(
+                destination_dir=dest,
+                append=False,
+                balances=DashboardBalances(
+                    as_of_date="2026-10-01", net_worth=0.0, total_cash=0.0,
+                    total_investment=0.0, total_card_liabilities=0.0, total_loan=0.0,
+                    total_mortgage=0.0, accounts=[],
+                ),
+            )
+            self.assertTrue((dest / "balances.bean").exists())
+            # Should now be valid UTF-8
+            repaired_text = (dest / "balances.bean").read_text(encoding="utf-8")
+            self.assertIn("Empower Personal Dashboard - Balance Assertions", repaired_text)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
