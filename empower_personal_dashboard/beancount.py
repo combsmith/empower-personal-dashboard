@@ -1256,7 +1256,6 @@ class BeancountGenerator:
             ]
             if not opening_dates:
                 return
-            # ISO ``YYYY-MM-DD`` dates compare chronologically under a lexical compare.
             prior_start = min(opening_dates)
         # ISO ``YYYY-MM-DD`` dates compare chronologically under a lexical compare.
         if lot_date and prior_start and lot_date < prior_start:
@@ -1559,6 +1558,7 @@ class BeancountGenerator:
     ) -> None:
         """Emit the baseline opening lot for each snapshot position acquired before the window."""
         has_tx = transactions is not None and bool(transactions.transactions)
+        already_reconciled_holdings = {k[0] for k in (existing_reconciled_keys or set())}
         for pos in sorted(
             aggregated_holdings.values(),
             key=lambda p: (p.get("b_account", ""), p.get("ticker", "")),
@@ -1596,7 +1596,6 @@ class BeancountGenerator:
             # (on append). It is applied once per holding: if any reconciliation for
             # this holding_tag is already in the ledger, a later snapshot must not
             # deduct the surplus again (it would break balance assertions).
-            already_reconciled_holdings = {k[0] for k in (existing_reconciled_keys or set())}
             if (round(floor_surplus, 6) > 0 and snapshot_date
                     and holding_tag not in already_reconciled_holdings):
                 self._append_shortfall_reconciliation(
