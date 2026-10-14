@@ -637,11 +637,7 @@ def _determine_opening_date(
             if (t.get("transaction_date") or t.get("date"))
         ]
         if tx_dates:
-            earliest_tx = str(min(tx_dates))
-            try:
-                earliest_tx = (datetime.date.fromisoformat(earliest_tx[:10]) - datetime.timedelta(days=1)).isoformat()
-            except ValueError:
-                pass
+            earliest_tx = _offset_date(str(min(tx_dates))[:10], days=-1)
             return max(_ACCOUNT_OPEN_DATE, min("2020-01-01", earliest_tx))
         return "2020-01-01"
 
@@ -667,9 +663,9 @@ def _clamp_before_earliest_trade(opening: str, transactions: Optional[DashboardT
     ]
     if not trade_dates:
         return opening
-    try:
-        cap = (datetime.date.fromisoformat(min(trade_dates)) - datetime.timedelta(days=1)).isoformat()
-    except ValueError:
+    cap = _offset_date(min(trade_dates), days=-1)
+    if cap == min(trade_dates):
+        # Fallback when date parsing fails.
         return opening
     # Never move the lot before the supported account-open date: postings preceding
     # their account's open directive are rejected by Beancount.
@@ -772,14 +768,26 @@ def _build_delta_transactions(
     )
 
 
+def _offset_date(date_str: str, days: int = 0) -> str:
+    """Offset a date string by the given number of days, returning the original on parse error.
+
+    Args:
+        date_str: ISO format date string (YYYY-MM-DD).
+        days: Number of days to add (negative to subtract).
+
+    Returns:
+        Offset date as ISO string, or the original date_str if parsing fails.
+    """
+    try:
+        d = datetime.date.fromisoformat(date_str)
+        return (d + datetime.timedelta(days=days)).isoformat()
+    except (TypeError, ValueError):
+        return date_str
+
+
 def _reconciliation_date(snapshot_date: str) -> str:
     """Return the day after ``snapshot_date`` on which a shortfall reconciliation posts."""
-    try:
-        return (
-            datetime.date.fromisoformat(snapshot_date) + datetime.timedelta(days=1)
-        ).isoformat()
-    except (TypeError, ValueError):
-        return snapshot_date
+    return _offset_date(snapshot_date, days=1)
 
 
 class BeancountGenerator:
@@ -1154,12 +1162,8 @@ class BeancountGenerator:
             return
         reconciled_keys = reconciled_keys or set()
         as_of = holdings.as_of_date
-        try:
-            base = datetime.date.fromisoformat(as_of)
-            next_day = (base + datetime.timedelta(days=1)).isoformat()
-            reconciled_day = (base + datetime.timedelta(days=2)).isoformat()
-        except Exception:
-            next_day = reconciled_day = as_of
+        next_day = _offset_date(as_of, days=1)
+        reconciled_day = _offset_date(as_of, days=2)
         lines.append(
             f"\n;; Investment Commodity Unit Balances (snapshot as of {as_of}, "
             f"asserted D+1 — or D+2 for a position with a shortfall reconciliation)\n"
@@ -1338,11 +1342,7 @@ class BeancountGenerator:
         # Beancount's beginning-of-day balance assertion on as_of passes cleanly.
         as_of = holdings.as_of_date if holdings else None
         if as_of:
-            try:
-                d = datetime.date.fromisoformat(as_of)
-                return (d - datetime.timedelta(days=1)).isoformat()
-            except Exception:
-                return as_of
+            return _offset_date(as_of, days=-1)
         return "2020-01-01"
 
     def _compute_net_buys(
