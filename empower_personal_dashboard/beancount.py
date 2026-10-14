@@ -898,6 +898,7 @@ class BeancountGenerator:
         lines: List[str],
         include_pads: bool,
     ) -> None:
+        """Emit Beancount open directives for accounts from balance data."""
         if not (balances and balances.accounts):
             return
         for acct in balances.accounts:
@@ -922,6 +923,7 @@ class BeancountGenerator:
         lines: List[str],
         include_pads: bool,
     ) -> None:
+        """Emit Beancount open directives for accounts from holding data."""
         if not (holdings and holdings.holdings):
             return
         for h in holdings.holdings:
@@ -965,6 +967,7 @@ class BeancountGenerator:
         seen_accounts: Set[str],
         lines: List[str],
     ) -> None:
+        """Emit Beancount open directives for accounts from transaction data."""
         if not (transactions and transactions.transactions):
             return
         commodity_tx_accounts = self._collect_commodity_tx_accounts(transactions, acct_lookup)
@@ -1447,6 +1450,7 @@ class BeancountGenerator:
         inventory never goes negative, even when the final net is non-negative.
         """
         def _tx_date(tx: Dict[str, Any]) -> str:
+            """Extract transaction date from transaction dict."""
             return str(tx.get("transaction_date") or tx.get("date") or "")
 
         cumulative: Dict[Tuple[str, str], float] = {}
@@ -1936,6 +1940,7 @@ class BeancountGenerator:
             lines.append(f'  empower_account_id: "{_escape_beancount_string(acct_id)}"\n')
 
     def _emit_investment_buy(self, ctx: Dict[str, Any], lines: List[str]) -> None:
+        """Emit transaction directive for a buy transaction."""
         primary_account = ctx["primary_account"]
         qty = ctx["qty"]
         price = ctx["price"]
@@ -1991,6 +1996,7 @@ class BeancountGenerator:
         lines.append("\n")
 
     def _emit_investment_sell(self, ctx: Dict[str, Any], lines: List[str]) -> None:
+        """Emit transaction directive for a sell transaction."""
         primary_account = ctx["primary_account"]
         qty = ctx["qty"]
         price = ctx["price"]
@@ -2014,6 +2020,7 @@ class BeancountGenerator:
         lines.append(f"  {cap_gains_acct}\n\n")
 
     def _emit_investment_dividend(self, ctx: Dict[str, Any], lines: List[str]) -> None:
+        """Emit transaction directive for a dividend transaction."""
         dividend_acct = self.mapper.categories.get("Dividends") or ACCT_INCOME_DIVIDENDS
         self._emit_tx_header(
             lines, ctx["date"], ctx["inv_payee"], ctx["inv_narration"],
@@ -2034,6 +2041,7 @@ class BeancountGenerator:
         lines.append(f"  {dividend_acct:<36} {-cash:>8.2f} USD\n\n")
 
     def _emit_standard_tx(self, ctx: Dict[str, Any], lines: List[str]) -> None:
+        """Emit transaction directive for a standard (non-investment) transaction."""
         tx = ctx["tx"]
         cat_name = ctx["cat_name"]
         amount = ctx["amount"]
@@ -2128,6 +2136,7 @@ class BeancountGenerator:
     def _commit_staged_files(staged_files: List[Path], dest: Path) -> List[Path]:
         """Atomically commit staged files to destination directory."""
         def preflight() -> None:
+            """Validate that target paths are safe for overwriting."""
             for sf in staged_files:
                 target = dest / sf.name
                 _verify_not_symlink(target)

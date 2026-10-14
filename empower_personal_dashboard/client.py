@@ -231,6 +231,7 @@ class EmpowerDashboardClient:
                 self.logger.addHandler(file_handler)
 
     def _log_debug(self, msg: str) -> None:
+        """Log a debug message if debug mode or log file is enabled."""
         if self.debug or self.log_file:
             self.logger.debug(msg)
 
@@ -662,6 +663,7 @@ class EmpowerDashboardClient:
         return res_json
 
     def _resolve_reauth_password(self, password: Optional[str]) -> Optional[str]:
+        """Resolve password for re-authentication from argument or provider."""
         if password:
             return password
         if self.password_provider:
@@ -1257,6 +1259,7 @@ class EmpowerDashboardClient:
     # --------------------------------------------------------------------------
 
     def _generate_mock_balances(self) -> DashboardBalances:
+        """Generate synthetic balance snapshot for offline sandbox mode."""
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         accounts = [
             {
@@ -1334,6 +1337,7 @@ class EmpowerDashboardClient:
         )
 
     def _generate_mock_holdings(self) -> DashboardHoldings:
+        """Generate synthetic holdings snapshot for offline sandbox mode."""
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         mock_holdings = [
             {
@@ -1411,6 +1415,7 @@ class EmpowerDashboardClient:
         end_date: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> DashboardTransactions:
+        """Generate synthetic transaction history for offline sandbox mode."""
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         end = end_date or today_str
         # Generate transaction dates within the requested range using the end_date's
@@ -1554,6 +1559,7 @@ class EmpowerDashboardClient:
         end_date: Optional[str] = None,
         user_account_ids: Optional[Union[str, List[Union[str, int]], Tuple[Union[str, int], ...], Set[Union[str, int]]]] = None,
     ) -> DashboardHistories:
+        """Generate synthetic net-worth history for offline sandbox mode."""
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         start = start_date or "2024-01-01"
         end = end_date or today_str
@@ -1562,6 +1568,7 @@ class EmpowerDashboardClient:
         # range so offline callers observe the same [start, end] range semantics
         # as live retrieval (rather than fixed calendar dates in the start year).
         def _midpoint(s: str, e: str) -> str:
+            """Compute midpoint date between two date strings."""
             try:
                 ds = datetime.strptime(s, "%Y-%m-%d").date()
                 de = datetime.strptime(e, "%Y-%m-%d").date()
