@@ -1,9 +1,9 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# SOURCE OF TRUTH: petry-projects/.github/standards/workflows/sonarcloud.yml
-# Standard:        petry-projects/.github/standards/ci-standards.md#3-sonarcloud-analysis
+# SOURCE OF TRUTH: combsmith/.github/standards/workflows/sonarcloud.yml
+# Standard:        combsmith/.github/standards/ci-standards.md#3-sonarcloud-analysis
 #
 # ADOPTING THIS WORKFLOW:
-#   1. This ships from petry-projects/repo-template, then is tailored per repo —
+#   1. This ships from combsmith/repo-template, then is tailored per repo —
 #      see REPO-SPECIFIC TAILORING below; the surrounding scan scaffolding stays
 #      verbatim with the standard.
 #   2. Set sonar.projectKey / sonar.organization in sonar-project.properties to
