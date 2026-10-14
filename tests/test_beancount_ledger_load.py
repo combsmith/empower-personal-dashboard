@@ -68,6 +68,39 @@ def _brokerage_balances(as_of="2024-10-01", balance=20100.0):
     )
 
 
+def _vti_holdings(as_of="2024-10-01", quantity=60.0, price=280.0, cost_basis=None):
+    """Create a standard VTI holdings position for testing."""
+    if cost_basis is None:
+        cost_basis = quantity * price * 0.75
+    total_value = quantity * price
+    return DashboardHoldings(
+        as_of_date=as_of,
+        total_value=total_value,
+        holdings=[
+            {"user_account_id": 5001, "account_name": "Taxable Brokerage",
+             "firm_name": "Acme Brokerage", "ticker": "VTI",
+             "quantity": quantity, "price": price, "cost_basis": cost_basis},
+        ],
+    )
+
+
+def _vti_buy_transaction(start="2021-01-01", end="2024-10-01", quantity=20.0, price=200.0):
+    """Create a standard VTI buy transaction for testing."""
+    amount = quantity * price
+    return DashboardTransactions(
+        start_date=start, end_date=end, total_transactions=1,
+        money_in=0.0, money_out=amount, net_cashflow=-amount,
+        transactions=[
+            {"user_transaction_id": "tx-1", "account_id": "ACC-BRK-001",
+             "user_account_id": 5001, "account_name": "Taxable Brokerage",
+             "firm_name": "Acme Brokerage", "transaction_date": "2021-06-15",
+             "description": "Buy VTI", "amount": amount, "is_cash_out": True,
+             "transaction_type": "Buy", "investment_type": "Buy",
+             "symbol": "VTI", "price": price, "quantity": quantity},
+        ],
+    )
+
+
 # Conditionally define beancount-dependent tests. On Python 3.9, where beancount
 # is not available, these classes are excluded from unittest discovery entirely
 # rather than being collected and then skipped at runtime.
@@ -86,27 +119,8 @@ if _HAS_BEANCOUNT:
         def test_full_lifecycle_single_file_loads(self):
             """A complete lifecycle export must load cleanly through the Beancount loader."""
             balances = _brokerage_balances()
-            holdings = DashboardHoldings(
-                as_of_date="2024-10-01",
-                total_value=20100.0,
-                holdings=[
-                    {"user_account_id": 5001, "account_name": "Taxable Brokerage",
-                     "firm_name": "Acme Brokerage", "ticker": "VTI",
-                     "quantity": 60.0, "price": 280.0, "cost_basis": 12600.0},
-                ],
-            )
-            transactions = DashboardTransactions(
-                start_date="2021-01-01", end_date="2024-10-01", total_transactions=1,
-                money_in=0.0, money_out=4000.0, net_cashflow=-4000.0,
-                transactions=[
-                    {"user_transaction_id": "tx-1", "account_id": "ACC-BRK-001",
-                     "user_account_id": 5001, "account_name": "Taxable Brokerage",
-                     "firm_name": "Acme Brokerage", "transaction_date": "2021-06-15",
-                     "description": "Buy VTI", "amount": 4000.0, "is_cash_out": True,
-                     "transaction_type": "Buy", "investment_type": "Buy",
-                     "symbol": "VTI", "price": 200.0, "quantity": 20.0},
-                ],
-            )
+            holdings = _vti_holdings()
+            transactions = _vti_buy_transaction()
             with tempfile.TemporaryDirectory() as tmp:
                 target = Path(tmp) / "ledger.bean"
                 self.generator.export_single_file(
@@ -238,14 +252,7 @@ if _HAS_BEANCOUNT:
             """Initialize test fixtures for append validation."""
             super().setUp()
             self.balances = _brokerage_balances()
-            self.holdings = DashboardHoldings(
-                as_of_date="2024-10-01", total_value=16800.0,
-                holdings=[
-                    {"user_account_id": 5001, "account_name": "Taxable Brokerage",
-                     "firm_name": "Acme Brokerage", "ticker": "VTI",
-                     "quantity": 60.0, "price": 280.0, "cost_basis": 12600.0},
-                ],
-            )
+            self.holdings = _vti_holdings(quantity=60.0, price=280.0, cost_basis=12600.0)
 
         def _txns(self, start, end, date):
             """Create synthetic transaction data for append testing."""
@@ -326,28 +333,9 @@ if _HAS_BEANCOUNT:
             """
             # Create holdings snapshot at 2024-10-01 with VTI position
             balances = _brokerage_balances(as_of="2024-10-01", balance=20100.0)
-            holdings = DashboardHoldings(
-                as_of_date="2024-10-01",
-                total_value=20100.0,
-                holdings=[
-                    {"user_account_id": 5001, "account_name": "Taxable Brokerage",
-                     "firm_name": "Acme Brokerage", "ticker": "VTI",
-                     "quantity": 60.0, "price": 280.0, "cost_basis": 12600.0},
-                ],
-            )
+            holdings = _vti_holdings()
             # Incomplete transactions: end_date is before holdings.as_of_date
-            incomplete_txns = DashboardTransactions(
-                start_date="2021-01-01", end_date="2024-06-30", total_transactions=1,
-                money_in=0.0, money_out=4000.0, net_cashflow=-4000.0,
-                transactions=[
-                    {"user_transaction_id": "tx-1", "account_id": "ACC-BRK-001",
-                     "user_account_id": 5001, "account_name": "Taxable Brokerage",
-                     "firm_name": "Acme Brokerage", "transaction_date": "2021-06-15",
-                     "description": "Buy VTI", "amount": 4000.0, "is_cash_out": True,
-                     "transaction_type": "Buy", "investment_type": "Buy",
-                     "symbol": "VTI", "price": 200.0, "quantity": 20.0},
-                ],
-            )
+            incomplete_txns = _vti_buy_transaction(start="2021-01-01", end="2024-06-30")
             # Reconcile by extending the window to the snapshot date
             reconciled_txns = self.client.reconcile_transaction_window(
                 incomplete_txns, holdings, policy="extend", limited=False,
