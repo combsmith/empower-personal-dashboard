@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Preserve and scale reported cost basis for short snapshot lots in Beancount export ([#70](https://github.com/petry-projects/empower-personal-dashboard/issues/70)):
+  - Updated `_append_snapshot_lot` to scale reported cost basis for negative (short) snapshot positions by `abs(qty) / abs(snapshot_qty)` and emit `{{... USD}}` costed lot syntax rather than falling back to snapshot price annotation.
+  - Handled negative cost basis representations from upstream API payloads safely with absolute value normalization.
+  - Preserved negative/short quantities in `_aggregate_snapshot_holdings` and `_emit_commodity_unit_assertions`.
+- Made `export_modular_ledger` atomic and fault-tolerant ([#70](https://github.com/petry-projects/empower-personal-dashboard/issues/70)):
+  - Staged all modular ledger file updates in an isolated temporary staging directory before writing to the destination directory. Any generation failure or rejected append leaves existing ledger files untouched.
+
 ## [0.6.0] - 2026-10-12
 
 ### Added
