@@ -90,11 +90,11 @@ empower = "empower_personal_dashboard.cli:main"
 empower-mcp = "empower_personal_dashboard.mcp_server:main"
 
 [project.urls]
-Homepage = "https://github.com/petry-projects/empower-personal-dashboard"
-Documentation = "https://github.com/petry-projects/empower-personal-dashboard#readme"
-Changelog = "https://github.com/petry-projects/empower-personal-dashboard/blob/main/CHANGELOG.md"
-Issues = "https://github.com/petry-projects/empower-personal-dashboard/issues"
-Repository = "https://github.com/petry-projects/empower-personal-dashboard.git"
+Homepage = "https://github.com/combsmith/empower-personal-dashboard"
+Documentation = "https://github.com/combsmith/empower-personal-dashboard#readme"
+Changelog = "https://github.com/combsmith/empower-personal-dashboard/blob/main/CHANGELOG.md"
+Issues = "https://github.com/combsmith/empower-personal-dashboard/issues"
+Repository = "https://github.com/combsmith/empower-personal-dashboard.git"
 "Commercial Support" = "https://combsmith.com"
 
 [tool.setuptools.packages.find]

@@ -4,7 +4,7 @@ This file defines project-specific development standards for **empower-personal-
 It follows the [AGENTS.md convention](https://agents.md/) and extends the organization-wide engineering standards.
 
 > **Organization standards:** This repository inherits shared development and security standards from
-> [`petry-projects/.github/AGENTS.md`](https://github.com/petry-projects/.github/blob/main/AGENTS.md).
+> [`combsmith/.github/AGENTS.md`](https://github.com/combsmith/.github/blob/main/AGENTS.md).
 > Read that file for cross-cutting standards on Test-Driven Development (TDD), git workflows, commit conventions, and push protection.
 
 ---
@@ -144,5 +144,5 @@ The repository adheres to formal API contract specifications as defined in [ADR-
 Modeled after `don-petry/brand-ops`:
 
 - **Tokenless OIDC Publishing:** Packaging and releases publish via PyPI Trusted Publishing (`id-token: write`). Never store long-lived `PYPI_TOKEN` secrets in repository settings.
-- **Pending Publisher Registration:** Before the initial release, a pending publisher must be configured at `https://pypi.org/manage/account/publishing/` for PyPI project `empower-personal-dashboard`, owner `petry-projects`, repo `empower-personal-dashboard`, workflow `publish.yml`, environment `pypi`.
+- **Pending Publisher Registration:** Before the initial release, a pending publisher must be configured at `https://pypi.org/manage/account/publishing/` for PyPI project `empower-personal-dashboard`, owner `combsmith`, repo `empower-personal-dashboard`, workflow `publish.yml`, environment `pypi`.
 - **Dry-Run Safety:** Manual release dispatches via `.github/workflows/publish.yml` default to `dry_run: true` so packages can be built, inspected, and validated with `twine check` before releasing.
