@@ -1306,14 +1306,17 @@ class BeancountGenerator:
             existing_keys = set(re.findall(r'empower_holding:\s*"([^"]+)"', existing_content))
             # Extract existing shortfall reconciliations: keyed by (holding_tag, snapshot_date)
             # for idempotency across multiple appends (date is the posting date, D+1).
-            for match in re.finditer(
-                r'(\d{4}-\d{2}-\d{2})\s+\*\s+"[^"]*Snapshot Shortfall Reconciliation".*?'
-                r'empower_holding:\s*"([^"]+)"',
-                existing_content,
-                re.DOTALL
-            ):
-                snapshot_date_str, holding_tag = match.groups()
-                existing_reconciled_keys.add((holding_tag, snapshot_date_str))
+            # Directives are blank-line separated, so scan block by block instead of
+            # using a backtracking multi-line regex.
+            for block in existing_content.split("\n\n"):
+                header = re.search(
+                    r'^\s*(\d{4}-\d{2}-\d{2}) \* "[^"\n]*Snapshot Shortfall Reconciliation"',
+                    block,
+                    re.MULTILINE,
+                )
+                tag = re.search(r'empower_holding:\s*"([^"]+)"', block)
+                if header and tag:
+                    existing_reconciled_keys.add((tag.group(1), header.group(1)))
 
         net_buys, net_buy_meta = self._compute_net_buys(transactions, acct_lookup)
         aggregated_holdings = self._aggregate_snapshot_holdings(holdings, acct_lookup)
