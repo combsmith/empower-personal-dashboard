@@ -1127,47 +1127,54 @@ class EmpowerDashboardClient:
         if normalized_policy == "error":
             raise ReconstructionWindowError(detail)
         if normalized_policy == "extend":
-            as_of = (holdings.as_of_date or "").strip()
-            if not as_of:
-                self.logger.warning("Cannot extend reconstruction window: %s", detail)
-                return transactions
-            self.logger.warning("Extending reconstruction window to %s: %s", as_of, detail)
-            # The date range is driven entirely by this method, so drop any
-            # caller-supplied ``start_date``/``end_date`` (they would collide with
-            # the explicit keywords below and raise a duplicate-keyword TypeError)
-            # and ``limit`` (it truncates the widened range to the newest N trades,
-            # so the returned window could reach the snapshot while silently
-            # dropping older trades reconstruction depends on).
-            extend_kwargs = {
-                key: value
-                for key, value in fetch_kwargs.items()
-                if key not in {"start_date", "end_date", "limit"}
-            }
-            extended = self.fetch_transactions(
-                start_date=transactions.start_date or None,
-                end_date=as_of,
-                **extend_kwargs,
-            )
-            # The refetch must not start later than the original window: a later
-            # start would drop the earliest trades reconstruction depends on,
-            # leaving the opening baseline to absorb them.
-            original_start = (transactions.start_date or "").strip()
-            extended_start = (extended.start_date or "").strip()
-            if original_start and extended_start > original_start:
-                raise ReconstructionWindowError(
-                    f"extended transaction window starts "
-                    f"{extended.start_date!r} after original start date "
-                    f"{transactions.start_date!r}"
-                )
-            if not self._window_covers_snapshot(extended.end_date, as_of):
-                raise ReconstructionWindowError(
-                    f"extended transaction window still ends "
-                    f"{extended.end_date!r} before holdings as_of_date {as_of!r}"
-                )
-            return extended
+            return self._extend_transaction_window(transactions, holdings, detail, fetch_kwargs)
         # Default: warn and leave the caller's data untouched.
         self.logger.warning("Incomplete reconstruction window: %s", detail)
         return transactions
+
+    def _extend_transaction_window(
+        self,
+        transactions: DashboardTransactions,
+        holdings: DashboardHoldings,
+        detail: str,
+        fetch_kwargs: Dict[str, Any],
+    ) -> DashboardTransactions:
+        """Re-fetch transactions through ``holdings.as_of_date`` for the ``extend`` policy."""
+        as_of = (holdings.as_of_date or "").strip()
+        if not as_of:
+            self.logger.warning("Cannot extend reconstruction window: %s", detail)
+            return transactions
+        self.logger.warning("Extending reconstruction window to %s: %s", as_of, detail)
+        # The date range is driven entirely by this method, so drop any
+        # caller-supplied ``start_date``/``end_date`` (they would collide with
+        # the explicit keywords below) and ``limit`` (it truncates the widened
+        # range to the newest N trades, silently dropping older trades).
+        extend_kwargs = {
+            key: value
+            for key, value in fetch_kwargs.items()
+            if key not in {"start_date", "end_date", "limit"}
+        }
+        extended = self.fetch_transactions(
+            start_date=transactions.start_date or None,
+            end_date=as_of,
+            **extend_kwargs,
+        )
+        # The refetch must not start later than the original window: a later
+        # start would drop the earliest trades reconstruction depends on.
+        original_start = (transactions.start_date or "").strip()
+        extended_start = (extended.start_date or "").strip()
+        if original_start and extended_start > original_start:
+            raise ReconstructionWindowError(
+                f"extended transaction window starts "
+                f"{extended.start_date!r} after original start date "
+                f"{transactions.start_date!r}"
+            )
+        if not self._window_covers_snapshot(extended.end_date, as_of):
+            raise ReconstructionWindowError(
+                f"extended transaction window still ends "
+                f"{extended.end_date!r} before holdings as_of_date {as_of!r}"
+            )
+        return extended
 
     def fetch_histories(
         self,
