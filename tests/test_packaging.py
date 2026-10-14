@@ -42,9 +42,9 @@ class TestPackaging(unittest.TestCase):
         self.assertIn("Programming Language :: Python :: 3", classifiers)
 
         urls = project.get("urls", {})
-        self.assertIn("https://github.com/petry-projects/empower-personal-dashboard", urls.get("Homepage", ""))
-        self.assertIn("https://github.com/petry-projects/empower-personal-dashboard", urls.get("Repository", ""))
-        self.assertEqual(urls.get("Changelog"), "https://github.com/petry-projects/empower-personal-dashboard/blob/main/CHANGELOG.md")
+        self.assertIn("https://github.com/combsmith/empower-personal-dashboard", urls.get("Homepage", ""))
+        self.assertIn("https://github.com/combsmith/empower-personal-dashboard", urls.get("Repository", ""))
+        self.assertEqual(urls.get("Changelog"), "https://github.com/combsmith/empower-personal-dashboard/blob/main/CHANGELOG.md")
 
         opt_deps = project.get("optional-dependencies", {})
         self.assertIn("build", opt_deps)
@@ -106,7 +106,7 @@ class TestPackaging(unittest.TestCase):
         from scripts.pypi_onboard import PACKAGE_NAME, PENDING_PUBLISHER_HINT
 
         self.assertIn(PACKAGE_NAME, PENDING_PUBLISHER_HINT)
-        self.assertIn("petry-projects", PENDING_PUBLISHER_HINT)
+        self.assertIn("combsmith", PENDING_PUBLISHER_HINT)
         self.assertIn("publish.yml", PENDING_PUBLISHER_HINT)
         self.assertIn("pypi", PENDING_PUBLISHER_HINT)
 

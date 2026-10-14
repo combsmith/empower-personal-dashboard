@@ -1,5 +1,5 @@
 # Dependabot configuration for Python backend repositories
-# Standard: petry-projects/.github/standards/dependabot-policy.md
+# Standard: combsmith/.github/standards/dependabot-policy.md
 version: 2
 updates:
   # pip — security updates only (limit 0 suppresses version updates)
