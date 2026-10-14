@@ -1,10 +1,10 @@
 # Empower Personal Dashboard (`empower-personal-dashboard`)
 
-[![CI](https://github.com/petry-projects/empower-personal-dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/petry-projects/empower-personal-dashboard/actions/workflows/ci.yml)
+[![CI](https://github.com/combsmith/empower-personal-dashboard/actions/workflows/ci.yml/badge.svg)](https://github.com/combsmith/empower-personal-dashboard/actions/workflows/ci.yml)
 [![PyPI version](https://img.shields.io/pypi/v/empower-personal-dashboard.svg)](https://pypi.org/project/empower-personal-dashboard/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Python: 3.9+](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/petry-projects/.github/blob/main/CONTRIBUTING.md)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/combsmith/.github/blob/main/CONTRIBUTING.md)
 [![Privacy: Zero-PII](https://img.shields.io/badge/privacy-Zero--PII-success.svg)](AGENTS.md#2-zero-pii--privacy-strict-mandate)
 
 A standalone, modern Python client and CLI for **Empower Personal Dashboard** (formerly **Personal Capital**).
@@ -77,14 +77,14 @@ pip install "empower-personal-dashboard[all]"
 
 ```bash
 # Clone and install locally in editable mode
-git clone https://github.com/petry-projects/empower-personal-dashboard.git
+git clone https://github.com/combsmith/empower-personal-dashboard.git
 cd empower-personal-dashboard
 pip install -e .
 ```
 
 Or install directly from GitHub:
 ```bash
-pip install git+https://github.com/petry-projects/empower-personal-dashboard.git
+pip install git+https://github.com/combsmith/empower-personal-dashboard.git
 ```
 
 ---
@@ -381,7 +381,7 @@ sequenceDiagram
 
 Releases publish directly from GitHub Actions without storing long-lived, sensitive API tokens:
 - GitHub Actions exchanges its cryptographic OIDC ID token with PyPI for a short-lived upload token.
-- PyPI validates the repository (`petry-projects/empower-personal-dashboard`), workflow (`publish.yml`), and environment (`pypi`).
+- PyPI validates the repository (`combsmith/empower-personal-dashboard`), workflow (`publish.yml`), and environment (`pypi`).
 
 ### 2. Onboarding Steps (First Release Setup)
 
@@ -389,7 +389,7 @@ Before publishing the first release, the account owner registers a **Pending Pub
 1. Log in to [pypi.org/manage/account/publishing/](https://pypi.org/manage/account/publishing/).
 2. Under **"Add a pending publisher"**, enter:
    - **PyPI Project Name:** `empower-personal-dashboard`
-   - **Owner:** `petry-projects`
+   - **Owner:** `combsmith`
    - **Repository name:** `empower-personal-dashboard`
    - **Workflow name:** `publish.yml`
    - **Environment name:** `pypi`
@@ -414,7 +414,7 @@ python scripts/pypi_onboard.py
 
 ## 📋 Changelog & Release Notes
 
-All notable changes across releases are documented in [CHANGELOG.md](https://github.com/petry-projects/empower-personal-dashboard/blob/main/CHANGELOG.md) following [Keep a Changelog](https://keepachangelog.com/) standards. Releases are also tagged and detailed on [GitHub Releases](https://github.com/petry-projects/empower-personal-dashboard/releases).
+All notable changes across releases are documented in [CHANGELOG.md](https://github.com/combsmith/empower-personal-dashboard/blob/main/CHANGELOG.md) following [Keep a Changelog](https://keepachangelog.com/) standards. Releases are also tagged and detailed on [GitHub Releases](https://github.com/combsmith/empower-personal-dashboard/releases).
 
 ---
 
@@ -431,7 +431,7 @@ All notable changes across releases are documented in [CHANGELOG.md](https://git
 
 ```bash
 # Clone the repository
-git clone https://github.com/petry-projects/empower-personal-dashboard.git
+git clone https://github.com/combsmith/empower-personal-dashboard.git
 cd empower-personal-dashboard
 
 # Install in editable mode with development dependencies
@@ -448,8 +448,8 @@ python3 -m compileall empower_personal_dashboard tests
 
 ## Contributing & Agent Standards
 
-- **[CONTRIBUTING.md](https://github.com/petry-projects/.github/blob/main/CONTRIBUTING.md)**: Guidelines for opening issues, reporting API changes, coding conventions, pull request workflows, and contributor licensing.
-- **[AGENTS.md](AGENTS.md)**: Canonical development standards, Test-Driven Development (TDD) rules, and security guidelines for AI coding agents (extending [`petry-projects/.github/AGENTS.md`](https://github.com/petry-projects/.github/blob/main/AGENTS.md)).
+- **[CONTRIBUTING.md](https://github.com/combsmith/.github/blob/main/CONTRIBUTING.md)**: Guidelines for opening issues, reporting API changes, coding conventions, pull request workflows, and contributor licensing.
+- **[AGENTS.md](AGENTS.md)**: Canonical development standards, Test-Driven Development (TDD) rules, and security guidelines for AI coding agents (extending [`combsmith/.github/AGENTS.md`](https://github.com/combsmith/.github/blob/main/AGENTS.md)).
 - **[CLAUDE.md](CLAUDE.md)**: Agent instructions for Claude Code.
 
 ---

@@ -8,17 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
-- Preserve and scale reported cost basis for short snapshot lots in Beancount export ([#70](https://github.com/petry-projects/empower-personal-dashboard/issues/70)):
+- Preserve and scale reported cost basis for short snapshot lots in Beancount export ([#70](https://github.com/combsmith/empower-personal-dashboard/issues/70)):
   - Updated `_append_snapshot_lot` to scale reported cost basis for negative (short) snapshot positions by `abs(qty) / abs(snapshot_qty)` and emit `{{... USD}}` costed lot syntax rather than falling back to snapshot price annotation.
   - Handled negative cost basis representations from upstream API payloads safely with absolute value normalization.
   - Preserved negative/short quantities in `_aggregate_snapshot_holdings` and `_emit_commodity_unit_assertions`.
-- Made `export_modular_ledger` atomic and fault-tolerant ([#70](https://github.com/petry-projects/empower-personal-dashboard/issues/70)):
+- Made `export_modular_ledger` atomic and fault-tolerant ([#70](https://github.com/combsmith/empower-personal-dashboard/issues/70)):
   - Staged all modular ledger file updates in an isolated temporary staging directory before writing to the destination directory. Any generation failure or rejected append leaves existing ledger files untouched.
 
 ## [0.6.0] - 2026-10-12
 
 ### Added
-- Support OS keyring and pluggable credential helpers for unattended background syncs ([#55](https://github.com/petry-projects/empower-personal-dashboard/issues/55), [#84](https://github.com/petry-projects/empower-personal-dashboard/pull/84)):
+- Support OS keyring and pluggable credential helpers for unattended background syncs ([#55](https://github.com/combsmith/empower-personal-dashboard/issues/55), [#84](https://github.com/combsmith/empower-personal-dashboard/pull/84)):
   - Added `empower_personal_dashboard.credentials` module with `get_password_from_helper`, `get_password_from_keyring`, `set_password_in_keyring`, and hierarchical `resolve_password`.
   - Added CLI flags `--keyring`, `--set-keyring`, and `--credential-helper <command>`, as well as support for environment variables `EMPOWER_KEYRING` and `EMPOWER_CREDENTIAL_HELPER`.
   - Implemented `reauthenticate()` and automatic unattended session refresh in `EmpowerDashboardClient` on `SessionExpiredError` (Code 201/202/203) when `USER_REMEMBERED` device binding is active, with concurrent reauth synchronization.
@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.5.0] - 2026-10-12
 
 ### Added
-- Distinguish `USER_REMEMBERED` from `MFA_REQUIRED` and streamline password-only re-auth ([#54](https://github.com/petry-projects/empower-personal-dashboard/issues/54), [#81](https://github.com/petry-projects/empower-personal-dashboard/pull/81)):
+- Distinguish `USER_REMEMBERED` from `MFA_REQUIRED` and streamline password-only re-auth ([#54](https://github.com/combsmith/empower-personal-dashboard/issues/54), [#81](https://github.com/combsmith/empower-personal-dashboard/pull/81)):
   - Added dedicated `identify_user(username: str)` method querying `/login/identifyUser` to probe device recognition before 2FA challenge dispatch.
   - Streamlined `login()` to recognize `USER_REMEMBERED` device-bound state and authenticate with password alone without prompting for SMS/Email 2FA.
   - Updated CLI `interactive_login` to probe user identity first, display device recognition diagnostics, and cleanly prompt for password.
@@ -38,16 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.0] - 2026-10-12
 
 ### Added
-- Prune stale pending records from authoritative `--merge` windows ([#75](https://github.com/petry-projects/empower-personal-dashboard/issues/75)):
+- Prune stale pending records from authoritative `--merge` windows ([#75](https://github.com/combsmith/empower-personal-dashboard/issues/75)):
   - During an authoritative transaction merge, archived pending records whose `transaction_date` falls within the queried date range `[start_date, end_date]` and that are absent from the freshly fetched window are automatically pruned. This prevents posted replacements with re-issued transaction IDs from leaving stale duplicate pending records in the archive.
   - Historical records outside the queried window, posted records inside the window, and undated records are strictly preserved.
   - Pruning is automatically bypassed when the fetch is partial (filtered via `--limit` or `--account-id`).
   - Added `--no-prune` (`--no-merge-prune`) opt-out CLI flag for users wanting strictly additive merge behavior.
   - The merge progress summary reports the count of pruned records.
-- `--merge-lock-timeout` option for transaction archive merges ([#74](https://github.com/petry-projects/empower-personal-dashboard/issues/74)):
+- `--merge-lock-timeout` option for transaction archive merges ([#74](https://github.com/combsmith/empower-personal-dashboard/issues/74)):
   - Retries lock acquisition with a waiting notice (`[*] Another --merge is running for this archive; waiting...`) if the archive lock is busy.
   - Times out cleanly after a configurable duration (default: 60s) with a non-zero exit code while leaving the existing archive untouched, preventing unattended cron jobs or agents from hanging indefinitely on stalled merges.
-- Hardened Beancount growth-curve reconstruction with real ledger-load validation ([#48](https://github.com/petry-projects/empower-personal-dashboard/issues/48)):
+- Hardened Beancount growth-curve reconstruction with real ledger-load validation ([#48](https://github.com/combsmith/empower-personal-dashboard/issues/48)):
   - Preserved negative (short) snapshot quantities end to end — negative opening lots and negative commodity unit balance assertions — keeping a current short distinct from a fully-sold security.
   - Emitted an explicit shortfall reconciliation when the intra-window running-deficit floor over-provisions an opening lot, so the reconstructed final quantity still matches the asserted snapshot.
   - Persisted the exported window-start boundary in `holdings.bean` and reject (`LedgerAppendError`) an append that broadens the window into the past, which would leave the already-exported opening lot stale.
@@ -57,27 +57,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.0] - 2026-10-10
 
 ### Added
-- Intelligent delta merge for transaction archives ([#51](https://github.com/petry-projects/empower-personal-dashboard/issues/51)):
+- Intelligent delta merge for transaction archives ([#51](https://github.com/combsmith/empower-personal-dashboard/issues/51)):
   - Added `--merge` CLI flag that merges freshly fetched transactions into an existing `--output-transactions` file (`.jsonl` or `.json`) by `user_transaction_id`. Matching records are updated in place (e.g. `status` revised from `pending` to `posted`, revised amounts/dates), new records are appended, and older historical transactions outside the queried window are preserved — so a default ~90-day fetch no longer clobbers a multi-year archive.
   - Added earliest-date auto-detection: when `--merge` is set, `--start-date` is omitted, and the target file exists, the CLI queries from the earliest archived transaction date forward.
   - Merged archives are written newest-first, matching the order the fetcher returns, so newly fetched rows lead the output; undated records sort last.
   - A `--merge` run refuses to proceed when the existing archive is not valid JSON/JSONL, contains non-object entries, or is a JSON object without a `transactions` list, reporting the parse error and leaving the archive unchanged rather than dropping the unreadable records on rewrite.
-  - The whole read, fetch, merge and replace sequence runs under an exclusive lock on the archive's directory, so concurrent `--merge` runs cannot drop each other's additions ([#68](https://github.com/petry-projects/empower-personal-dashboard/issues/68)). Locking is best-effort where `flock` is unavailable.
+  - The whole read, fetch, merge and replace sequence runs under an exclusive lock on the archive's directory, so concurrent `--merge` runs cannot drop each other's additions ([#68](https://github.com/combsmith/empower-personal-dashboard/issues/68)). Locking is best-effort where `flock` is unavailable.
   - Earliest-date auto-detection only considers canonical `YYYY-MM-DD` dates, and an incoming record without a `user_transaction_id` that is identical to one already archived is not appended again.
 
 ### Changed
 - `--output-transactions` files (`.jsonl` and `.json`) are now written through a temporary file and an atomic rename, so a crash, full disk or serialization error mid-write can no longer truncate an existing transaction archive. An existing file keeps its owner permission bits; group and other access is dropped when it is rewritten.
-- Session files are now written in format version 2, which stores each cookie with its full attributes ([#52](https://github.com/petry-projects/empower-personal-dashboard/issues/52)). Version 1 files written by earlier releases still load. Earlier releases cannot read a version 2 file and will ask for a fresh `--login`.
+- Session files are now written in format version 2, which stores each cookie with its full attributes ([#52](https://github.com/combsmith/empower-personal-dashboard/issues/52)). Version 1 files written by earlier releases still load. Earlier releases cannot read a version 2 file and will ask for a fresh `--login`.
 - The session file path and the debug log file path are validated before use: a path containing a NUL byte, or one that is a symlink or sits inside a symlinked directory, is refused with a `ValueError`.
 
 ### Fixed
-- Saved sessions no longer lose cookie attributes. Cookies were flattened to `{name: value}`, discarding domain, path, expiry, `Secure` and `HttpOnly`/`SameSite`, and keeping only one of several cookies that shared a name across domains or paths. Each cookie is now restored with its original scope, including host-only cookies ([#52](https://github.com/petry-projects/empower-personal-dashboard/issues/52)).
-- Logging in on a client that already holds session cookies no longer replaces the authenticated `JSESSIONID` with the unauthenticated one issued by the login landing page, which caused `[Error 201] Session not authenticated` on the next call. The CSRF token is now scraped through a separate throwaway session in that case ([#53](https://github.com/petry-projects/empower-personal-dashboard/issues/53)).
+- Saved sessions no longer lose cookie attributes. Cookies were flattened to `{name: value}`, discarding domain, path, expiry, `Secure` and `HttpOnly`/`SameSite`, and keeping only one of several cookies that shared a name across domains or paths. Each cookie is now restored with its original scope, including host-only cookies ([#52](https://github.com/combsmith/empower-personal-dashboard/issues/52)).
+- Logging in on a client that already holds session cookies no longer replaces the authenticated `JSESSIONID` with the unauthenticated one issued by the login landing page, which caused `[Error 201] Session not authenticated` on the next call. The CSRF token is now scraped through a separate throwaway session in that case ([#53](https://github.com/combsmith/empower-personal-dashboard/issues/53)).
 
 ## [0.2.0] - 2026-10-04
 
 ### Added
-- Reconstruct investment growth curve and multi-year trade timeline in Beancount export ([#38](https://github.com/petry-projects/empower-personal-dashboard/issues/38)):
+- Reconstruct investment growth curve and multi-year trade timeline in Beancount export ([#38](https://github.com/combsmith/empower-personal-dashboard/issues/38)):
   - Formatted investment trades (`Buy`, `Sell`, `Reinvest`, `Dividend Received`) into double-entry transactions with commodity lot pricing, cash settlement legs, and capital gains tracking.
   - Implemented pre-history baseline lot reconciliation: `Baseline Opening Qty = Current Snapshot Qty - Net Buys`. Emits opening lots in `holdings.bean` only when positive, avoiding duplicate shares for positions acquired within the transaction window.
   - Added `fetch_histories(start_date, end_date, user_account_ids)` to `EmpowerDashboardClient` with support for `/account/getHistories` RPC and synthetic offline sandbox simulation.
@@ -136,12 +136,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Authoritative OpenAPI 3.1 specification (`docs/openapi.yaml`) with Redocly CI linting and hermetic contract tests.
 - PyPI onboarding probe, build verification, and Trusted Publishing OIDC workflow.
 
-[Unreleased]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.6.0...HEAD
-[0.6.0]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.2.0...v0.3.0
-[0.2.0]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.1.2...v0.2.0
-[0.1.2]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.1.1...v0.1.2
-[0.1.1]: https://github.com/petry-projects/empower-personal-dashboard/compare/v0.1.0...v0.1.1
-[0.1.0]: https://github.com/petry-projects/empower-personal-dashboard/releases/tag/v0.1.0
+[Unreleased]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.1.2...v0.2.0
+[0.1.2]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.1.1...v0.1.2
+[0.1.1]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.1.0...v0.1.1
+[0.1.0]: https://github.com/combsmith/empower-personal-dashboard/releases/tag/v0.1.0
