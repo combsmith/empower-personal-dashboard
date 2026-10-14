@@ -73,12 +73,15 @@ def _brokerage_balances(as_of="2024-10-01", balance=20100.0):
 # rather than being collected and then skipped at runtime.
 if _HAS_BEANCOUNT:
 
-    class TestLedgerLoadRegression(unittest.TestCase):
-        """The pre-existing lifecycle ledger must still load clean (loader harness sanity)."""
+    class _BaseGeneratorTest(unittest.TestCase):
+        """Base class for tests that use BeancountGenerator."""
 
         def setUp(self):
             """Initialize the Beancount generator for each test."""
             self.generator = BeancountGenerator()
+
+    class TestLedgerLoadRegression(_BaseGeneratorTest):
+        """The pre-existing lifecycle ledger must still load clean (loader harness sanity)."""
 
         def test_full_lifecycle_single_file_loads(self):
             """A complete lifecycle export must load cleanly through the Beancount loader."""
@@ -112,12 +115,8 @@ if _HAS_BEANCOUNT:
                 )
                 assert_ledger_loads(self, target.read_text(encoding="utf-8"))
 
-    class TestShortPositions(unittest.TestCase):
+    class TestShortPositions(_BaseGeneratorTest):
         """Item 1 — negative snapshot quantities preserved end to end."""
-
-        def setUp(self):
-            """Initialize the Beancount generator for each test."""
-            self.generator = BeancountGenerator()
 
         def test_current_short_emits_negative_lot_and_assertion_and_loads(self):
             """Negative snapshot quantities produce negative opening lots that load cleanly."""
@@ -188,12 +187,8 @@ if _HAS_BEANCOUNT:
                 )
                 assert_ledger_loads(self, target.read_text(encoding="utf-8"))
 
-    class TestDeficitFloorShortfall(unittest.TestCase):
+    class TestDeficitFloorShortfall(_BaseGeneratorTest):
         """Item 4 — a deficit-floored opening lot must still match the asserted snapshot."""
-
-        def setUp(self):
-            """Initialize the Beancount generator for each test."""
-            self.generator = BeancountGenerator()
 
         def test_deficit_floor_reconciles_to_snapshot_and_loads(self):
             """Deficit-floor adjustments reconcile to the snapshot and load cleanly."""
@@ -236,12 +231,12 @@ if _HAS_BEANCOUNT:
             # quantity equal the 5-share snapshot assertion.
             assert_ledger_loads(self, content)
 
-    class TestBackwardAppend(unittest.TestCase):
+    class TestBackwardAppend(_BaseGeneratorTest):
         """Item 3 — an append that broadens the window into the past is rejected."""
 
         def setUp(self):
             """Initialize test fixtures for append validation."""
-            self.generator = BeancountGenerator()
+            super().setUp()
             self.balances = _brokerage_balances()
             self.holdings = DashboardHoldings(
                 as_of_date="2024-10-01", total_value=16800.0,
@@ -313,14 +308,14 @@ if _HAS_BEANCOUNT:
                 )
                 assert_ledger_loads(self, header + "\n" + "\n".join(combined))
 
-    class TestIncompleteWindowReconciliation(unittest.TestCase):
+    class TestIncompleteWindowReconciliation(_BaseGeneratorTest):
         """Integration test for incomplete-window reconciliation with real Beancount loader."""
 
         def setUp(self):
             """Initialize client and generator for incomplete-window testing."""
+            super().setUp()
             from empower_personal_dashboard.client import EmpowerDashboardClient
             self.client = EmpowerDashboardClient(mock_mode=True)
-            self.generator = BeancountGenerator()
 
         def test_incomplete_window_extend_policy_generates_loadable_ledger(self):
             """Incomplete-window extend policy generates a ledger that loads cleanly.
