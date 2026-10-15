@@ -50,6 +50,15 @@ from empower_personal_dashboard.models import (
 
 logger = logging.getLogger("empower_personal_dashboard.mcp")
 
+_AUTH_REQUIRED_MESSAGE = (
+    "Empower session has expired or is not initialized. "
+    "Please run 'empower --login' in your local terminal to re-authenticate."
+)
+_AUTH_REQUIRED_BEANCOUNT_COMMENT = (
+    ";; ERROR [AUTH_REQUIRED]: Empower session has expired or is not initialized.\n"
+    ";; Please run 'empower --login' in your local terminal to re-authenticate.\n"
+)
+
 # Compatibility import across MCP SDK versions (mcp 2.x MCPServer vs mcp 1.x FastMCP)
 try:
     from mcp.server.mcpserver import MCPServer as FastMCP
@@ -297,10 +306,7 @@ def create_mcp_server(
             return {
                 "status": "error",
                 "error_code": "AUTH_REQUIRED",
-                "message": (
-                    "Empower session has expired or is not initialized. "
-                    "Please run 'empower --login' in your local terminal to re-authenticate."
-                ),
+                "message": _AUTH_REQUIRED_MESSAGE,
             }
         except EmpowerError as e:
             return {"status": "error", "error_code": "API_ERROR", "message": str(e)}
@@ -416,10 +422,7 @@ def create_mcp_server(
             return {
                 "status": "error",
                 "error_code": "AUTH_REQUIRED",
-                "message": (
-                    "Empower session has expired or is not initialized. "
-                    "Please run 'empower --login' in your local terminal to re-authenticate."
-                ),
+                "message": _AUTH_REQUIRED_MESSAGE,
             }
         except EmpowerError as e:
             return {"status": "error", "error_code": "API_ERROR", "message": str(e)}
@@ -557,10 +560,7 @@ def create_mcp_server(
             return {
                 "status": "error",
                 "error_code": "AUTH_REQUIRED",
-                "message": (
-                    "Empower session has expired or is not initialized. "
-                    "Please run 'empower --login' in your local terminal to re-authenticate."
-                ),
+                "message": _AUTH_REQUIRED_MESSAGE,
             }
         except EmpowerError as e:
             return {"status": "error", "error_code": "API_ERROR", "message": str(e)}
@@ -720,10 +720,7 @@ def create_mcp_server(
             return {
                 "status": "error",
                 "error_code": "AUTH_REQUIRED",
-                "message": (
-                    "Empower session has expired or is not initialized. "
-                    "Please run 'empower --login' in your local terminal to re-authenticate."
-                ),
+                "message": _AUTH_REQUIRED_MESSAGE,
             }
         except EmpowerError as e:
             return {"status": "error", "error_code": "API_ERROR", "message": str(e)}
@@ -1000,10 +997,7 @@ def create_mcp_server(
             return {
                 "status": "error",
                 "error_code": "AUTH_REQUIRED",
-                "message": (
-                    "Empower session has expired or is not initialized. "
-                    "Please run 'empower --login' in your local terminal to re-authenticate."
-                ),
+                "message": _AUTH_REQUIRED_MESSAGE,
             }
         except Exception as e:
             logger.exception("Unexpected error in export_data")
@@ -1064,10 +1058,7 @@ def create_mcp_server(
             gen = BeancountGenerator()
             return gen.generate_prices_bean(holdings)
         except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError):
-            return (
-                ";; ERROR [AUTH_REQUIRED]: Empower session has expired or is not initialized.\n"
-                ";; Please run 'empower --login' in your local terminal to re-authenticate.\n"
-            )
+            return _AUTH_REQUIRED_BEANCOUNT_COMMENT
         except EmpowerError as e:
             return f";; ERROR [API_ERROR]: Empower API error: {e}\n"
         except Exception as e:
@@ -1085,10 +1076,7 @@ def create_mcp_server(
             gen = BeancountGenerator()
             return gen.generate_accounts_bean(balances, holdings) + "\n" + gen.generate_balances_bean(balances, holdings)
         except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError):
-            return (
-                ";; ERROR [AUTH_REQUIRED]: Empower session has expired or is not initialized.\n"
-                ";; Please run 'empower --login' in your local terminal to re-authenticate.\n"
-            )
+            return _AUTH_REQUIRED_BEANCOUNT_COMMENT
         except EmpowerError as e:
             return f";; ERROR [API_ERROR]: Empower API error: {e}\n"
         except Exception as e:
@@ -1113,10 +1101,7 @@ def create_mcp_server(
             gen = BeancountGenerator()
             return gen.generate_transactions_bean(tx_data, balances=balances)
         except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError):
-            return (
-                ";; ERROR [AUTH_REQUIRED]: Empower session has expired or is not initialized.\n"
-                ";; Please run 'empower --login' in your local terminal to re-authenticate.\n"
-            )
+            return _AUTH_REQUIRED_BEANCOUNT_COMMENT
         except EmpowerError as e:
             return f";; ERROR [API_ERROR]: Empower API error: {e}\n"
         except Exception as e:

@@ -20,6 +20,7 @@ from empower_personal_dashboard.models import (
 from empower_personal_dashboard.beancount import (
     BeancountGenerator,
     BeancountMapper,
+    _parse_simple_yaml,
     slugify_account_name,
 )
 
@@ -191,6 +192,21 @@ accounts:
                 mapper.accounts.get("Acme Corp: Plan B"),
                 "Assets:AcmeCorp:PlanB",
             )
+
+    def test_simple_yaml_quoted_keys_tolerate_colon_spacing(self):
+        content = (
+            "categories:\n"
+            '  "Groceries":"Expenses:Food:Groceries"\n'
+            "  'Dining Out'   :    'Expenses:Food:Dining'   \n"
+        )
+        parsed = _parse_simple_yaml(content)
+        self.assertEqual(
+            parsed["categories"],
+            {
+                "Groceries": "Expenses:Food:Groceries",
+                "Dining Out": "Expenses:Food:Dining",
+            },
+        )
 
 
 class TestBeancountGenerator(unittest.TestCase):
