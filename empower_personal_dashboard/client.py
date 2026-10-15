@@ -22,6 +22,7 @@ import requests
 from .exceptions import (
     EmpowerError,
     LoginFailedException,
+    ReconstructionWindowError,
     RequireTwoFactorException,
     SessionExpiredError,
 )
@@ -159,6 +160,7 @@ class EmpowerDashboardClient:
         password_provider: Optional[Callable[[], Optional[str]]] = None,
         username: Optional[str] = None,
     ):
+        """Initialize a client session for Empower Personal Dashboard API."""
         # `.expanduser()` so a `~`-prefixed EMPOWER_SESSION_FILE resolves to the
         # home directory rather than a literal "~" folder in the CWD.
         self.session_file = Path(session_file or os.environ.get("EMPOWER_SESSION_FILE", DEFAULT_SESSION_FILE)).expanduser()
@@ -229,6 +231,7 @@ class EmpowerDashboardClient:
                 self.logger.addHandler(file_handler)
 
     def _log_debug(self, msg: str) -> None:
+        """Log a debug message if debug mode or log file is enabled."""
         if self.debug or self.log_file:
             self.logger.debug(msg)
 
@@ -660,6 +663,7 @@ class EmpowerDashboardClient:
         return res_json
 
     def _resolve_reauth_password(self, password: Optional[str]) -> Optional[str]:
+        """Resolve password for re-authentication from argument or provider."""
         if password:
             return password
         if self.password_provider:
@@ -1041,6 +1045,139 @@ class EmpowerDashboardClient:
             is_complete=is_complete,
         )
 
+    @staticmethod
+    def _window_covers_snapshot(tx_end_date: str, as_of_date: str) -> bool:
+        """True when the transaction range extends to (or past) the snapshot date.
+
+        Dates are ISO ``YYYY-MM-DD`` so a lexical comparison is chronological. An
+        empty endpoint is treated as non-covering so the ambiguity is surfaced
+        rather than silently assumed complete.
+        """
+        tx_end = (tx_end_date or "").strip()
+        as_of = (as_of_date or "").strip()
+        if not tx_end or not as_of:
+            return False
+        return tx_end >= as_of
+
+    def reconcile_transaction_window(
+        self,
+        transactions: DashboardTransactions,
+        holdings: DashboardHoldings,
+        policy: str = "warn",
+        limited: bool = False,
+        **fetch_kwargs: Any,
+    ) -> DashboardTransactions:
+        """Guard the Beancount reconstruction window against a short transaction range.
+
+        The growth-curve reconstruction derives every opening lot from
+        ``snapshot - net_buys`` over the fetched transaction range. When that
+        range ends before ``holdings.as_of_date``, trades after the range are
+        omitted and the baseline silently absorbs them, so the reconstructed
+        opening lots are wrong.
+
+        ``limited`` records whether ``transactions`` came from a capped fetch
+        (``fetch_transactions(limit=...)``). A limited fetch drops older trades
+        while keeping the full response date bounds, so matching bounds are *not*
+        proof of coverage: the window is treated as incomplete regardless of its
+        end date, and the ``policy`` below is applied.
+
+        Contract (``policy``):
+          - ``"warn"`` (default): log a warning and return ``transactions`` unchanged.
+          - ``"error"``: raise :class:`ReconstructionWindowError`.
+          - ``"extend"``: re-fetch transactions through ``holdings.as_of_date`` and
+            return the widened container. Any ``fetch_kwargs`` (e.g.
+            ``user_account_ids``) are forwarded to :meth:`fetch_transactions`,
+            except ``start_date``/``end_date`` (driven by this method) and
+            ``limit`` (would truncate the widened range and silently drop older
+            trades) which are ignored. If the refetched window still ends before
+            the snapshot date, :class:`ReconstructionWindowError` is raised rather
+            than handing an incomplete window to reconstruction.
+
+        An unknown ``policy`` raises :class:`ValueError`. A window that already
+        reaches the snapshot date is returned unchanged.
+        """
+        # Validate the policy up front so a misconfiguration fails the same way
+        # for every window, complete or not.
+        normalized_policy = (policy or "warn").strip().lower()
+        if normalized_policy not in {"warn", "error", "extend"}:
+            raise ValueError(
+                f"policy must be 'warn', 'error', or 'extend', not {policy!r}"
+            )
+
+        # A limited fetch keeps the full date bounds while dropping older trades,
+        # so matching bounds cannot prove coverage; only an unbounded fetch whose
+        # window reaches the snapshot date is treated as complete.
+        if not limited and self._window_covers_snapshot(
+            transactions.end_date, holdings.as_of_date
+        ):
+            return transactions
+
+        if limited:
+            detail = (
+                f"transaction window was fetched with a limit, so its date bounds "
+                f"({transactions.start_date!r}..{transactions.end_date!r}) cannot "
+                f"prove coverage through holdings as_of_date "
+                f"{holdings.as_of_date!r}; reconstructed opening lots would absorb "
+                f"trades dropped by the limit"
+            )
+        else:
+            detail = (
+                f"transaction window ends {transactions.end_date!r} before holdings "
+                f"as_of_date {holdings.as_of_date!r}; reconstructed opening lots would "
+                f"absorb omitted post-range trades"
+            )
+        if normalized_policy == "error":
+            raise ReconstructionWindowError(detail)
+        if normalized_policy == "extend":
+            return self._extend_transaction_window(transactions, holdings, detail, fetch_kwargs)
+        # Default: warn and leave the caller's data untouched.
+        self.logger.warning("Incomplete reconstruction window: %s", detail)
+        return transactions
+
+    def _extend_transaction_window(
+        self,
+        transactions: DashboardTransactions,
+        holdings: DashboardHoldings,
+        detail: str,
+        fetch_kwargs: Dict[str, Any],
+    ) -> DashboardTransactions:
+        """Re-fetch transactions through ``holdings.as_of_date`` for the ``extend`` policy."""
+        as_of = (holdings.as_of_date or "").strip()
+        if not as_of:
+            self.logger.warning("Cannot extend reconstruction window: %s", detail)
+            return transactions
+        self.logger.warning("Extending reconstruction window to %s: %s", as_of, detail)
+        # The date range is driven entirely by this method, so drop any
+        # caller-supplied ``start_date``/``end_date`` (they would collide with
+        # the explicit keywords below) and ``limit`` (it truncates the widened
+        # range to the newest N trades, silently dropping older trades).
+        extend_kwargs = {
+            key: value
+            for key, value in fetch_kwargs.items()
+            if key not in {"start_date", "end_date", "limit"}
+        }
+        extended = self.fetch_transactions(
+            start_date=transactions.start_date or None,
+            end_date=as_of,
+            **extend_kwargs,
+        )
+        # The refetch must not start later than the original window: a later
+        # start would drop the earliest trades reconstruction depends on.
+        original_start = (transactions.start_date or "").strip()
+        extended_start = (extended.start_date or "").strip()
+        if original_start and extended_start > original_start:
+            raise ReconstructionWindowError(
+                f"extended transaction window starts "
+                f"{extended.start_date!r} after original start date "
+                f"{transactions.start_date!r}"
+            )
+        if not self._window_covers_snapshot(extended.end_date, as_of):
+            raise ReconstructionWindowError(
+                f"extended transaction window still ends "
+                f"{extended.end_date!r} before holdings as_of_date {as_of!r}"
+            )
+        return extended
+
     def fetch_histories(
         self,
         start_date: Optional[str] = None,
@@ -1122,6 +1259,7 @@ class EmpowerDashboardClient:
     # --------------------------------------------------------------------------
 
     def _generate_mock_balances(self) -> DashboardBalances:
+        """Generate synthetic balance snapshot for offline sandbox mode."""
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         accounts = [
             {
@@ -1199,6 +1337,7 @@ class EmpowerDashboardClient:
         )
 
     def _generate_mock_holdings(self) -> DashboardHoldings:
+        """Generate synthetic holdings snapshot for offline sandbox mode."""
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         mock_holdings = [
             {
@@ -1276,15 +1415,21 @@ class EmpowerDashboardClient:
         end_date: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> DashboardTransactions:
+        """Generate synthetic transaction history for offline sandbox mode."""
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         end = end_date or today_str
+        # Generate transaction dates within the requested range using the end_date's
+        # month as the reference, so historical snapshots contain historically-dated
+        # mock records rather than clamped-to-range records from the current month.
+        date_base = end_date or today_str
+        date_base = date_base[:7]  # Extract YYYY-MM
         mock_txs = [
             {
                 "user_transaction_id": "TXN-001",
                 "account_id": "ACC-CHK-003",
                 "user_account_id": 1003,
                 "account_name": "Apex Premier Checking",
-                "transaction_date": f"{today_str[:7]}-15",
+                "transaction_date": f"{date_base}-15",
                 "description": "Payroll Direct Deposit",
                 "original_description": "ACH DIRECT DEPOSIT PAYROLL",
                 "amount": 4500.00,
@@ -1308,7 +1453,7 @@ class EmpowerDashboardClient:
                 "account_id": "ACC-INV-001",
                 "user_account_id": 1001,
                 "account_name": "Horizon 401(k) Retirement Plan",
-                "transaction_date": f"{today_str[:7]}-15",
+                "transaction_date": f"{date_base}-15",
                 "description": "Elective Payroll Contribution",
                 "original_description": "PLAN ELECTIVE CONTRIB",
                 "amount": 750.00,
@@ -1332,7 +1477,7 @@ class EmpowerDashboardClient:
                 "account_id": "ACC-IRA-002",
                 "user_account_id": 1002,
                 "account_name": "Pinnacle Traditional IRA",
-                "transaction_date": f"{today_str[:7]}-10",
+                "transaction_date": f"{date_base}-10",
                 "description": "Dividend Received — SPDR S&P 500 ETF (SPY)",
                 "original_description": "DIVIDEND ON SPY",
                 "amount": 125.50,
@@ -1356,7 +1501,7 @@ class EmpowerDashboardClient:
                 "account_id": "ACC-CRD-005",
                 "user_account_id": 1005,
                 "account_name": "Beacon Preferred Credit Card",
-                "transaction_date": f"{today_str[:7]}-05",
+                "transaction_date": f"{date_base}-05",
                 "description": "Neighborhood Grocery Market",
                 "original_description": "GROCERY MARKET MAIN ST",
                 "amount": 182.40,
@@ -1376,6 +1521,17 @@ class EmpowerDashboardClient:
                 "category_name": "Groceries",
             },
         ]
+        # Keep every record inside the requested [start_date, end_date] range
+        # (ISO dates compare lexically), so a historical request cannot yield
+        # post-snapshot or pre-window mock records.
+        for t in mock_txs:
+            tx_date = t["transaction_date"]
+            if end_date and tx_date > end_date:
+                tx_date = end_date
+            if start_date and tx_date < start_date:
+                tx_date = start_date
+            t["transaction_date"] = tx_date
+
         dates = [t.get("transaction_date") for t in mock_txs if t.get("transaction_date")]
         start = start_date or (min(dates) if dates else f"{datetime.now(timezone.utc).year}-01-01")
 
@@ -1403,6 +1559,7 @@ class EmpowerDashboardClient:
         end_date: Optional[str] = None,
         user_account_ids: Optional[Union[str, List[Union[str, int]], Tuple[Union[str, int], ...], Set[Union[str, int]]]] = None,
     ) -> DashboardHistories:
+        """Generate synthetic net-worth history for offline sandbox mode."""
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         start = start_date or "2024-01-01"
         end = end_date or today_str
@@ -1411,6 +1568,7 @@ class EmpowerDashboardClient:
         # range so offline callers observe the same [start, end] range semantics
         # as live retrieval (rather than fixed calendar dates in the start year).
         def _midpoint(s: str, e: str) -> str:
+            """Compute midpoint date between two date strings."""
             try:
                 ds = datetime.strptime(s, "%Y-%m-%d").date()
                 de = datetime.strptime(e, "%Y-%m-%d").date()
