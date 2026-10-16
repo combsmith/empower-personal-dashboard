@@ -12,7 +12,7 @@
 #     is pure-bash (no claude-code-action), so this stub dispatches the central
 #     workflow_dispatch DIRECTLY with `gh workflow run`. No LLM runs here.
 #   • You MUST NOT change: the dispatch target
-#     (-R combsmith/.github-private -f target_repo=${{ github.repository }}),
+#     (-R combsmith/.github-private -f target_repo=<this repo>),
 #     the `initiative:auto` label filter, or the PAT guard.
 #   • If you need different release behaviour, open a PR against the central
 #     driver in combsmith/.github-private — never by editing callers.
