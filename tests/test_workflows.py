@@ -10,6 +10,7 @@ PR_AUTO_REVIEW_WORKFLOW = ROOT / ".github" / "workflows" / "pr-auto-review.yml"
 class TestPrAutoReviewWorkflow(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        """Load and parse the pr-auto-review workflow once for all tests."""
         cls.text = PR_AUTO_REVIEW_WORKFLOW.read_text(encoding="utf-8")
         cls.workflow = yaml.safe_load(cls.text)
         cls.job = cls.workflow["jobs"]["pr-auto-review"]
