@@ -21,16 +21,19 @@ class TestPrAutoReviewWorkflow(unittest.TestCase):
     )
 
     def test_guard_skips_fork_pull_requests(self):
+        """Verify the job guard expression matches the expected format."""
         guard = " ".join(self.job["if"].split())
         self.assertEqual(guard, self.EXPECTED_GUARD)
 
     def test_guard_skips_dependabot_pull_requests(self):
+        """Verify the job guard excludes Dependabot pull requests due to missing Actions secrets (#108)."""
         # Dependabot-triggered pull_request runs receive no Actions secrets, so the
         # reusable's checkout fails on an empty GH_PAT_WORKFLOWS token (#108).
         guard = " ".join(self.job["if"].split())
         self.assertEqual(guard, self.EXPECTED_GUARD)
 
     def test_caller_stub_invariants(self):
+        """Verify the caller stub configuration, reusable reference, permissions, and triggers."""
         self.assertEqual(
             self.job["uses"],
             "combsmith/.github/.github/workflows/pr-auto-review-reusable.yml@pr-auto-review/v1-stable",
