@@ -14,16 +14,21 @@ class TestPrAutoReviewWorkflow(unittest.TestCase):
         cls.workflow = yaml.safe_load(cls.text)
         cls.job = cls.workflow["jobs"]["pr-auto-review"]
 
+    EXPECTED_GUARD = (
+        "github.event_name != 'pull_request' || "
+        "(github.event.pull_request.head.repo.fork == false && "
+        "github.actor != 'dependabot[bot]')"
+    )
+
     def test_guard_skips_fork_pull_requests(self):
         guard = " ".join(self.job["if"].split())
-        self.assertIn("github.event_name != 'pull_request'", guard)
-        self.assertIn("github.event.pull_request.head.repo.fork == false", guard)
+        self.assertEqual(guard, self.EXPECTED_GUARD)
 
     def test_guard_skips_dependabot_pull_requests(self):
         # Dependabot-triggered pull_request runs receive no Actions secrets, so the
         # reusable's checkout fails on an empty GH_PAT_WORKFLOWS token (#108).
         guard = " ".join(self.job["if"].split())
-        self.assertIn("github.actor != 'dependabot[bot]'", guard)
+        self.assertEqual(guard, self.EXPECTED_GUARD)
 
     def test_caller_stub_invariants(self):
         self.assertEqual(
