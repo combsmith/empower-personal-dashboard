@@ -18,10 +18,12 @@
 # dependencies) to be listed here. Generated with pip-compile (pip-tools).
 #
 # INTERPRETER SCOPE: this lock is resolved for the single CPython the reusable
-# audit workflow installs pip-audit on (a recent interpreter — currently 3.12),
-# NOT a cross-version universal lock. It therefore omits interpreter-conditional
-# transitive deps (e.g. typing_extensions on python_version<"3.11",
-# importlib-metadata on <"3.10"). Installing it under `--require-hashes` on an
+# audit workflow installs pip-audit on (setup-python "3.x" — the latest stable
+# CPython, currently 3.15), NOT a cross-version universal lock. The audit step
+# installs with `--only-binary :all:`, so every compiled dep (e.g. msgpack) must
+# be pinned to a release that ships wheels for that interpreter. It therefore
+# omits interpreter-conditional transitive deps (e.g. typing_extensions on
+# python_version<"3.11", importlib-metadata on <"3.10"). Installing it under `--require-hashes` on an
 # older interpreter (3.9/3.10) would fail on those missing pins — if the audit
 # ever moves to a 3.9/3.10 runner, regenerate with `pip-compile --universal`
 # (emits marker-gated entries) so every conditionally-required dep is hashed.
