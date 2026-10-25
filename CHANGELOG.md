@@ -7,12 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-24
+
+### Added
+- Configurable `core_sweep_tickers` list in `beancount_map.yaml` (`BeancountMapper`) and `[beancount]` optional dependency extra in `pyproject.toml` ([#113](https://github.com/combsmith/empower-personal-dashboard/issues/113), [#114](https://github.com/combsmith/empower-personal-dashboard/pull/114)).
+
 ### Fixed
-- Preserve and scale reported cost basis for short snapshot lots in Beancount export ([#70](https://github.com/combsmith/empower-personal-dashboard/issues/70)):
+- Classify core money market sweep transactions (`Purchase Into Core Account`, `Redemption From Core Account`, `Shares Out` / `Shares In` at `$1.00 ± $0.01` NAV on NASDAQ `^[A-Z]{3}XX$` money market mutual funds and bank deposit sweep vehicles) as investment buys/sells so subsequent `--append` Beancount exports do not fail balance assertions ([#113](https://github.com/combsmith/empower-personal-dashboard/issues/113), [#114](https://github.com/combsmith/empower-personal-dashboard/pull/114)).
+- Preserve and scale reported cost basis for short snapshot lots in Beancount export ([#70](https://github.com/combsmith/empower-personal-dashboard/issues/70), [#86](https://github.com/combsmith/empower-personal-dashboard/pull/86)):
   - Updated `_append_snapshot_lot` to scale reported cost basis for negative (short) snapshot positions by `abs(qty) / abs(snapshot_qty)` and emit `{{... USD}}` costed lot syntax rather than falling back to snapshot price annotation.
   - Handled negative cost basis representations from upstream API payloads safely with absolute value normalization.
   - Preserved negative/short quantities in `_aggregate_snapshot_holdings` and `_emit_commodity_unit_assertions`.
-- Made `export_modular_ledger` atomic and fault-tolerant ([#70](https://github.com/combsmith/empower-personal-dashboard/issues/70)):
+- Made `export_modular_ledger` atomic and fault-tolerant ([#70](https://github.com/combsmith/empower-personal-dashboard/issues/70), [#86](https://github.com/combsmith/empower-personal-dashboard/pull/86)):
   - Staged all modular ledger file updates in an isolated temporary staging directory before writing to the destination directory. Any generation failure or rejected append leaves existing ledger files untouched.
 
 ## [0.6.0] - 2026-10-12
@@ -130,7 +136,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Authoritative OpenAPI 3.1 specification (`docs/openapi.yaml`) with Redocly CI linting and hermetic contract tests.
 - PyPI onboarding probe, build verification, and Trusted Publishing OIDC workflow.
 
-[Unreleased]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.3.0...v0.4.0
