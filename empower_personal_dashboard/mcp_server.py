@@ -195,29 +195,35 @@ def create_mcp_server(
                 logger.warning(f"Failed to refresh session from {session_file}: {e}")
 
     def _fetch_balances_cached() -> DashboardBalances:
+        """Return cached balances or fetch fresh balances from the client."""
         _ensure_session_fresh()
         cached = cache.get_balances()
         if cached:
             return cached
         try:
             fresh = empower_client.fetch_balances()
-        except (SessionExpiredError, RequireTwoFactorException):
+        except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError) as exc:
             _ensure_session_fresh()
             cache.balances = None
+            if isinstance(exc, FileNotFoundError):
+                raise SessionExpiredError(str(exc)) from exc
             raise
         cache.set_balances(fresh)
         return fresh
 
     def _fetch_holdings_cached() -> DashboardHoldings:
+        """Return cached holdings or fetch fresh holdings from the client."""
         _ensure_session_fresh()
         cached = cache.get_holdings()
         if cached:
             return cached
         try:
             fresh = empower_client.fetch_holdings()
-        except (SessionExpiredError, RequireTwoFactorException):
+        except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError) as exc:
             _ensure_session_fresh()
             cache.holdings = None
+            if isinstance(exc, FileNotFoundError):
+                raise SessionExpiredError(str(exc)) from exc
             raise
         cache.set_holdings(fresh)
         return fresh
@@ -227,6 +233,7 @@ def create_mcp_server(
         end_date: Optional[str],
         limit: Optional[int] = None,
     ) -> DashboardTransactions:
+        """Return cached transactions for the query window or fetch fresh transactions."""
         _ensure_session_fresh()
         key = f"{start_date}_{end_date}_{limit}"
         cached = cache.get_transactions(key)
@@ -234,8 +241,10 @@ def create_mcp_server(
             return cached
         try:
             fresh = empower_client.fetch_transactions(start_date=start_date, end_date=end_date, limit=limit)
-        except (SessionExpiredError, RequireTwoFactorException):
+        except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError) as exc:
             _ensure_session_fresh()
+            if isinstance(exc, FileNotFoundError):
+                raise SessionExpiredError(str(exc)) from exc
             raise
         cache.set_transactions(key, fresh)
         return fresh
@@ -993,7 +1002,7 @@ def create_mcp_server(
             if beancount_warnings:
                 resp["warnings"] = beancount_warnings
             return resp
-        except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError):
+        except (SessionExpiredError, RequireTwoFactorException):
             return {
                 "status": "error",
                 "error_code": "AUTH_REQUIRED",

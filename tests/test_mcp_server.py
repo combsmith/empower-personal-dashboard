@@ -7,6 +7,7 @@ import functools
 import json
 import os
 import tempfile
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,17 +23,83 @@ from empower_personal_dashboard.mcp_server import (
 )
 
 
+class _FakeFastMCP:
+    """Lightweight test double for FastMCP used when the optional 'mcp' package is not installed."""
+
+    def __init__(self, name: str, instructions: str = "") -> None:
+        """Initialize the fake MCP server registry."""
+        self.name = name
+        self.instructions = instructions
+        self._tools: dict = {}
+        self._resources: dict = {}
+        self._prompts: dict = {}
+
+    def tool(self):
+        """Register a tool callable."""
+        def decorator(fn):
+            self._tools[fn.__name__] = fn
+            return fn
+
+        return decorator
+
+    def resource(self, uri: str):
+        """Register a resource callable by URI."""
+        def decorator(fn):
+            self._resources[uri] = fn
+            return fn
+
+        return decorator
+
+    def prompt(self):
+        """Register a prompt callable."""
+        def decorator(fn):
+            self._prompts[fn.__name__] = fn
+            return fn
+
+        return decorator
+
+    async def list_tools(self):
+        """List registered tool descriptors."""
+        return [types.SimpleNamespace(name=n) for n in self._tools]
+
+    async def list_resources(self):
+        """List registered resource descriptors."""
+        return [types.SimpleNamespace(uri=u) for u in self._resources]
+
+    async def list_prompts(self):
+        """List registered prompt descriptors."""
+        return [types.SimpleNamespace(name=n) for n in self._prompts]
+
+    async def call_tool(self, name: str, arguments: dict):
+        """Invoke a registered tool and wrap its JSON payload."""
+        res = self._tools[name](**arguments)
+        return types.SimpleNamespace(
+            is_error=False,
+            content=[types.SimpleNamespace(text=json.dumps(res))],
+        )
+
+    async def read_resource(self, uri: str):
+        """Read a registered resource by URI."""
+        return [self._resources[uri]()]
+
+    async def get_prompt(self, name: str, arguments: dict):
+        """Render a registered prompt by name."""
+        res = self._prompts[name](**arguments)
+        return types.SimpleNamespace(
+            messages=[types.SimpleNamespace(content=types.SimpleNamespace(text=res))]
+        )
+
 
 def requires_fastmcp(test):
-    """Run the test body when the mcp extra is installed; otherwise assert the
-    documented unavailable-dependency behavior so the test never skips."""
+    """Run the test body using real FastMCP when installed, or _FakeFastMCP otherwise."""
 
     @functools.wraps(test)
     def wrapper(self, *args, **kwargs):
         if FastMCP is None:
-            with self.assertRaises(ImportError):
-                create_mcp_server()
-            return None
+            with patch("empower_personal_dashboard.mcp_server.FastMCP", _FakeFastMCP):
+                self.client = EmpowerDashboardClient(mock_mode=True)
+                self.server = create_mcp_server(client=self.client)
+                return test(self, *args, **kwargs)
         return test(self, *args, **kwargs)
 
     return wrapper
@@ -610,6 +677,50 @@ class TestMCPServer(unittest.TestCase):
                     self.assertEqual(payload["status"], "success")
                     self.assertIn("warnings", payload)
                     self.assertTrue(any("Balances unavailable" in w for w in payload["warnings"]))
+
+        asyncio.run(run_check())
+
+    @requires_fastmcp
+    def test_export_data_local_file_not_found_returns_export_error_not_auth_required(self) -> None:
+        """Local FileNotFoundError in export_data returns EXPORT_ERROR while missing session maps to AUTH_REQUIRED."""
+        async def run_check() -> None:
+            with (
+                tempfile.TemporaryDirectory() as tmpdir,
+                patch.dict(os.environ, {"EMPOWER_EXPORT_ROOT": tmpdir}),
+            ):
+                # Local file write FileNotFoundError should report EXPORT_ERROR, not AUTH_REQUIRED
+                with patch(
+                    "empower_personal_dashboard.mcp_server.export_balances_csv",
+                    side_effect=FileNotFoundError("No such file or directory: empower_balances.csv"),
+                ):
+                    res = await self.server.call_tool(
+                        "export_data",
+                        {"destination_dir": tmpdir, "scope": "balances", "export_csv": True},
+                    )
+                    payload = json.loads(res.content[0].text)
+                    self.assertEqual(payload["status"], "error")
+                    self.assertEqual(payload["error_code"], "EXPORT_ERROR")
+
+                # Missing session FileNotFoundError during API fetch still maps to AUTH_REQUIRED
+                missing_sess_client = EmpowerDashboardClient(mock_mode=True)
+                missing_sess_client.fetch_balances = MagicMock(
+                    side_effect=FileNotFoundError("Session file missing")
+                )
+                missing_sess_client.fetch_holdings = MagicMock(
+                    side_effect=FileNotFoundError("Session file missing")
+                )
+                missing_sess_client.fetch_transactions = MagicMock(
+                    side_effect=FileNotFoundError("Session file missing")
+                )
+                missing_sess_server = create_mcp_server(client=missing_sess_client)
+                for scope in ("balances", "holdings", "transactions"):
+                    res_auth = await missing_sess_server.call_tool(
+                        "export_data",
+                        {"destination_dir": tmpdir, "scope": scope, "export_csv": False},
+                    )
+                    payload_auth = json.loads(res_auth.content[0].text)
+                    self.assertEqual(payload_auth["status"], "error")
+                    self.assertEqual(payload_auth["error_code"], "AUTH_REQUIRED")
 
         asyncio.run(run_check())
 
