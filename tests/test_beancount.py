@@ -3009,7 +3009,27 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
         self.assertIn("2000-01-01 open Assets:Institution:GiraffeChecking USD\n", acct_out)
 
     def test_brokerage_account_cash_in_and_transfer_resolve_consistently(self):
-        """Cash In and Transfer rows on 'Taxable Brokerage' both resolve to Assets:Brokerage:TaxableBrokerage."""
+        """Cash In, Transfer, and balance declarations with empty firm_name on 'Taxable Brokerage' resolve consistently."""
+        balances = DashboardBalances(
+            as_of_date="2026-10-03",
+            net_worth=800.0,
+            total_cash=0.0,
+            total_investment=800.0,
+            total_card_liabilities=0.0,
+            total_loan=0.0,
+            total_mortgage=0.0,
+            accounts=[
+                {
+                    "account_id": "brok-1",
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "",
+                    "account_type": "",
+                    "balance": 800.0,
+                    "is_asset": True,
+                    "currency": "USD",
+                },
+            ],
+        )
         txs = DashboardTransactions(
             start_date="2026-10-01",
             end_date="2026-10-02",
@@ -3038,9 +3058,15 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
                 },
             ],
         )
-        tx_out = self.generator.generate_transactions_bean(txs)
+        acct_out = self.generator.generate_accounts_bean(balances=balances, transactions=txs)
+        tx_out = self.generator.generate_transactions_bean(txs, balances=balances)
+        bal_out = self.generator.generate_balances_bean(balances, transactions=txs)
+        self.assertIn("Assets:Brokerage:TaxableBrokerage", acct_out)
+        self.assertNotIn("Assets:Institution:TaxableBrokerage", acct_out)
         self.assertEqual(tx_out.count("Assets:Brokerage:TaxableBrokerage"), 2)
         self.assertNotIn("Assets:Institution:TaxableBrokerage", tx_out)
+        self.assertIn("2026-10-03 balance Assets:Brokerage:TaxableBrokerage 800.00 USD", bal_out)
+        self.assertNotIn("Assets:Institution:TaxableBrokerage", bal_out)
 
     def test_core_sweep_boundary_prices_and_exact_bank_sweep_tickers(self):
         """Prices 0.99 and 1.01 pass the $1.00 +/- $0.01 check; substring tickers like MYCASH are rejected."""

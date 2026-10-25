@@ -609,11 +609,15 @@ def _is_investment_account_type(acct_type: Any) -> bool:
 
 def _balance_account_fields(acct: Dict[str, Any]) -> Tuple[str, str, str, str, str, float]:
     """Extract (firm, name, account_id, account_type, currency, balance) from a balances account."""
+    is_inv = _has_investment_account_signal(acct)
+    default_firm = _FIRM_BROKERAGE if is_inv else _FIRM_INSTITUTION
+    default_name = _FIRM_BROKERAGE if is_inv else _ACCOUNT_DEFAULT_NAME
+    default_type = _ACCOUNT_TYPE_INVESTMENT if is_inv else _ACCOUNT_TYPE_BANK
     return (
-        acct.get("firm_name") or _FIRM_INSTITUTION,
-        acct.get("account_name") or _ACCOUNT_DEFAULT_NAME,
+        acct.get("firm_name") or default_firm,
+        acct.get("account_name") or default_name,
         str(acct.get("account_id") or ""),
-        acct.get("account_type") or _ACCOUNT_TYPE_BANK,
+        acct.get("account_type") or default_type,
         acct.get("currency") or "USD",
         float(acct.get("balance", 0.0)),
     )
@@ -815,18 +819,10 @@ def _calculate_account_transaction_totals(
         t_name = tx.get("account_name") or ""
 
         acct_info = acct_lookup.get(aid) or acct_lookup.get(uaid) or acct_lookup.get(t_name)
-        if acct_info:
-            firm = acct_info.get("firm_name") or "Institution"
-            name = acct_info.get("account_name") or t_name or "Account"
-            acct_type = acct_info.get("account_type") or "bank"
-            resolved_id = str(acct_info.get("account_id") or aid)
-            is_asset = acct_info.get("is_asset", True)
-        else:
-            firm = tx.get("firm_name") or "Institution"
-            name = t_name or "Account"
-            acct_type = tx.get("account_type") or "bank"
-            resolved_id = aid
-            is_asset = True
+        is_asset = acct_info.get("is_asset", True) if acct_info else True
+        firm, name, acct_type, resolved_id = _resolve_account_from_tx(
+            tx, acct_lookup, custom_sweep_tickers=mapper.core_sweep_tickers
+        )
 
         primary_account = mapper.resolve_account(firm, name, resolved_id, acct_type)
         amount = _safe_positive_float(tx.get("amount"))
