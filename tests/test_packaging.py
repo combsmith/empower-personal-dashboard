@@ -281,6 +281,8 @@ class TestPackaging(unittest.TestCase):
         self.assertIn("# Changelog", content)
         self.assertIn("## [Unreleased]", content)
         self.assertIn(f"## [{EXPECTED_VERSION}]", content)
+        self.assertIn("## [0.7.0]", content)
+        self.assertIn("## [0.6.0]", content)
         self.assertIn("## [0.5.0]", content)
         self.assertIn("## [0.4.0]", content)
         self.assertIn("## [0.3.0]", content)
