@@ -1065,7 +1065,7 @@ class EmpowerDashboardClient:
         transactions: DashboardTransactions,
         holdings: DashboardHoldings,
         policy: str = "warn",
-        limited: bool = False,
+        limited: Optional[bool] = None,
         **fetch_kwargs: Any,
     ) -> DashboardTransactions:
         """Guard the Beancount reconstruction window against a short transaction range.
@@ -1077,10 +1077,11 @@ class EmpowerDashboardClient:
         opening lots are wrong.
 
         ``limited`` records whether ``transactions`` came from a capped fetch
-        (``fetch_transactions(limit=...)``). A limited fetch drops older trades
-        while keeping the full response date bounds, so matching bounds are *not*
-        proof of coverage: the window is treated as incomplete regardless of its
-        end date, and the ``policy`` below is applied.
+        (``fetch_transactions(limit=...)``). When ``limited`` is ``None``
+        (default), it is derived from ``not transactions.is_complete``. A limited
+        fetch drops older trades while keeping the full response date bounds, so
+        matching bounds are *not* proof of coverage: the window is treated as
+        incomplete regardless of its end date, and the ``policy`` below is applied.
 
         Contract (``policy``):
           - ``"warn"`` (default): log a warning and return ``transactions`` unchanged.
@@ -1108,15 +1109,21 @@ class EmpowerDashboardClient:
                 f"policy must be 'warn', 'error', or 'extend', not {policy!r}"
             )
 
+        is_limited = (
+            not getattr(transactions, "is_complete", True)
+            if limited is None
+            else bool(limited)
+        )
+
         # A limited fetch keeps the full date bounds while dropping older trades,
         # so matching bounds cannot prove coverage; only an unbounded fetch whose
         # window reaches the snapshot date is treated as complete.
-        if not limited and self._window_covers_snapshot(
+        if not is_limited and self._window_covers_snapshot(
             transactions.end_date, holdings.as_of_date
         ):
             return transactions
 
-        if limited:
+        if is_limited:
             detail = (
                 f"transaction window was fetched with a limit, so its date bounds "
                 f"({transactions.start_date!r}..{transactions.end_date!r}) cannot "
@@ -1536,7 +1543,9 @@ class EmpowerDashboardClient:
         dates = [t.get("transaction_date") for t in mock_txs if t.get("transaction_date")]
         start = start_date or (min(dates) if dates else f"{datetime.now(timezone.utc).year}-01-01")
 
+        is_complete = True
         if limit and limit > 0:
+            is_complete = len(mock_txs) <= limit
             mock_txs = mock_txs[:limit]
 
         money_in = sum(t["amount"] for t in mock_txs if t["is_cash_in"])
@@ -1552,6 +1561,7 @@ class EmpowerDashboardClient:
             net_cashflow=net,
             transactions=mock_txs,
             mode="sandbox_mock",
+            is_complete=is_complete,
         )
 
     def _generate_mock_histories(

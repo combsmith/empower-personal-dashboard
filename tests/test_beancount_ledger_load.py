@@ -186,6 +186,180 @@ class TestShortPositions(_BaseGeneratorTest):
             )
             assert_ledger_loads(self, target.read_text(encoding="utf-8"))
 
+    def test_short_with_in_window_sell_and_buy_reconciles_and_loads(self):
+        """A currently-held short with in-window sell and buy activity reconciles and loads."""
+        holdings = DashboardHoldings(
+            as_of_date="2024-10-01", total_value=-60.0,
+            holdings=[
+                {"user_account_id": 5001, "account_name": "Taxable Brokerage",
+                 "firm_name": "Acme Brokerage", "ticker": "GE",
+                 "quantity": -5.0, "price": 12.0},
+            ],
+        )
+        txns = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-01", total_transactions=2,
+            money_in=100.0, money_out=120.0, net_cashflow=-20.0,
+            transactions=[
+                {"user_transaction_id": "tx-s1", "account_id": "ACC-BRK-001",
+                 "user_account_id": 5001, "account_name": "Taxable Brokerage",
+                 "firm_name": "Acme Brokerage", "transaction_date": "2024-03-01",
+                 "description": "Sell GE", "amount": 100.0, "is_cash_in": True,
+                 "is_credit": True, "transaction_type": "Sell", "symbol": "GE",
+                 "price": 10.0, "quantity": 10.0},
+                {"user_transaction_id": "tx-b1", "account_id": "ACC-BRK-001",
+                 "user_account_id": 5001, "account_name": "Taxable Brokerage",
+                 "firm_name": "Acme Brokerage", "transaction_date": "2024-08-01",
+                 "description": "Buy GE", "amount": 120.0, "is_cash_out": True,
+                 "transaction_type": "Buy", "symbol": "GE",
+                 "price": 12.0, "quantity": 10.0},
+            ],
+        )
+        balances = _brokerage_balances(balance=-60.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "short_churn.bean"
+            self.generator.export_single_file(
+                filepath=target, balances=balances, holdings=holdings,
+                transactions=txns,
+            )
+            content = target.read_text(encoding="utf-8")
+        self.assertRegex(
+            content, r"balance\s+Assets:AcmeBrokerage:TaxableBrokerage\s+-5\.000000 GE"
+        )
+        assert_ledger_loads(self, content)
+
+    def test_short_with_in_window_buy_partial_cover_reconciles_and_loads(self):
+        """A short position partially covered by an in-window buy reconciles and loads."""
+        holdings = DashboardHoldings(
+            as_of_date="2024-10-01", total_value=-120.0,
+            holdings=[
+                {"user_account_id": 5001, "account_name": "Taxable Brokerage",
+                 "firm_name": "Acme Brokerage", "ticker": "GE",
+                 "quantity": -10.0, "price": 12.0},
+            ],
+        )
+        txns = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-01", total_transactions=1,
+            money_in=0.0, money_out=60.0, net_cashflow=-60.0,
+            transactions=[
+                {"user_transaction_id": "tx-b1", "account_id": "ACC-BRK-001",
+                 "user_account_id": 5001, "account_name": "Taxable Brokerage",
+                 "firm_name": "Acme Brokerage", "transaction_date": "2024-08-01",
+                 "description": "Buy GE", "amount": 60.0, "is_cash_out": True,
+                 "transaction_type": "Buy", "symbol": "GE",
+                 "price": 12.0, "quantity": 5.0},
+            ],
+        )
+        balances = _brokerage_balances(balance=-120.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "short_cover.bean"
+            self.generator.export_single_file(
+                filepath=target, balances=balances, holdings=holdings,
+                transactions=txns,
+            )
+            content = target.read_text(encoding="utf-8")
+        self.assertRegex(
+            content, r"balance\s+Assets:AcmeBrokerage:TaxableBrokerage\s+-10\.000000 GE"
+        )
+        assert_ledger_loads(self, content)
+
+    def test_short_with_in_window_sell_reconciles_and_loads(self):
+        """A short position deepened by an in-window sell reconciles and loads."""
+        holdings = DashboardHoldings(
+            as_of_date="2024-10-01", total_value=-180.0,
+            holdings=[
+                {"user_account_id": 5001, "account_name": "Taxable Brokerage",
+                 "firm_name": "Acme Brokerage", "ticker": "GE",
+                 "quantity": -15.0, "price": 12.0},
+            ],
+        )
+        txns = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-01", total_transactions=1,
+            money_in=100.0, money_out=0.0, net_cashflow=100.0,
+            transactions=[
+                {"user_transaction_id": "tx-s1", "account_id": "ACC-BRK-001",
+                 "user_account_id": 5001, "account_name": "Taxable Brokerage",
+                 "firm_name": "Acme Brokerage", "transaction_date": "2024-03-01",
+                 "description": "Sell GE", "amount": 100.0, "is_cash_in": True,
+                 "is_credit": True, "transaction_type": "Sell", "symbol": "GE",
+                 "price": 10.0, "quantity": 10.0},
+            ],
+        )
+        balances = _brokerage_balances(balance=-180.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "short_sell.bean"
+            self.generator.export_single_file(
+                filepath=target, balances=balances, holdings=holdings,
+                transactions=txns,
+            )
+            content = target.read_text(encoding="utf-8")
+        self.assertRegex(
+            content, r"balance\s+Assets:AcmeBrokerage:TaxableBrokerage\s+-15\.000000 GE"
+        )
+        assert_ledger_loads(self, content)
+
+    def test_sign_flipped_positions_both_directions_reconcile_and_load(self):
+        """Positions that flip sign across the window (short->long and long->short) reconcile and load."""
+        # Case 1: short-to-long flip across the window (snapshot=+5 FLIP, window Buy 10 FLIP).
+        holdings_long = DashboardHoldings(
+            as_of_date="2024-10-01", total_value=60.0,
+            holdings=[
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "ticker": "FLIP", "quantity": 5.0, "price": 12.0},
+            ],
+        )
+        txns_buy = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-01", total_transactions=1,
+            money_in=0.0, money_out=120.0, net_cashflow=-120.0,
+            transactions=[
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "account_type": "investment", "transaction_date": "2024-08-01",
+                 "description": "Buy FLIP", "amount": 120.0, "is_cash_out": True,
+                 "transaction_type": "Buy", "symbol": "FLIP",
+                 "price": 12.0, "quantity": 10.0},
+            ],
+        )
+        # Case 2: long-to-short flip across the window (snapshot=-5 FLIP, window Sell 10 FLIP).
+        holdings_short = DashboardHoldings(
+            as_of_date="2024-10-01", total_value=-60.0,
+            holdings=[
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "ticker": "FLIP", "quantity": -5.0, "price": 12.0},
+            ],
+        )
+        txns_sell = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-01", total_transactions=1,
+            money_in=120.0, money_out=0.0, net_cashflow=120.0,
+            transactions=[
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "account_type": "investment", "transaction_date": "2024-08-01",
+                 "description": "Sell FLIP", "amount": 120.0, "is_cash_in": True,
+                 "is_credit": True, "transaction_type": "Sell", "symbol": "FLIP",
+                 "price": 12.0, "quantity": 10.0},
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            long_flip_file = Path(tmp) / "flip_long.bean"
+            self.generator.export_single_file(
+                filepath=long_flip_file, holdings=holdings_long, transactions=txns_buy,
+            )
+            long_content = long_flip_file.read_text(encoding="utf-8")
+            self.assertIn(
+                "2024-10-03 balance Assets:AcmeBrokerage:TaxableBrokerage 5.000000 FLIP",
+                long_content,
+            )
+            assert_ledger_loads(self, long_content)
+
+            short_flip_file = Path(tmp) / "flip_short.bean"
+            self.generator.export_single_file(
+                filepath=short_flip_file, holdings=holdings_short, transactions=txns_sell,
+            )
+            short_content = short_flip_file.read_text(encoding="utf-8")
+            self.assertIn(
+                "2024-10-03 balance Assets:AcmeBrokerage:TaxableBrokerage -5.000000 FLIP",
+                short_content,
+            )
+            assert_ledger_loads(self, short_content)
+
 
 class TestDeficitFloorShortfall(_BaseGeneratorTest):
     """Item 4 — a deficit-floored opening lot must still match the asserted snapshot."""
@@ -357,6 +531,135 @@ class TestDeficitFloorShortfall(_BaseGeneratorTest):
             content_b = ledger_b.read_text(encoding="utf-8")
             self.assertEqual(content_b.count("Snapshot Shortfall Reconciliation"), 2)
             assert_ledger_loads(self, content_b)
+
+    def test_later_snapshot_without_new_reconciliation_asserts_at_d_plus_1_and_allows_next_day_trade(self):
+        """When a later append emits no new reconciliation, its assertion stays at D+1 so a D+1 trade on a third append loads."""
+        def holdings(as_of, qty):
+            return DashboardHoldings(
+                as_of_date=as_of, total_value=qty * 12.0,
+                holdings=[
+                    {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                     "ticker": "GE", "quantity": qty, "price": 12.0},
+                ],
+            )
+
+        base_txs = [
+            {"user_transaction_id": "tx-ge-1", "account_name": "Taxable Brokerage",
+             "firm_name": "Acme Brokerage", "account_type": "investment",
+             "transaction_date": "2024-03-01", "description": "Sell GE",
+             "amount": 100.0, "is_cash_in": True, "is_credit": True,
+             "transaction_type": "Sell", "symbol": "GE", "price": 10.0, "quantity": 10.0},
+            {"user_transaction_id": "tx-ge-2", "account_name": "Taxable Brokerage",
+             "firm_name": "Acme Brokerage", "account_type": "investment",
+             "transaction_date": "2024-08-01", "description": "Buy GE",
+             "amount": 120.0, "is_cash_out": True, "transaction_type": "Buy",
+             "symbol": "GE", "price": 12.0, "quantity": 10.0},
+        ]
+        txns_1 = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-01", total_transactions=2,
+            money_in=100.0, money_out=120.0, net_cashflow=-20.0, transactions=base_txs,
+        )
+        txns_2 = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-15", total_transactions=2,
+            money_in=100.0, money_out=120.0, net_cashflow=-20.0, transactions=base_txs,
+        )
+        txns_3 = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-20", total_transactions=3,
+            money_in=100.0, money_out=240.0, net_cashflow=-140.0,
+            transactions=base_txs + [
+                {"user_transaction_id": "tx-ge-3", "account_name": "Taxable Brokerage",
+                 "firm_name": "Acme Brokerage", "account_type": "investment",
+                 "transaction_date": "2024-10-16", "description": "Buy GE",
+                 "amount": 120.0, "is_cash_out": True, "transaction_type": "Buy",
+                 "symbol": "GE", "price": 12.0, "quantity": 10.0},
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "ledger.bean"
+            self.generator.export_single_file(
+                filepath=ledger, holdings=holdings("2024-10-01", 5.0), transactions=txns_1,
+            )
+            self.generator.export_single_file(
+                filepath=ledger, holdings=holdings("2024-10-15", 5.0), transactions=txns_2,
+            )
+            self.generator.export_single_file(
+                filepath=ledger, holdings=holdings("2024-10-20", 15.0), transactions=txns_3,
+            )
+            content = ledger.read_text(encoding="utf-8")
+        self.assertIn("2024-10-16 balance Assets:AcmeBrokerage:TaxableBrokerage 5.000000 GE", content)
+        self.assertNotIn("2024-10-17 balance", content)
+        assert_ledger_loads(self, content)
+
+    def test_pre_cutoff_deeper_deficit_on_append_raises_ledger_append_error(self):
+        """A later append introducing a deeper deficit before an existing assertion cutoff raises LedgerAppendError."""
+        def holdings(as_of):
+            return DashboardHoldings(
+                as_of_date=as_of, total_value=60.0,
+                holdings=[
+                    {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                     "ticker": "GE", "quantity": 5.0, "price": 12.0},
+                ],
+            )
+
+        base_txs = [
+            {"user_transaction_id": "tx-ge-1", "account_name": "Taxable Brokerage",
+             "firm_name": "Acme Brokerage", "account_type": "investment",
+             "transaction_date": "2024-03-01", "description": "Sell GE",
+             "amount": 100.0, "is_cash_in": True, "is_credit": True,
+             "transaction_type": "Sell", "symbol": "GE", "price": 10.0, "quantity": 10.0},
+            {"user_transaction_id": "tx-ge-2", "account_name": "Taxable Brokerage",
+             "firm_name": "Acme Brokerage", "account_type": "investment",
+             "transaction_date": "2024-08-01", "description": "Buy GE",
+             "amount": 120.0, "is_cash_out": True, "transaction_type": "Buy",
+             "symbol": "GE", "price": 12.0, "quantity": 10.0},
+        ]
+        txns_1 = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-01", total_transactions=2,
+            money_in=100.0, money_out=120.0, net_cashflow=-20.0, transactions=base_txs,
+        )
+        txns_2 = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-15", total_transactions=4,
+            money_in=250.0, money_out=270.0, net_cashflow=-20.0,
+            transactions=[
+                {"user_transaction_id": "tx-ge-0a", "account_name": "Taxable Brokerage",
+                 "firm_name": "Acme Brokerage", "account_type": "investment",
+                 "transaction_date": "2024-02-01", "description": "Sell GE",
+                 "amount": 150.0, "is_cash_in": True, "is_credit": True,
+                 "transaction_type": "Sell", "symbol": "GE", "price": 10.0, "quantity": 15.0},
+                {"user_transaction_id": "tx-ge-0b", "account_name": "Taxable Brokerage",
+                 "firm_name": "Acme Brokerage", "account_type": "investment",
+                 "transaction_date": "2024-02-15", "description": "Buy GE",
+                 "amount": 150.0, "is_cash_out": True, "transaction_type": "Buy",
+                 "symbol": "GE", "price": 10.0, "quantity": 15.0},
+            ] + base_txs,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "pre_cutoff.bean"
+            self.generator.export_single_file(
+                filepath=ledger, holdings=holdings("2024-10-01"), transactions=txns_1,
+                opening_date="2020-01-01",
+            )
+            before_single = ledger.read_text(encoding="utf-8")
+            with self.assertRaises(LedgerAppendError):
+                self.generator.export_single_file(
+                    filepath=ledger, holdings=holdings("2024-10-15"), transactions=txns_2,
+                    opening_date="2020-01-01",
+                )
+            self.assertEqual(ledger.read_text(encoding="utf-8"), before_single)
+            assert_ledger_loads(self, before_single)
+
+            mod_dir = Path(tmp) / "modular"
+            self.generator.export_modular_ledger(
+                destination_dir=mod_dir, holdings=holdings("2024-10-01"), transactions=txns_1,
+                opening_date="2020-01-01",
+            )
+            before_balances = (mod_dir / "balances.bean").read_text(encoding="utf-8")
+            with self.assertRaises(LedgerAppendError):
+                self.generator.export_modular_ledger(
+                    destination_dir=mod_dir, holdings=holdings("2024-10-15"), transactions=txns_2,
+                    opening_date="2020-01-01",
+                )
+            self.assertEqual((mod_dir / "balances.bean").read_text(encoding="utf-8"), before_balances)
 
 
 class TestBackwardAppend(_BaseGeneratorTest):

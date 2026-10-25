@@ -2152,29 +2152,44 @@ class TestBeancountInvestmentGrowthReconstruction(unittest.TestCase):
                 )
             content = ledger.read_text(encoding="utf-8")
         self.assertEqual(content.count("Snapshot Shortfall Reconciliation"), 1)
+        self.assertIn("2024-10-16 balance Assets:AcmeBrokerage:TaxableBrokerage 5.000000 GE", content)
+        self.assertNotIn("2024-10-17 balance", content)
 
-    def test_calculate_baseline_qty_scopes_out_sign_flips(self):
-        """Positions that flip sign across the window are scoped out of opening-lot reconstruction."""
+    def test_calculate_baseline_qty_floors_sign_flips_and_traded_shorts(self):
+        """Positions that flip sign or trade while short receive a non-negative running-deficit baseline."""
         key = ("Assets:AcmeBrokerage:TaxableBrokerage", "SHORTCO")
-        # Long-to-short flip across the window (snapshot=-5, net_buys=-10 -> naive baseline=+5)
-        self.assertIsNone(
+        # Long-to-short flip across the window (snapshot=-5, net_buys=-10, max_deficit=10 -> baseline=10)
+        self.assertEqual(
             self.generator._calculate_baseline_qty(
                 snapshot_qty=-5.0,
                 has_tx=True,
                 key=key,
                 net_buys={key: -10.0},
                 net_buy_meta={key: {"max_deficit": 10.0}},
-            )
+            ),
+            10.0,
         )
-        # Short-to-long flip across the window (snapshot=+5, net_buys=+10, max_deficit=0 -> naive baseline=-5)
-        self.assertIsNone(
+        # Short-to-long flip across the window (snapshot=+5, net_buys=+10, max_deficit=0 -> baseline=0.0)
+        self.assertEqual(
             self.generator._calculate_baseline_qty(
                 snapshot_qty=5.0,
                 has_tx=True,
                 key=key,
                 net_buys={key: 10.0},
                 net_buy_meta={key: {"max_deficit": 0.0}},
-            )
+            ),
+            0.0,
+        )
+        # Untraded short preserves its negative snapshot quantity
+        self.assertEqual(
+            self.generator._calculate_baseline_qty(
+                snapshot_qty=-5.0,
+                has_tx=False,
+                key=key,
+                net_buys={},
+                net_buy_meta={},
+            ),
+            -5.0,
         )
 
     def test_inferred_opening_date_never_precedes_account_opens(self):

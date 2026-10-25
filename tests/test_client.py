@@ -1494,6 +1494,37 @@ class TestReconstructionWindowGuard(unittest.TestCase):
                 transactions, holdings, policy="error", limited=True,
             )
 
+    def test_reconcile_transaction_window_derives_limited_from_is_complete(self):
+        """reconcile_transaction_window automatically treats transactions.is_complete=False as limited."""
+        from empower_personal_dashboard.exceptions import ReconstructionWindowError
+        holdings = DashboardHoldings(
+            as_of_date="2024-10-01", total_value=100.0,
+            holdings=[{"ticker": "VTI", "quantity": 1.0, "price": 100.0}],
+        )
+        transactions = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-01", total_transactions=1,
+            money_in=0.0, money_out=0.0, net_cashflow=0.0, transactions=[],
+            is_complete=False,
+        )
+        client = self._client()
+        with self.assertLogs("EmpowerDashboardClient", level="WARNING") as cm:
+            result = client.reconcile_transaction_window(transactions, holdings)
+        self.assertIs(result, transactions)
+        self.assertTrue(any("limit" in m.lower() for m in cm.output))
+        with self.assertRaises(ReconstructionWindowError):
+            client.reconcile_transaction_window(
+                transactions, holdings, policy="error",
+            )
+        # Also verify mock fetch_transactions(limit=1) marks is_complete=False and triggers the guard.
+        mock_limited = client.fetch_transactions(
+            start_date="2024-01-01", end_date="2024-10-01", limit=1,
+        )
+        self.assertFalse(mock_limited.is_complete)
+        with self.assertRaises(ReconstructionWindowError):
+            client.reconcile_transaction_window(
+                mock_limited, holdings, policy="error",
+            )
+
     def test_extend_rejects_window_starting_after_original(self):
         """Extend rejects refetch windows that start later than the original."""
         from empower_personal_dashboard.exceptions import ReconstructionWindowError
