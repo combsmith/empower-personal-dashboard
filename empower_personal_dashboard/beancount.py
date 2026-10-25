@@ -82,8 +82,25 @@ _INVESTMENT_SIGNAL_WORDS = (
     "invest", "broker", "ira", "401k", "roth", "rollover",
     "stock", "portfolio", "529",
 )
+# Whole-word tokens in free-form account_name that denote an investment/brokerage account.
+_INVESTMENT_NAME_TOKENS = frozenset({
+    "invest",
+    "investing",
+    "investment",
+    "investments",
+    "broker",
+    "brokerage",
+    "ira",
+    "401k",
+    "roth",
+    "rollover",
+    "stock",
+    "stocks",
+    "portfolio",
+    "529",
+})
 
-# Description phrases, NASDAQ symbology, and bank sweep tokens indicating core money market sweeps.
+# Description phrases, NASDAQ symbology, and bank sweep symbols indicating core money market sweeps.
 _CORE_BUY_PHRASES = (
     "purchase into core account",
     "purchase into core",
@@ -106,16 +123,17 @@ _CORE_SWEEP_EVIDENCE_PHRASES = (
 # (4th letter 'X' + 5th letter 'X') denote SEC Rule 2a-7 money market mutual funds
 # across all brokerages (e.g. SPAXX, FDLXX, FTEXX, VMFXX, VUSXX, SWVXX, TTTXX, MVRXX, JTSXX, GABXX).
 _MONEY_MARKET_MUTUAL_FUND_RE = re.compile(r"^[A-Z]{3}XX$")
-# Bank deposit sweep vehicle tokens used when a sweep is not a 5-letter mutual fund.
-_BANK_SWEEP_TICKER_TOKENS = (
+# Complete bank deposit sweep vehicle symbols used when a sweep is not a 5-letter mutual fund.
+_BANK_SWEEP_TICKERS = frozenset({
     "CASH",
+    "FCASH",
     "SWEEP",
     "MMDA",
     "FDIC",
     "QACDS",
     "QPRDS",
     "FICA",
-)
+})
 
 
 
@@ -245,6 +263,79 @@ def _format_price(price: float) -> str:
     return f"{price:.4f}"
 
 
+_QUOTED_YAML_KV_RE = re.compile(r'^(?:"([^"]+)"|\'([^\']+)\')\s*:(.*)$')
+
+
+def _parse_flow_list(raw_val: str) -> List[str]:
+    """Parse a YAML flow-style list like ``["A", "B"]`` into cleaned string items."""
+    inner = raw_val.strip()
+    if inner.startswith("[") and inner.endswith("]"):
+        inner = inner[1:-1]
+    return [
+        item
+        for part in inner.split(",")
+        if (item := part.strip().strip('"').strip("'"))
+    ]
+
+
+def _parse_yaml_kv_line(line: str) -> Optional[Tuple[str, str]]:
+    """Extract a ``(key, value)`` pair from a single simple YAML mapping line."""
+    m = _QUOTED_YAML_KV_RE.match(line)
+    if m:
+        raw_k = m.group(1) or m.group(2) or ""
+        raw_v = m.group(3)
+    elif ":" in line:
+        raw_k, raw_v = line.split(":", 1)
+    else:
+        return None
+    k = raw_k.strip().strip('"').strip("'")
+    v = raw_v.strip().strip('"').strip("'")
+    return (k, v) if (k and v) else None
+
+
+def _flush_regex_rule(result: Dict[str, Any], current_rule: Dict[str, str]) -> Dict[str, str]:
+    """Append ``current_rule`` to ``result["regex_rules"]`` when complete and return an empty rule dict."""
+    if "pattern" in current_rule and "account" in current_rule:
+        result["regex_rules"].append(current_rule)
+    return {}
+
+
+def _consume_regex_rule_line(
+    line: str, result: Dict[str, Any], current_rule: Dict[str, str]
+) -> Dict[str, str]:
+    """Process a single line inside the ``regex_rules`` section."""
+    if line.startswith("-"):
+        current_rule = _flush_regex_rule(result, current_rule)
+        line = line[1:].strip()
+    parts = line.split(":", 1)
+    if len(parts) == 2:
+        k = parts[0].strip().lower()
+        v = parts[1].strip().strip('"').strip("'")
+        if k in ("pattern", "account") and v:
+            current_rule[k] = v
+    return current_rule
+
+
+def _consume_section_line(
+    current_section: Optional[str],
+    line: str,
+    result: Dict[str, Any],
+    current_rule: Dict[str, str],
+) -> Dict[str, str]:
+    """Dispatch a non-header line inside ``_parse_simple_yaml`` to its active section handler."""
+    if current_section in ("accounts", "categories", "transaction_overrides"):
+        kv = _parse_yaml_kv_line(line)
+        if kv is not None:
+            result[current_section][kv[0]] = kv[1]
+    elif current_section in ("regex_rules", "regex_payee_rules"):
+        current_rule = _consume_regex_rule_line(line, result, current_rule)
+    elif current_section == "core_sweep_tickers" and line.startswith("-"):
+        item = line[1:].strip().strip('"').strip("'")
+        if item:
+            result["core_sweep_tickers"].append(item)
+    return current_rule
+
+
 def _parse_simple_yaml(content: str) -> Dict[str, Any]:
     """Lightweight fallback parser for basic YAML mapping files when PyYAML is not installed."""
     result: Dict[str, Any] = {
@@ -254,67 +345,24 @@ def _parse_simple_yaml(content: str) -> Dict[str, Any]:
         "transaction_overrides": {},
         "core_sweep_tickers": [],
     }
-    current_section = None
+    current_section: Optional[str] = None
     current_rule: Dict[str, str] = {}
 
     for raw_line in content.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
             continue
-
-        # Check section header
-        if line.endswith(":") and not line.startswith("-"):
-            if current_rule and "pattern" in current_rule and "account" in current_rule:
-                result["regex_rules"].append(current_rule)
-                current_rule = {}
+        if line.lower().startswith("core_sweep_tickers:") and not line.endswith(":"):
+            current_rule = _flush_regex_rule(result, current_rule)
+            result["core_sweep_tickers"].extend(_parse_flow_list(line.split(":", 1)[1]))
+            current_section = None
+        elif line.endswith(":") and not line.startswith("-"):
+            current_rule = _flush_regex_rule(result, current_rule)
             current_section = line[:-1].strip().lower()
-            continue
+        else:
+            current_rule = _consume_section_line(current_section, line, result, current_rule)
 
-        if current_section in ("accounts", "categories", "transaction_overrides"):
-            if line.startswith('"'):
-                m = re.match(r'^"([^"]+)"\s*:(.*)$', line)
-                if m:
-                    k, v = m.group(1).strip(), m.group(2).strip().strip('"').strip("'")
-                    if k and v:
-                        result[current_section][k] = v
-                    continue
-            elif line.startswith("'"):
-                m = re.match(r"^'([^']+)'\s*:(.*)$", line)
-                if m:
-                    k, v = m.group(1).strip(), m.group(2).strip().strip('"').strip("'")
-                    if k and v:
-                        result[current_section][k] = v
-                    continue
-
-            parts = line.split(":", 1)
-            if len(parts) == 2:
-                k = parts[0].strip().strip('"').strip("'")
-                v = parts[1].strip().strip('"').strip("'")
-                if k and v:
-                    result[current_section][k] = v
-
-        elif current_section in ("regex_rules", "regex_payee_rules"):
-            if line.startswith("-"):
-                if current_rule and "pattern" in current_rule and "account" in current_rule:
-                    result["regex_rules"].append(current_rule)
-                current_rule = {}
-                line = line[1:].strip()
-
-            parts = line.split(":", 1)
-            if len(parts) == 2:
-                k = parts[0].strip().lower()
-                v = parts[1].strip().strip('"').strip("'")
-                if k in ("pattern", "account") and v:
-                    current_rule[k] = v
-
-        elif current_section == "core_sweep_tickers" and line.startswith("-"):
-            item = line[1:].strip().strip('"').strip("'")
-            if item:
-                result["core_sweep_tickers"].append(item)
-
-    if current_rule and "pattern" in current_rule and "account" in current_rule:
-        result["regex_rules"].append(current_rule)
-
+    _flush_regex_rule(result, current_rule)
     return result
 
 
@@ -342,9 +390,20 @@ def _safe_positive_float(val: Any) -> float:
         return 0.0
     try:
         parsed = abs(float(val))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return 0.0
     return parsed if math.isfinite(parsed) else 0.0
+
+
+def _is_negative_number(val: Any) -> bool:
+    """Return True when ``val`` is a finite negative numeric value."""
+    if val is None or isinstance(val, bool):
+        return False
+    try:
+        parsed = float(val)
+    except (ValueError, TypeError, OverflowError):
+        return False
+    return math.isfinite(parsed) and parsed < 0
 
 
 def _clean_tx_description(tx: Dict[str, Any]) -> str:
@@ -365,13 +424,13 @@ def _has_core_sweep_evidence(
     custom_sweep_tickers: Optional[Set[str]] = None,
 ) -> bool:
     """True when a transaction carries core money market sweep evidence ($1.00 NAV + fund/sweep signal)."""
-    if abs(price - 1.0) > 0.01:
+    if round(abs(price - 1.0), 9) > 0.01:
         return False
     ticker_upper = ticker.upper()
     return (
         any(p in desc_clean for p in _CORE_SWEEP_EVIDENCE_PHRASES)
         or bool(_MONEY_MARKET_MUTUAL_FUND_RE.fullmatch(ticker_upper))
-        or any(tok in ticker_upper for tok in _BANK_SWEEP_TICKER_TOKENS)
+        or ticker_upper in _BANK_SWEEP_TICKERS
         or bool(custom_sweep_tickers and ticker_upper in custom_sweep_tickers)
     )
 
@@ -392,7 +451,7 @@ def _classify_buy_sell(
     is_explicit_sell = tx_type_clean in ("sell", "disposal") or inv_type_clean in ("sell", "disposal")
     if is_explicit_buy or is_explicit_sell:
         return is_explicit_buy, is_explicit_sell and not is_explicit_buy
-    if price <= 0:
+    if "dividend" in tx_type_clean or "dividend" in inv_type_clean or price <= 0:
         return False, False
     raw_buy_phrase = any(p in desc_clean for p in _CORE_BUY_PHRASES)
     raw_sell_phrase = any(p in desc_clean for p in _CORE_SELL_PHRASES)
@@ -443,6 +502,16 @@ def _is_commodity_trade_tx(
     )
 
 
+def _has_investment_account_signal(transaction: Dict[str, Any]) -> bool:
+    """True when a transaction's account_type or tokenized account_name denotes an investment account."""
+    acct_type = clean_api_text(transaction.get("account_type") or "").strip().lower()
+    if any(w in acct_type for w in _INVESTMENT_SIGNAL_WORDS):
+        return True
+    t_name = clean_api_text(transaction.get("account_name") or "").strip().lower()
+    name_tokens = re.findall(r"[a-z0-9]+", t_name)
+    return any(tok in _INVESTMENT_NAME_TOKENS for tok in name_tokens)
+
+
 def _is_investment_tx(
     transaction: Dict[str, Any],
     custom_sweep_tickers: Optional[Set[str]] = None,
@@ -462,14 +531,7 @@ def _is_investment_tx(
         return True
     if _is_commodity_trade_tx(transaction, custom_sweep_tickers=custom_sweep_tickers):
         return True
-    if tt not in ("cash in", "cash out"):
-        return False
-    t_name = clean_api_text(transaction.get("account_name") or "").strip().lower()
-    acct_type = clean_api_text(transaction.get("account_type") or "").strip().lower()
-    return (
-        any(w in acct_type for w in _INVESTMENT_SIGNAL_WORDS)
-        or any(w in t_name for w in _INVESTMENT_SIGNAL_WORDS)
-    )
+    return _has_investment_account_signal(transaction)
 
 
 def _resolve_account_from_tx(
@@ -767,7 +829,7 @@ def _calculate_account_transaction_totals(
             is_asset = True
 
         primary_account = mapper.resolve_account(firm, name, resolved_id, acct_type)
-        amount = float(tx.get("amount") or 0.0)
+        amount = _safe_positive_float(tx.get("amount"))
         tx_type_clean = clean_api_text(tx.get("transaction_type") or "").strip().lower()
         is_credit = bool(tx.get("is_credit"))
         is_cash_in = bool(tx.get("is_cash_in")) or tx_type_clean == "cash in"
@@ -2008,8 +2070,7 @@ class BeancountGenerator:
         # correction — a negative raw amount, or an explicit cash-out that is not
         # a credit — reverses a normal dividend receipt: cash leaves the account
         # and dividend income is reduced, instead of overstating both.
-        raw_amount = float(ctx["tx"].get("amount") or 0.0)
-        is_debit = raw_amount < 0 or (
+        is_debit = _is_negative_number(ctx["tx"].get("amount")) or (
             bool(ctx["tx"].get("is_cash_out")) and not ctx["is_credit"]
         )
         sign = -1.0 if is_debit else 1.0

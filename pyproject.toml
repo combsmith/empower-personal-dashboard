@@ -55,6 +55,7 @@ test = [
     "tomli>=1.1.0; python_version < '3.11'",
     "coverage>=7.0",
 ]
+# Provides YAML mapping support plus external Beancount ledger validation tools (e.g. bean-check / beancount.loader).
 beancount = [
     "beancount>=3.0.0",
     "pyyaml>=6.0",

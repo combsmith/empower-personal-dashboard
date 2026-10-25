@@ -2902,6 +2902,16 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
         parsed_simple = _parse_simple_yaml(yaml_text)
         self.assertEqual(parsed_simple["core_sweep_tickers"], ["BNKSWP1"])
 
+        flow_yaml_text = (
+            "accounts:\n"
+            '  "Synthetic Roth IRA": "Assets:Brokerage:SyntheticRothIRA"\n'
+            "  invalid_line_without_colon\n"
+            'core_sweep_tickers: ["BNKSWP1", "BNKSWP2"]\n'
+        )
+        parsed_flow = _parse_simple_yaml(flow_yaml_text)
+        self.assertEqual(parsed_flow["core_sweep_tickers"], ["BNKSWP1", "BNKSWP2"])
+        self.assertEqual(_parse_simple_yaml("core_sweep_tickers: []\n")["core_sweep_tickers"], [])
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             map_path = Path(tmp_dir) / "beancount_map.yaml"
             map_path.write_text(yaml_text, encoding="utf-8")
@@ -2937,7 +2947,7 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
             self.assertIn("2000-01-01 open Assets:Brokerage:SyntheticRothIRA\n", acct_out)
 
     def test_checking_cash_in_and_other_account_type_not_classified_as_investment(self):
-        """Bank Cash In/Out and account_type='other' spending rows stay in Assets:Institution with USD open."""
+        """Bank Cash In/Out and substring bank names ('Giraffe Checking') stay in Assets:Institution with USD open."""
         from empower_personal_dashboard.beancount import _is_investment_tx
 
         checking_cash_in = {
@@ -2946,6 +2956,14 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
             "transaction_date": "2026-10-01",
             "description": "ATM Cash Deposit",
             "amount": 500.0,
+            "transaction_type": "Cash In",
+        }
+        giraffe_checking = {
+            "user_transaction_id": "tx-giraffe-cashin",
+            "account_name": "Giraffe Checking",
+            "transaction_date": "2026-10-01",
+            "description": "Mobile Deposit",
+            "amount": 250.0,
             "transaction_type": "Cash In",
         }
         checking_cash_out = {
@@ -2968,59 +2986,185 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
             "is_spending": True,
         }
         self.assertFalse(_is_investment_tx(checking_cash_in))
+        self.assertFalse(_is_investment_tx(giraffe_checking))
         self.assertFalse(_is_investment_tx(checking_cash_out))
         self.assertFalse(_is_investment_tx(other_spending))
 
         txs = DashboardTransactions(
             start_date="2026-10-01",
             end_date="2026-10-03",
-            total_transactions=3,
-            money_in=500.0,
+            total_transactions=4,
+            money_in=750.0,
             money_out=105.50,
-            net_cashflow=394.50,
-            transactions=[checking_cash_in, checking_cash_out, other_spending],
+            net_cashflow=644.50,
+            transactions=[checking_cash_in, giraffe_checking, checking_cash_out, other_spending],
         )
         tx_out = self.generator.generate_transactions_bean(txs)
         self.assertIn("Assets:Institution:EverydayChecking", tx_out)
+        self.assertIn("Assets:Institution:GiraffeChecking", tx_out)
         self.assertNotIn("Assets:Brokerage:EverydayChecking", tx_out)
+        self.assertNotIn("Assets:Brokerage:GiraffeChecking", tx_out)
         acct_out = self.generator.generate_accounts_bean(transactions=txs)
         self.assertIn("2000-01-01 open Assets:Institution:EverydayChecking USD\n", acct_out)
+        self.assertIn("2000-01-01 open Assets:Institution:GiraffeChecking USD\n", acct_out)
+
+    def test_brokerage_account_cash_in_and_transfer_resolve_consistently(self):
+        """Cash In and Transfer rows on 'Taxable Brokerage' both resolve to Assets:Brokerage:TaxableBrokerage."""
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-02",
+            total_transactions=2,
+            money_in=1000.0,
+            money_out=200.0,
+            net_cashflow=800.0,
+            transactions=[
+                {
+                    "user_transaction_id": "tx-brok-cashin",
+                    "account_name": "Taxable Brokerage",
+                    "transaction_date": "2026-10-01",
+                    "description": "ACH Contribution",
+                    "amount": 1000.0,
+                    "transaction_type": "Cash In",
+                    "is_credit": True,
+                },
+                {
+                    "user_transaction_id": "tx-brok-transfer",
+                    "account_name": "Taxable Brokerage",
+                    "transaction_date": "2026-10-02",
+                    "description": "ACH Withdrawal",
+                    "amount": 200.0,
+                    "transaction_type": "Transfer",
+                    "is_cash_out": True,
+                },
+            ],
+        )
+        tx_out = self.generator.generate_transactions_bean(txs)
+        self.assertEqual(tx_out.count("Assets:Brokerage:TaxableBrokerage"), 2)
+        self.assertNotIn("Assets:Institution:TaxableBrokerage", tx_out)
+
+    def test_core_sweep_boundary_prices_and_exact_bank_sweep_tickers(self):
+        """Prices 0.99 and 1.01 pass the $1.00 +/- $0.01 check; substring tickers like MYCASH are rejected."""
+        from empower_personal_dashboard.beancount import _has_core_sweep_evidence
+
+        self.assertTrue(_has_core_sweep_evidence("SPAXX", 0.99, "transfer"))
+        self.assertTrue(_has_core_sweep_evidence("SPAXX", 1.01, "transfer"))
+        self.assertFalse(_has_core_sweep_evidence("SPAXX", 0.989, "transfer"))
+        self.assertFalse(_has_core_sweep_evidence("SPAXX", 1.011, "transfer"))
+
+        self.assertTrue(_has_core_sweep_evidence("QACDS", 1.0, "transfer"))
+        self.assertTrue(_has_core_sweep_evidence("CASH", 1.0, "transfer"))
+        self.assertFalse(_has_core_sweep_evidence("MYCASH", 1.0, "transfer"))
+        self.assertFalse(_has_core_sweep_evidence("QACDSX", 1.0, "transfer"))
+        self.assertFalse(_has_core_sweep_evidence("ENCASH", 1.0, "transfer"))
+
+    def test_explicit_dividend_on_sweep_ticker_is_not_classified_as_sell(self):
+        """A row with transaction_type='Shares In' and investment_type='Dividend' on SPAXX books Income:Dividends."""
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-01",
+            total_transactions=1,
+            money_in=10.0,
+            money_out=0.0,
+            net_cashflow=10.0,
+            transactions=[
+                {
+                    "user_transaction_id": "tx-spaxx-div",
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": "Dividend Received SPAXX",
+                    "amount": 10.0,
+                    "transaction_type": "Shares In",
+                    "investment_type": "Dividend",
+                    "symbol": "SPAXX",
+                    "price": 1.0,
+                    "quantity": 10.0,
+                    "is_credit": True,
+                },
+            ],
+        )
+        tx_out = self.generator.generate_transactions_bean(txs)
+        self.assertIn("Income:Dividends", tx_out)
+        self.assertNotIn("-10.000000 SPAXX {}", tx_out)
+        self.assertNotIn("Income:Investments:CapitalGains", tx_out)
 
     def test_non_numeric_quantity_or_price_falls_back_gracefully(self):
-        """Malformed non-numeric quantity/price strings ('N/A', '') do not raise ValueError."""
-        from empower_personal_dashboard.beancount import _is_commodity_trade_tx, _safe_positive_float
+        """Malformed non-numeric amount/quantity/price strings ('N/A', '') and overflow ints do not raise errors."""
+        from empower_personal_dashboard.beancount import (
+            _is_commodity_trade_tx,
+            _is_negative_number,
+            _safe_positive_float,
+        )
 
         self.assertEqual(_safe_positive_float("N/A"), 0.0)
         self.assertEqual(_safe_positive_float(""), 0.0)
         self.assertEqual(_safe_positive_float(True), 0.0)
         self.assertEqual(_safe_positive_float("nan"), 0.0)
         self.assertEqual(_safe_positive_float("inf"), 0.0)
+        self.assertEqual(_safe_positive_float(10**400), 0.0)
+        self.assertFalse(_is_negative_number("N/A"))
+        self.assertFalse(_is_negative_number(True))
+        self.assertFalse(_is_negative_number(10**400))
+        self.assertTrue(_is_negative_number("-25.50"))
 
         malformed_tx = {
             "user_transaction_id": "tx-malformed-qty",
             "account_name": "Synthetic Roth IRA",
             "transaction_date": "2026-10-01",
             "description": "Purchase Into Core Account SPAXX",
-            "amount": "100.0",
+            "amount": "N/A",
             "transaction_type": "Transfer",
             "symbol": "SPAXX",
             "quantity": "N/A",
             "price": 1.0,
+        }
+        malformed_div_tx = {
+            "user_transaction_id": "tx-malformed-div",
+            "account_name": "Synthetic Roth IRA",
+            "transaction_date": "2026-10-01",
+            "description": "Dividend Adjustment",
+            "amount": "N/A",
+            "transaction_type": "Dividend",
+            "investment_type": "Dividend",
+            "symbol": "VTI",
         }
         self.assertFalse(_is_commodity_trade_tx(malformed_tx))
 
         txs = DashboardTransactions(
             start_date="2026-10-01",
             end_date="2026-10-01",
-            total_transactions=1,
+            total_transactions=2,
             money_in=0.0,
-            money_out=100.0,
-            net_cashflow=-100.0,
-            transactions=[malformed_tx],
+            money_out=0.0,
+            net_cashflow=0.0,
+            transactions=[malformed_tx, malformed_div_tx],
         )
         tx_out = self.generator.generate_transactions_bean(txs)
         self.assertIn("Equity:Transfers", tx_out)
+        self.assertIn("Income:Dividends", tx_out)
         self.assertNotIn("SPAXX {{", tx_out)
+
+        balances = DashboardBalances(
+            as_of_date="2026-10-02",
+            net_worth=100.0,
+            total_cash=0.0,
+            total_investment=100.0,
+            total_card_liabilities=0.0,
+            total_loan=0.0,
+            total_mortgage=0.0,
+            accounts=[
+                {
+                    "account_id": "Roth-1",
+                    "account_name": "Synthetic Roth IRA",
+                    "firm_name": "Brokerage",
+                    "account_type": "investment",
+                    "balance": 100.0,
+                    "is_asset": True,
+                    "currency": "USD",
+                },
+            ],
+        )
+        bal_out = self.generator.generate_balances_bean(balances, transactions=txs)
+        self.assertIn("balance Assets:Brokerage:SyntheticRothIRA", bal_out)
 
     def test_sweepstakes_description_does_not_classify_as_core_sweep(self):
         """Generic 'sweep' substring (e.g. 'Sweepstakes Promo ACME') at $1.00 does not book a trade."""
