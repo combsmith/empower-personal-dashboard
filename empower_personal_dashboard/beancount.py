@@ -76,6 +76,11 @@ _INVESTMENT_ACCOUNT_WORDS = (
     "invest", "broker", "ira", "401k", "roth", "rollover",
     "stock", "portfolio", "529", "other",
 )
+# Unambiguous investment account signal words (excludes generic "other").
+_INVESTMENT_SIGNAL_WORDS = (
+    "invest", "broker", "ira", "401k", "roth", "rollover",
+    "stock", "portfolio", "529",
+)
 
 # Description phrases, NASDAQ symbology, and bank sweep tokens indicating core money market sweeps.
 _CORE_BUY_PHRASES = (
@@ -93,7 +98,6 @@ _CORE_SWEEP_EVIDENCE_PHRASES = (
     "core account",
     "core fund",
     "cash sweep",
-    "sweep",
     "fdic",
     "mmda",
 )
@@ -331,10 +335,26 @@ def _build_account_lookup(balances: Optional[DashboardBalances]) -> Dict[str, Di
     return lookup
 
 
+def _safe_positive_float(val: Any) -> float:
+    """Safely parse ``val`` as a non-negative finite float, returning 0.0 on invalid input."""
+    if val is None or isinstance(val, bool):
+        return 0.0
+    try:
+        parsed = abs(float(val))
+    except (ValueError, TypeError):
+        return 0.0
+    return parsed if parsed == parsed and parsed != float("inf") else 0.0
+
+
 def _clean_tx_description(tx: Dict[str, Any]) -> str:
-    """Return normalized lowercase combined description and original_description."""
-    combined = f"{tx.get('description') or ''} {tx.get('original_description') or ''}".strip()
-    return clean_api_text(combined).strip().lower()
+    """Return normalized lowercase description, falling back to original_description when needed."""
+    primary = clean_api_text(tx.get("description") or "").strip().lower()
+    orig = clean_api_text(tx.get("original_description") or "").strip().lower()
+    if not orig or orig == primary:
+        return primary
+    if any(p in primary for p in _CORE_BUY_PHRASES) or any(p in primary for p in _CORE_SELL_PHRASES):
+        return primary
+    return f"{primary} {orig}".strip()
 
 
 def _has_core_sweep_evidence(
@@ -373,16 +393,23 @@ def _classify_buy_sell(
         return is_explicit_buy, is_explicit_sell and not is_explicit_buy
     if price <= 0:
         return False, False
-    has_core_buy_phrase = any(p in desc_clean for p in _CORE_BUY_PHRASES)
-    has_core_sell_phrase = any(p in desc_clean for p in _CORE_SELL_PHRASES)
+    raw_buy_phrase = any(p in desc_clean for p in _CORE_BUY_PHRASES)
+    raw_sell_phrase = any(p in desc_clean for p in _CORE_SELL_PHRASES)
+    has_core_buy_phrase = raw_buy_phrase and not raw_sell_phrase
+    has_core_sell_phrase = raw_sell_phrase and not raw_buy_phrase
     has_core_evidence = _has_core_sweep_evidence(
         ticker, price, desc_clean, custom_sweep_tickers=custom_sweep_tickers
     )
-    is_core_sell = has_core_sell_phrase or (
-        tx_type_clean == "shares in" and has_core_evidence and not has_core_buy_phrase
+    is_core_sell = (
+        tx_type_clean != "shares out"
+        and not raw_buy_phrase
+        and (has_core_sell_phrase or (tx_type_clean == "shares in" and has_core_evidence))
     )
-    is_core_buy = not is_core_sell and (
-        has_core_buy_phrase or (tx_type_clean == "shares out" and has_core_evidence)
+    is_core_buy = (
+        not is_core_sell
+        and tx_type_clean != "shares in"
+        and not raw_sell_phrase
+        and (has_core_buy_phrase or (tx_type_clean == "shares out" and has_core_evidence))
     )
     return is_core_buy, is_core_sell
 
@@ -399,10 +426,8 @@ def _is_commodity_trade_tx(
     it = clean_api_text(transaction.get("investment_type") or "").strip().lower()
     if tt in ("buy", "sell", "reinvest", "disposal") or it in ("buy", "sell", "reinvest", "disposal"):
         return True
-    raw_qty = transaction.get("quantity")
-    qty = abs(float(raw_qty)) if raw_qty is not None else 0.0
-    raw_price = transaction.get("price")
-    price = abs(float(raw_price)) if raw_price is not None else 0.0
+    qty = _safe_positive_float(transaction.get("quantity"))
+    price = _safe_positive_float(transaction.get("price"))
     desc_clean = _clean_tx_description(transaction)
     return any(
         _classify_buy_sell(
@@ -436,12 +461,13 @@ def _is_investment_tx(
         return True
     if _is_commodity_trade_tx(transaction, custom_sweep_tickers=custom_sweep_tickers):
         return True
+    if tt not in ("cash in", "cash out"):
+        return False
     t_name = clean_api_text(transaction.get("account_name") or "").strip().lower()
     acct_type = clean_api_text(transaction.get("account_type") or "").strip().lower()
     return (
-        tt in ("cash in", "cash out")
-        or any(w in acct_type for w in _INVESTMENT_ACCOUNT_WORDS)
-        or any(w in t_name for w in _INVESTMENT_ACCOUNT_WORDS if w != "other")
+        any(w in acct_type for w in _INVESTMENT_SIGNAL_WORDS)
+        or any(w in t_name for w in _INVESTMENT_SIGNAL_WORDS)
     )
 
 
@@ -1381,15 +1407,13 @@ class BeancountGenerator:
         ``None`` for non-trades (no ticker, zero quantity, or neither buy nor sell).
         """
         t_ticker = _clean_ticker(tx.get("symbol"))
-        tx_raw_qty = tx.get("quantity")
-        tx_qty = abs(float(tx_raw_qty)) if tx_raw_qty is not None else 0.0
+        tx_qty = _safe_positive_float(tx.get("quantity"))
         if not t_ticker or tx_qty <= 0:
             return None
 
         tx_type = clean_api_text(tx.get("transaction_type") or "").strip().lower()
         inv_type = clean_api_text(tx.get("investment_type") or "").strip().lower()
-        tx_raw_price = tx.get("price")
-        tx_price = abs(float(tx_raw_price)) if tx_raw_price is not None else 0.0
+        tx_price = _safe_positive_float(tx.get("price"))
         desc_clean = _clean_tx_description(tx)
         custom_sweep_tickers = self.mapper.core_sweep_tickers
         is_tx_buy, is_tx_sell = _classify_buy_sell(
@@ -1416,8 +1440,7 @@ class BeancountGenerator:
         # later ``{}`` sale reduction can book against it instead of hitting a bare
         # (uncosted) opening lot.
         if tx_price <= 0:
-            tx_raw_amount = tx.get("amount")
-            tx_amount = abs(float(tx_raw_amount)) if tx_raw_amount is not None else 0.0
+            tx_amount = _safe_positive_float(tx.get("amount"))
             if tx_amount > 0 and tx_qty > 0:
                 tx_price = tx_amount / tx_qty
         return (tx_b_account, t_ticker), tx_qty, is_tx_buy, is_tx_sell, tx_firm, tx_price
@@ -1822,7 +1845,7 @@ class BeancountGenerator:
 
         date = tx.get("transaction_date") or "2000-01-01"
         cat_name = tx.get("category") or tx.get("category_name")
-        amount = abs(float(tx.get("amount") or 0.0))
+        amount = _safe_positive_float(tx.get("amount"))
         primary_account = self.mapper.resolve_account(firm, acct_name, resolved_id, acct_type)
 
         tx_type_clean = clean_api_text(tx.get("transaction_type") or "").strip().lower()
@@ -1830,10 +1853,8 @@ class BeancountGenerator:
         desc_clean = _clean_tx_description(tx)
         cat_clean = clean_api_text(cat_name or "").lower()
         ticker = _clean_ticker(tx.get("symbol"))
-        raw_qty = tx.get("quantity")
-        raw_price = tx.get("price")
-        qty = abs(float(raw_qty)) if raw_qty is not None else 0.0
-        price = abs(float(raw_price)) if raw_price is not None else 0.0
+        qty = _safe_positive_float(tx.get("quantity"))
+        price = _safe_positive_float(tx.get("price"))
 
         tag_str = self._tx_tag_str(tx_id)
 

@@ -2527,7 +2527,7 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
                     "transaction_date": "2026-10-05",
                     "description": "Redemption From Core Account VMFXX",
                     "amount": 250.0,
-                    "transaction_type": "Shares Out",
+                    "transaction_type": "Transfer",
                     "investment_type": "Transfer",
                     "symbol": "VMFXX",
                     "price": 1.0,
@@ -2747,6 +2747,11 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
             # Balance assertion expects 1500 SPAXX on 2026-10-02
             self.assertIn("2026-10-02 balance Assets:Brokerage:SyntheticRothIRA 1500.000000 SPAXX", bal_text)
 
+            from beancount import loader
+
+            _entries, errors, _options = loader.load_file(str(ledger_dir / "main.bean"))
+            self.assertEqual(errors, [])
+
     def test_core_sweep_requires_positive_price(self):
         """Transfer / Shares Out rows with price <= 0 or missing price do not classify as core sweep trades."""
         txs = DashboardTransactions(
@@ -2930,6 +2935,178 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
             self.assertIn("500.000000 BNKSWP1 {{500.000000 USD}}", tx_out)
             acct_out = gen.generate_accounts_bean(transactions=txs)
             self.assertIn("2000-01-01 open Assets:Brokerage:SyntheticRothIRA\n", acct_out)
+
+    def test_checking_cash_in_and_other_account_type_not_classified_as_investment(self):
+        """Bank Cash In/Out and account_type='other' spending rows stay in Assets:Institution with USD open."""
+        from empower_personal_dashboard.beancount import _is_investment_tx
+
+        checking_cash_in = {
+            "user_transaction_id": "tx-chk-cashin",
+            "account_name": "Everyday Checking",
+            "transaction_date": "2026-10-01",
+            "description": "ATM Cash Deposit",
+            "amount": 500.0,
+            "transaction_type": "Cash In",
+        }
+        checking_cash_out = {
+            "user_transaction_id": "tx-chk-cashout",
+            "account_name": "Everyday Checking",
+            "transaction_date": "2026-10-02",
+            "description": "ATM Withdrawal",
+            "amount": 100.0,
+            "transaction_type": "Cash Out",
+            "is_spending": True,
+        }
+        other_spending = {
+            "user_transaction_id": "tx-other-spend",
+            "account_name": "Everyday Checking",
+            "account_type": "other",
+            "transaction_date": "2026-10-03",
+            "description": "Coffee Shop",
+            "amount": 5.50,
+            "transaction_type": "spending",
+            "is_spending": True,
+        }
+        self.assertFalse(_is_investment_tx(checking_cash_in))
+        self.assertFalse(_is_investment_tx(checking_cash_out))
+        self.assertFalse(_is_investment_tx(other_spending))
+
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-03",
+            total_transactions=3,
+            money_in=500.0,
+            money_out=105.50,
+            net_cashflow=394.50,
+            transactions=[checking_cash_in, checking_cash_out, other_spending],
+        )
+        tx_out = self.generator.generate_transactions_bean(txs)
+        self.assertIn("Assets:Institution:EverydayChecking", tx_out)
+        self.assertNotIn("Assets:Brokerage:EverydayChecking", tx_out)
+        acct_out = self.generator.generate_accounts_bean(transactions=txs)
+        self.assertIn("2000-01-01 open Assets:Institution:EverydayChecking USD\n", acct_out)
+
+    def test_non_numeric_quantity_or_price_falls_back_gracefully(self):
+        """Malformed non-numeric quantity/price strings ('N/A', '') do not raise ValueError."""
+        from empower_personal_dashboard.beancount import _is_commodity_trade_tx, _safe_positive_float
+
+        self.assertEqual(_safe_positive_float("N/A"), 0.0)
+        self.assertEqual(_safe_positive_float(""), 0.0)
+        self.assertEqual(_safe_positive_float(True), 0.0)
+        self.assertEqual(_safe_positive_float("nan"), 0.0)
+        self.assertEqual(_safe_positive_float("inf"), 0.0)
+
+        malformed_tx = {
+            "user_transaction_id": "tx-malformed-qty",
+            "account_name": "Synthetic Roth IRA",
+            "transaction_date": "2026-10-01",
+            "description": "Purchase Into Core Account SPAXX",
+            "amount": "100.0",
+            "transaction_type": "Transfer",
+            "symbol": "SPAXX",
+            "quantity": "N/A",
+            "price": 1.0,
+        }
+        self.assertFalse(_is_commodity_trade_tx(malformed_tx))
+
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-01",
+            total_transactions=1,
+            money_in=0.0,
+            money_out=100.0,
+            net_cashflow=-100.0,
+            transactions=[malformed_tx],
+        )
+        tx_out = self.generator.generate_transactions_bean(txs)
+        self.assertIn("Equity:Transfers", tx_out)
+        self.assertNotIn("SPAXX {{", tx_out)
+
+    def test_sweepstakes_description_does_not_classify_as_core_sweep(self):
+        """Generic 'sweep' substring (e.g. 'Sweepstakes Promo ACME') at $1.00 does not book a trade."""
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-01",
+            total_transactions=1,
+            money_in=0.0,
+            money_out=100.0,
+            net_cashflow=-100.0,
+            transactions=[
+                {
+                    "user_transaction_id": "tx-sweepstakes",
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": "Sweepstakes Promo ACME",
+                    "amount": 100.0,
+                    "transaction_type": "Shares Out",
+                    "investment_type": "Transfer",
+                    "symbol": "ACME",
+                    "price": 1.0,
+                    "quantity": 100.0,
+                },
+            ],
+        )
+        tx_out = self.generator.generate_transactions_bean(txs)
+        self.assertNotIn("ACME {{", tx_out)
+        self.assertIn("Equity:Transfers", tx_out)
+
+    def test_conflicting_core_sweep_signals_and_description_precedence(self):
+        """Primary description wins over conflicting original_description; contradicting type+phrase is rejected."""
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-02",
+            total_transactions=3,
+            money_in=0.0,
+            money_out=100.0,
+            net_cashflow=-100.0,
+            transactions=[
+                {
+                    "user_transaction_id": "tx-desc-precedence",
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": "Purchase Into Core Account SPAXX",
+                    "original_description": "Redemption From Core Account",
+                    "amount": 100.0,
+                    "transaction_type": "Shares Out",
+                    "investment_type": "Transfer",
+                    "symbol": "SPAXX",
+                    "price": 1.0,
+                    "quantity": 100.0,
+                },
+                {
+                    "user_transaction_id": "tx-conflict-type-phrase",
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-02",
+                    "description": "Redemption From Core Account VMFXX",
+                    "amount": 250.0,
+                    "transaction_type": "Shares Out",
+                    "investment_type": "Transfer",
+                    "symbol": "VMFXX",
+                    "price": 1.0,
+                    "quantity": 250.0,
+                },
+                {
+                    "user_transaction_id": "tx-conflict-same-field",
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-02",
+                    "description": "Purchase Into Core Account Redemption From Core Account SPAXX",
+                    "amount": 50.0,
+                    "transaction_type": "Transfer",
+                    "investment_type": "Transfer",
+                    "symbol": "SPAXX",
+                    "price": 1.0,
+                    "quantity": 50.0,
+                },
+            ],
+        )
+        tx_out = self.generator.generate_transactions_bean(txs)
+        # First row: primary description + Shares Out agree -> booked as a buy
+        self.assertIn("100.000000 SPAXX {{100.000000 USD}}", tx_out)
+        self.assertNotIn("-100.000000 SPAXX {}", tx_out)
+        # Second and third rows: conflicting signals -> not booked as trades
+        self.assertNotIn("VMFXX {}", tx_out)
+        self.assertNotIn("VMFXX {{", tx_out)
+        self.assertNotIn("50.000000 SPAXX", tx_out)
 
 
 if __name__ == "__main__":
