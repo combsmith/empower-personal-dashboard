@@ -2437,7 +2437,363 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
             self.assertIn("Empower Personal Dashboard - Balance Assertions", repaired_text)
 
 
+class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
+    """Tests for Issue #113: Core money market sweep buy and redemption transactions."""
+
+    def setUp(self):
+        self.generator = BeancountGenerator()
+
+    def test_core_sweep_purchase_classified_as_investment_buy(self):
+        """Core sweep purchase ('Shares Out' / 'Purchase Into Core Account') books commodity lot and cash leg."""
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-01",
+            total_transactions=2,
+            money_in=1000.0,
+            money_out=1000.0,
+            net_cashflow=0.0,
+            transactions=[
+                {
+                    "user_transaction_id": 99000001,
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": "Cash Contribution Current Year",
+                    "amount": 1000.0,
+                    "transaction_type": "Cash In",
+                    "status": "posted",
+                },
+                {
+                    "user_transaction_id": 99000002,
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": (
+                        "Fidelity Government Money Market - Purchase Into Core Account "
+                        "Fidelity Government Money Market"
+                    ),
+                    "amount": 1000.0,
+                    "transaction_type": "Shares Out",
+                    "investment_type": "Transfer",
+                    "symbol": "SPAXX",
+                    "price": 1.0,
+                    "quantity": 1000.0,
+                    "status": "posted",
+                },
+            ],
+        )
+        output = self.generator.generate_transactions_bean(txs)
+        self.assertIn(
+            "Assets:Brokerage:SyntheticRothIRA    1000.000000 SPAXX {{1000.000000 USD}}",
+            output,
+        )
+        self.assertIn(
+            "Assets:Brokerage:SyntheticRothIRA    -1000.00 USD",
+            output,
+        )
+        # Cash contribution should credit +1000.00 USD to the same brokerage account
+        self.assertIn(
+            "Assets:Brokerage:SyntheticRothIRA     1000.00 USD",
+            output,
+        )
+
+    def test_core_sweep_redemption_classified_as_investment_sell(self):
+        """Core sweep redemption ('Redemption From Core Account' / 'Shares In') books commodity reduction and cash proceeds."""
+        txs = DashboardTransactions(
+            start_date="2026-10-05",
+            end_date="2026-10-05",
+            total_transactions=2,
+            money_in=400.0,
+            money_out=0.0,
+            net_cashflow=400.0,
+            transactions=[
+                {
+                    "user_transaction_id": 99000003,
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-05",
+                    "description": (
+                        "Fidelity Government Money Market - Redemption From Core Account "
+                        "Fidelity Government Money Market"
+                    ),
+                    "amount": 400.0,
+                    "transaction_type": "Shares In",
+                    "investment_type": "Transfer",
+                    "symbol": "SPAXX",
+                    "price": 1.0,
+                    "quantity": 400.0,
+                    "status": "posted",
+                },
+                {
+                    "user_transaction_id": 99000004,
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-05",
+                    "description": "Redemption From Core Account VMFXX",
+                    "amount": 250.0,
+                    "transaction_type": "Shares Out",
+                    "investment_type": "Transfer",
+                    "symbol": "VMFXX",
+                    "price": 1.0,
+                    "quantity": 250.0,
+                    "status": "posted",
+                },
+            ],
+        )
+        output = self.generator.generate_transactions_bean(txs)
+        self.assertIn(
+            "Assets:Brokerage:SyntheticRothIRA    -400.000000 SPAXX {} @ 1.0000 USD",
+            output,
+        )
+        self.assertIn(
+            "Assets:Brokerage:SyntheticRothIRA      400.00 USD",
+            output,
+        )
+        self.assertIn(
+            "Assets:Brokerage:SyntheticRothIRA    -250.000000 VMFXX {} @ 1.0000 USD",
+            output,
+        )
+        self.assertIn("Income:CapitalGains", output)
+        self.assertNotIn("Equity:Transfers", output)
+
+    def test_core_sweep_shares_out_and_shares_in_without_core_description(self):
+        """Shares Out / Shares In with valid symbol, quantity > 0, and price > 0 classify as buy and sell."""
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-02",
+            total_transactions=2,
+            money_in=200.0,
+            money_out=500.0,
+            net_cashflow=-300.0,
+            transactions=[
+                {
+                    "user_transaction_id": "tx-swp-buy",
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "transaction_date": "2026-10-01",
+                    "description": "Vanguard Federal Money Market Fund",
+                    "amount": 500.0,
+                    "transaction_type": "Shares Out",
+                    "investment_type": "Transfer",
+                    "symbol": "VMFXX",
+                    "price": 1.0,
+                    "quantity": 500.0,
+                },
+                {
+                    "user_transaction_id": "tx-swp-sell",
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "transaction_date": "2026-10-02",
+                    "description": "Vanguard Federal Money Market Fund",
+                    "amount": 200.0,
+                    "transaction_type": "Shares In",
+                    "investment_type": "Transfer",
+                    "symbol": "VMFXX",
+                    "price": 1.0,
+                    "quantity": 200.0,
+                },
+            ],
+        )
+        output = self.generator.generate_transactions_bean(txs)
+        self.assertIn("500.000000 VMFXX {{500.000000 USD}}", output)
+        self.assertIn("-200.000000 VMFXX {} @ 1.0000 USD", output)
+
+    def test_core_sweep_compute_net_buys_and_baseline_lot(self):
+        """_compute_net_buys and generate_holdings_bean account for core sweep buys and redemptions."""
+        holdings = DashboardHoldings(
+            as_of_date="2026-10-10",
+            total_value=1100.0,
+            holdings=[
+                {
+                    "account_name": "Synthetic Roth IRA",
+                    "ticker": "SPAXX",
+                    "quantity": 1100.0,
+                    "price": 1.0,
+                    "value": 1100.0,
+                    "cost_basis": 1100.0,
+                }
+            ],
+        )
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-10",
+            total_transactions=2,
+            money_in=400.0,
+            money_out=1000.0,
+            net_cashflow=-600.0,
+            transactions=[
+                {
+                    "user_transaction_id": 99000002,
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": "Purchase Into Core Account SPAXX",
+                    "amount": 1000.0,
+                    "transaction_type": "Shares Out",
+                    "investment_type": "Transfer",
+                    "symbol": "SPAXX",
+                    "price": 1.0,
+                    "quantity": 1000.0,
+                },
+                {
+                    "user_transaction_id": 99000003,
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-05",
+                    "description": "Redemption From Core Account SPAXX",
+                    "amount": 400.0,
+                    "transaction_type": "Shares In",
+                    "investment_type": "Transfer",
+                    "symbol": "SPAXX",
+                    "price": 1.0,
+                    "quantity": 400.0,
+                },
+            ],
+        )
+        # Net buys = +1000 - 400 = +600. Snapshot = 1100 => baseline opening lot = 1100 - 600 = 500.
+        holdings_out = self.generator.generate_holdings_bean(holdings, transactions=txs)
+        self.assertIn("500.000000 SPAXX {{500.000000 USD}}", holdings_out)
+
+    def test_core_sweep_modular_append_reconciles_existing_holding_lot(self):
+        """End-to-end repro from Issue #113: modular append with existing holdings.bean passes balance check."""
+        initial_holdings = DashboardHoldings(
+            as_of_date="2026-09-30",
+            total_value=500.0,
+            holdings=[
+                {
+                    "account_name": "Synthetic Roth IRA",
+                    "ticker": "SPAXX",
+                    "quantity": 500.0,
+                    "price": 1.0,
+                    "value": 500.0,
+                    "cost_basis": 500.0,
+                }
+            ],
+        )
+        updated_holdings = DashboardHoldings(
+            as_of_date="2026-10-01",
+            total_value=1500.0,
+            holdings=[
+                {
+                    "account_name": "Synthetic Roth IRA",
+                    "ticker": "SPAXX",
+                    "quantity": 1500.0,
+                    "price": 1.0,
+                    "value": 1500.0,
+                    "cost_basis": 1500.0,
+                }
+            ],
+        )
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-01",
+            total_transactions=2,
+            money_in=1000.0,
+            money_out=1000.0,
+            net_cashflow=0.0,
+            transactions=[
+                {
+                    "user_transaction_id": 99000001,
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": "Cash Contribution Current Year",
+                    "amount": 1000.0,
+                    "transaction_type": "Cash In",
+                    "status": "posted",
+                },
+                {
+                    "user_transaction_id": 99000002,
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": (
+                        "Fidelity Government Money Market - Purchase Into Core Account "
+                        "Fidelity Government Money Market"
+                    ),
+                    "amount": 1000.0,
+                    "transaction_type": "Shares Out",
+                    "investment_type": "Transfer",
+                    "symbol": "SPAXX",
+                    "price": 1.0,
+                    "quantity": 1000.0,
+                    "status": "posted",
+                },
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ledger_dir = Path(tmp_dir) / "ledger"
+            # Initial export with 500 SPAXX
+            self.generator.export_modular_ledger(
+                destination_dir=ledger_dir,
+                holdings=initial_holdings,
+                append=False,
+                opening_date="2020-01-01",
+            )
+            # Subsequent append export after $1000 deposit + 1000 SPAXX core sweep
+            self.generator.export_modular_ledger(
+                destination_dir=ledger_dir,
+                holdings=updated_holdings,
+                transactions=txs,
+                append=True,
+                opening_date="2020-01-01",
+            )
+            holdings_text = (ledger_dir / "holdings.bean").read_text(encoding="utf-8")
+            tx_text = (ledger_dir / "transactions.bean").read_text(encoding="utf-8")
+            bal_text = (ledger_dir / "balances.bean").read_text(encoding="utf-8")
+
+            # Existing baseline lot stays 500 SPAXX
+            self.assertIn("500.000000 SPAXX {{500.000000 USD}}", holdings_text)
+            self.assertEqual(holdings_text.count('empower_holding: "Assets:Brokerage:SyntheticRothIRA:SPAXX"'), 1)
+            # Sweep transaction adds 1000 SPAXX
+            self.assertIn("1000.000000 SPAXX {{1000.000000 USD}}", tx_text)
+            # Balance assertion expects 1500 SPAXX on 2026-10-02
+            self.assertIn("2026-10-02 balance Assets:Brokerage:SyntheticRothIRA 1500.000000 SPAXX", bal_text)
+
+            try:
+                from beancount import loader  # type: ignore
+            except ImportError:
+                loader = None
+            if loader is not None:
+                _entries, errors, _options = loader.load_file(str(ledger_dir / "main.bean"))
+                self.assertEqual(errors, [])
+
+    def test_core_sweep_requires_positive_price(self):
+        """Transfer / Shares Out rows with price <= 0 or missing price do not classify as core sweep trades."""
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-01",
+            total_transactions=2,
+            money_in=0.0,
+            money_out=0.0,
+            net_cashflow=0.0,
+            transactions=[
+                {
+                    "user_transaction_id": "tx-unpriced-1",
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": "Purchase Into Core Account SPAXX",
+                    "amount": 1000.0,
+                    "transaction_type": "Shares Out",
+                    "investment_type": "Transfer",
+                    "symbol": "SPAXX",
+                    "price": 0.0,
+                    "quantity": 1000.0,
+                },
+                {
+                    "user_transaction_id": "tx-unpriced-2",
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": "Redemption From Core Account SPAXX",
+                    "amount": 500.0,
+                    "transaction_type": "Shares In",
+                    "investment_type": "Transfer",
+                    "symbol": "SPAXX",
+                    "price": None,
+                    "quantity": 500.0,
+                },
+            ],
+        )
+        output = self.generator.generate_transactions_bean(txs)
+        self.assertNotIn("SPAXX {{", output)
+        self.assertNotIn("SPAXX {}", output)
+        self.assertIn("Equity:Transfers", output)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 

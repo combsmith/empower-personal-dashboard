@@ -77,6 +77,19 @@ _INVESTMENT_ACCOUNT_WORDS = (
     "stock", "portfolio", "529", "other",
 )
 
+# Description phrases indicating retail brokerage core money market sweeps.
+_CORE_BUY_PHRASES = (
+    "purchase into core account",
+    "purchase into core",
+    "sweep into core",
+)
+_CORE_SELL_PHRASES = (
+    "redemption from core account",
+    "redemption from core",
+    "sweep from core",
+)
+
+
 
 def _clean_segment(text: str) -> str:
     """Normalize and format a text string into a valid Beancount account subsegment."""
@@ -284,11 +297,58 @@ def _build_account_lookup(balances: Optional[DashboardBalances]) -> Dict[str, Di
     return lookup
 
 
-def _is_investment_tx(transaction: Dict[str, Any]) -> bool:
-    """True when a transaction represents a security trade or investment dividend.
+def _clean_tx_description(tx: Dict[str, Any]) -> str:
+    """Return normalized lowercase combined description and original_description."""
+    combined = f"{tx.get('description') or ''} {tx.get('original_description') or ''}".strip()
+    return clean_api_text(combined).strip().lower()
 
-    A security trade (buy/sell/reinvest/disposal) requires a ticker, matching
-    the investment detection used when emitting postings. A dividend is
+
+def _classify_buy_sell(
+    tx_type_clean: str,
+    inv_type_clean: str,
+    ticker: str,
+    qty: float,
+    price: float = 0.0,
+    desc_clean: str = "",
+) -> Tuple[bool, bool]:
+    """Classify whether a security transaction is an investment (is_buy, is_sell)."""
+    if not ticker or qty <= 0:
+        return False, False
+    is_explicit_buy = tx_type_clean in ("buy", "reinvest") or inv_type_clean in ("buy", "reinvest")
+    is_explicit_sell = tx_type_clean in ("sell", "disposal") or inv_type_clean in ("sell", "disposal")
+    if is_explicit_buy or is_explicit_sell:
+        return is_explicit_buy, is_explicit_sell and not is_explicit_buy
+    if price <= 0:
+        return False, False
+    has_core_buy_phrase = any(p in desc_clean for p in _CORE_BUY_PHRASES)
+    has_core_sell_phrase = any(p in desc_clean for p in _CORE_SELL_PHRASES)
+    is_core_sell = has_core_sell_phrase or (tx_type_clean == "shares in" and not has_core_buy_phrase)
+    is_core_buy = not is_core_sell and (has_core_buy_phrase or tx_type_clean == "shares out")
+    return is_core_buy, is_core_sell
+
+
+def _is_commodity_trade_tx(transaction: Dict[str, Any]) -> bool:
+    """True when a transaction represents a security trade or core sweep with a ticker."""
+    ticker = _clean_ticker(transaction.get("symbol"))
+    if not ticker:
+        return False
+    tt = clean_api_text(transaction.get("transaction_type") or "").strip().lower()
+    it = clean_api_text(transaction.get("investment_type") or "").strip().lower()
+    if tt in ("buy", "sell", "reinvest", "disposal") or it in ("buy", "sell", "reinvest", "disposal"):
+        return True
+    raw_qty = transaction.get("quantity")
+    qty = abs(float(raw_qty)) if raw_qty is not None else 0.0
+    raw_price = transaction.get("price")
+    price = abs(float(raw_price)) if raw_price is not None else 0.0
+    desc_clean = _clean_tx_description(transaction)
+    return any(_classify_buy_sell(tt, it, ticker, qty, price=price, desc_clean=desc_clean))
+
+
+def _is_investment_tx(transaction: Dict[str, Any]) -> bool:
+    """True when a transaction represents a security trade, core sweep, or investment dividend.
+
+    A security trade (buy/sell/reinvest/disposal/core sweep) requires a ticker,
+    matching the investment detection used when emitting postings. A dividend is
     recognised from its transaction/investment type independently of whether the
     upstream payload supplied a ticker — the canonical transaction schema permits
     a null symbol — so a symbol-less dividend still posts to the brokerage
@@ -298,11 +358,14 @@ def _is_investment_tx(transaction: Dict[str, Any]) -> bool:
     it = clean_api_text(transaction.get("investment_type") or "").strip().lower()
     if "dividend" in tt or "dividend" in it:
         return True
-    if not _clean_ticker(transaction.get("symbol")):
-        return False
+    if _is_commodity_trade_tx(transaction):
+        return True
+    t_name = clean_api_text(transaction.get("account_name") or "").strip().lower()
+    acct_type = clean_api_text(transaction.get("account_type") or "").strip().lower()
     return (
-        tt in ("buy", "sell", "reinvest", "disposal")
-        or it in ("buy", "sell", "reinvest", "disposal")
+        tt in ("cash in", "cash out")
+        or any(w in acct_type for w in _INVESTMENT_ACCOUNT_WORDS)
+        or any(w in t_name for w in _INVESTMENT_ACCOUNT_WORDS if w != "other")
     )
 
 
@@ -592,8 +655,9 @@ def _calculate_account_transaction_totals(
 
         primary_account = mapper.resolve_account(firm, name, resolved_id, acct_type)
         amount = float(tx.get("amount") or 0.0)
+        tx_type_clean = clean_api_text(tx.get("transaction_type") or "").strip().lower()
         is_credit = bool(tx.get("is_credit"))
-        is_cash_in = bool(tx.get("is_cash_in"))
+        is_cash_in = bool(tx.get("is_cash_in")) or tx_type_clean == "cash in"
         is_income = bool(tx.get("is_income"))
         is_liability = primary_account.startswith("Liabilities") or (not is_asset)
 
@@ -917,14 +981,7 @@ class BeancountGenerator:
         """Resolve transaction accounts that receive commodity (ticker) postings."""
         commodity_tx_accounts: Set[str] = set()
         for tx in transactions.transactions:
-            if not _clean_ticker(tx.get("symbol")):
-                continue
-            tt = clean_api_text(tx.get("transaction_type") or "").strip().lower()
-            it = clean_api_text(tx.get("investment_type") or "").strip().lower()
-            if not (
-                tt in ("buy", "sell", "reinvest", "disposal")
-                or it in ("buy", "sell", "reinvest", "disposal")
-            ):
+            if not _is_commodity_trade_tx(tx):
                 continue
             firm, name, acct_type, resolved_id = _resolve_account_from_tx(tx, acct_lookup)
             commodity_tx_accounts.add(
@@ -1239,8 +1296,12 @@ class BeancountGenerator:
 
         tx_type = clean_api_text(tx.get("transaction_type") or "").strip().lower()
         inv_type = clean_api_text(tx.get("investment_type") or "").strip().lower()
-        is_tx_buy = tx_type in ("buy", "reinvest") or inv_type in ("buy", "reinvest")
-        is_tx_sell = tx_type in ("sell", "disposal") or inv_type in ("sell", "disposal")
+        tx_raw_price = tx.get("price")
+        tx_price = abs(float(tx_raw_price)) if tx_raw_price is not None else 0.0
+        desc_clean = _clean_tx_description(tx)
+        is_tx_buy, is_tx_sell = _classify_buy_sell(
+            tx_type, inv_type, t_ticker, tx_qty, price=tx_price, desc_clean=desc_clean,
+        )
         if not (is_tx_buy or is_tx_sell):
             return None
 
@@ -1248,8 +1309,6 @@ class BeancountGenerator:
         tx_b_account = self.mapper.resolve_account(
             tx_firm, tx_acct_name, tx_aid, account_type=tx_acct_type
         )
-        tx_raw_price = tx.get("price")
-        tx_price = abs(float(tx_raw_price)) if tx_raw_price is not None else 0.0
         # A valid trade may report quantity and amount but omit price. Derive the
         # per-unit price from amount / quantity — mirroring _emit_investment_sell /
         # _emit_investment_buy — so the reconstructed opening lot is costed and a
@@ -1600,17 +1659,17 @@ class BeancountGenerator:
         cat_clean: str,
         ticker: str,
         qty: float,
+        price: float = 0.0,
+        desc_clean: str = "",
     ) -> Tuple[bool, bool, bool]:
         """Classify a transaction as (is_buy, is_sell, is_dividend)."""
-        is_buy = (
-            (tx_type_clean in ("buy", "reinvest") or inv_type_clean in ("buy", "reinvest"))
-            and bool(ticker)
-            and qty > 0
-        )
-        is_sell = (
-            (tx_type_clean in ("sell", "disposal") or inv_type_clean in ("sell", "disposal"))
-            and bool(ticker)
-            and qty > 0
+        is_buy, is_sell = _classify_buy_sell(
+            tx_type_clean,
+            inv_type_clean,
+            ticker,
+            qty,
+            price=price,
+            desc_clean=desc_clean,
         )
         is_dividend = (
             "dividend" in tx_type_clean
@@ -1662,6 +1721,7 @@ class BeancountGenerator:
 
         tx_type_clean = clean_api_text(tx.get("transaction_type") or "").strip().lower()
         inv_type_clean = clean_api_text(tx.get("investment_type") or "").strip().lower()
+        desc_clean = _clean_tx_description(tx)
         cat_clean = clean_api_text(cat_name or "").lower()
         ticker = _clean_ticker(tx.get("symbol"))
         raw_qty = tx.get("quantity")
@@ -1672,7 +1732,13 @@ class BeancountGenerator:
         tag_str = self._tx_tag_str(tx_id)
 
         is_buy, is_sell, is_dividend = self._classify_investment_tx(
-            tx_type_clean, inv_type_clean, cat_clean, ticker, qty
+            tx_type_clean,
+            inv_type_clean,
+            cat_clean,
+            ticker,
+            qty,
+            price=price,
+            desc_clean=desc_clean,
         )
 
         # Payee/narration for investment transactions (unused by standard handling).
@@ -1689,7 +1755,7 @@ class BeancountGenerator:
             "cat_name": cat_name,
             "amount": amount,
             "is_credit": bool(tx.get("is_credit")),
-            "is_cash_in": bool(tx.get("is_cash_in")),
+            "is_cash_in": bool(tx.get("is_cash_in")) or tx_type_clean == "cash in",
             "is_income": bool(tx.get("is_income")),
             "is_spending": bool(tx.get("is_spending", False)),
             "tx_type_clean": tx_type_clean,
