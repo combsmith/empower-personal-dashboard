@@ -15,7 +15,6 @@ class EmpowerError(Exception):
         response_body: Optional[str] = None,
         error_code: Optional[int] = None,
     ):
-        """Initialize the exception with a message and optional context."""
         super().__init__(message)
         self.message = message
         self.status_code = status_code
@@ -23,7 +22,6 @@ class EmpowerError(Exception):
         self.error_code = error_code
 
     def __str__(self) -> str:
-        """Return a formatted error message including error code if available."""
         if self.error_code:
             return f"[Error {self.error_code}] {self.message}"
         return self.message
@@ -37,7 +35,6 @@ class RequireTwoFactorException(EmpowerError):
         message: str = "Two-factor authentication required.",
         available_methods: Optional[List[Dict[str, Any]]] = None,
     ):
-        """Initialize with default message and available 2FA methods."""
         super().__init__(message)
         self.available_methods = available_methods or []
 

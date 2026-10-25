@@ -660,7 +660,6 @@ class BeancountMapper:
     """Handles mapping of Empower accounts, categories, and payee rules to Beancount accounts."""
 
     def __init__(self, mapping_path: Optional[Union[str, Path]] = None):
-        """Initialize mapper with optional path to a JSON mapping file."""
         self.accounts: Dict[str, str] = {}
         self.categories: Dict[str, str] = {}
         self.regex_rules: List[Dict[str, str]] = []
@@ -1057,7 +1056,6 @@ class BeancountGenerator:
     """Generates Beancount directives and ledger files from Empower data models."""
 
     def __init__(self, mapper: Optional[BeancountMapper] = None):
-        """Initialize the generator with an optional account/category mapper."""
         self.mapper = mapper or BeancountMapper()
 
     def generate_main_bean(self, additional_includes: Optional[List[str]] = None) -> str:
@@ -1163,7 +1161,6 @@ class BeancountGenerator:
         lines: List[str],
         include_pads: bool,
     ) -> None:
-        """Emit Beancount open directives for accounts from balance data."""
         if not (balances and balances.accounts):
             return
         for acct in balances.accounts:
@@ -1188,7 +1185,6 @@ class BeancountGenerator:
         lines: List[str],
         include_pads: bool,
     ) -> None:
-        """Emit Beancount open directives for accounts from holding data."""
         if not (holdings and holdings.holdings):
             return
         for h in holdings.holdings:
@@ -1228,7 +1224,6 @@ class BeancountGenerator:
         seen_accounts: Set[str],
         lines: List[str],
     ) -> None:
-        """Emit Beancount open directives for accounts from transaction data."""
         if not (transactions and transactions.transactions):
             return
         commodity_tx_accounts = self._collect_commodity_tx_accounts(transactions, acct_lookup)
@@ -1504,15 +1499,20 @@ class BeancountGenerator:
             prior_start = m.group(1).strip()
         else:
             # No marker (legacy file, or a body stripped of its header): derive the
-            # earliest existing *opening-lot* date instead. Only directives that
-            # post to ``Equity:Opening-Balances`` are reconstructed opening lots, so
-            # restricting to those avoids mistaking a later snapshot/price directive
-            # for the window boundary.
+            # earliest existing *opening-lot* date instead. Restrict to blocks
+            # carrying ``empower_holding:`` (excluding shortfall reconciliations)
+            # so cash ``pad ... Equity:Opening-Balances`` directives in single-file
+            # ledgers or later snapshot/price directives are not mistaken for the
+            # reconstructed window boundary.
             opening_dates = [
                 block_match.group(1)
                 for block in re.split(r"\n\s*\n", existing_content)
-                if ACCT_OPENING_BALANCES in block
-                for block_match in [re.match(r"\s*(\d{4}-\d{2}-\d{2})\b", block)]
+                if (
+                    ACCT_OPENING_BALANCES in block
+                    and "empower_holding:" in block
+                    and "Snapshot Shortfall Reconciliation" not in block
+                )
+                for block_match in [re.search(r"^\s*(\d{4}-\d{2}-\d{2})\s+\*", block, re.MULTILINE)]
                 if block_match
             ]
             if not opening_dates:
@@ -1526,6 +1526,51 @@ class BeancountGenerator:
                 f"window into the past would leave the existing opening lot stale; "
                 f"regenerate the ledger instead of appending."
             )
+
+    @staticmethod
+    def _parse_existing_holdings_state(
+        existing_content: Optional[str],
+    ) -> Tuple[Set[str], Dict[str, float], Dict[str, List[Tuple[str, float]]], Dict[str, str]]:
+        """Parse existing opening lots, shortfall reconciliations, and balance assertion dates."""
+        existing_keys: Set[str] = set()
+        existing_opening_qty: Dict[str, float] = {}
+        existing_reconciliations: Dict[str, List[Tuple[str, float]]] = {}
+        latest_balance_dates: Dict[str, str] = {}
+        if not existing_content:
+            return existing_keys, existing_opening_qty, existing_reconciliations, latest_balance_dates
+
+        for match in re.finditer(
+            r"^\s*(\d{4}-\d{2}-\d{2})\s+balance\s+(\S+)\s+-?\d+(?:\.\d+)?\s+([A-Z0-9.\-]+)\b",
+            existing_content,
+            re.MULTILINE,
+        ):
+            bal_date, b_acct, ticker = match.group(1), match.group(2), match.group(3)
+            tag = f"{b_acct}:{ticker}"
+            if bal_date > latest_balance_dates.get(tag, ""):
+                latest_balance_dates[tag] = bal_date
+
+        for block in re.split(r"\n\s*\n", existing_content):
+            tag_match = re.search(r'empower_holding:\s*"([^"]+)"', block)
+            if not tag_match:
+                continue
+            tag = tag_match.group(1)
+            existing_keys.add(tag)
+            date_match = re.search(r"^\s*(\d{4}-\d{2}-\d{2})\s+\*", block, re.MULTILINE)
+            qty_match = re.search(
+                r"^\s+(?:Assets|Liabilities):[^\s]+\s+(-?\d+(?:\.\d+)?)\s+[A-Z0-9.\-]+",
+                block,
+                re.MULTILINE,
+            )
+            if not (date_match and qty_match):
+                continue
+            posting_date = date_match.group(1)
+            qty_val = _safe_float(qty_match.group(1))
+            if "Snapshot Shortfall Reconciliation" in block:
+                existing_reconciliations.setdefault(tag, []).append((posting_date, abs(qty_val)))
+            else:
+                existing_opening_qty[tag] = existing_opening_qty.get(tag, 0.0) + qty_val
+
+        return existing_keys, existing_opening_qty, existing_reconciliations, latest_balance_dates
 
     def generate_holdings_bean(
         self,
@@ -1560,24 +1605,12 @@ class BeancountGenerator:
 
         acct_lookup = _build_account_lookup(balances)
 
-        # Existing holding tags to skip on append
-        existing_keys: Set[str] = set()
-        existing_reconciled_keys: Set[Tuple[str, str]] = set()
-        if existing_content:
-            existing_keys = set(re.findall(r'empower_holding:\s*"([^"]+)"', existing_content))
-            # Extract existing shortfall reconciliations: keyed by (holding_tag, snapshot_date)
-            # for idempotency across multiple appends (date is the posting date, D+1).
-            # Directives are blank-line separated, so scan block by block instead of
-            # using a backtracking multi-line regex.
-            for block in existing_content.split("\n\n"):
-                header = re.search(
-                    r'^\s*(\d{4}-\d{2}-\d{2}) \* "[^"\n]*Snapshot Shortfall Reconciliation"',
-                    block,
-                    re.MULTILINE,
-                )
-                tag = re.search(r'empower_holding:\s*"([^"]+)"', block)
-                if header and tag:
-                    existing_reconciled_keys.add((tag.group(1), header.group(1)))
+        (
+            existing_keys,
+            existing_opening_qty,
+            existing_reconciliations,
+            latest_balance_dates,
+        ) = self._parse_existing_holdings_state(existing_content)
 
         net_buys, net_buy_meta = self._compute_net_buys(transactions, acct_lookup)
         aggregated_holdings = self._aggregate_snapshot_holdings(holdings, acct_lookup)
@@ -1585,7 +1618,11 @@ class BeancountGenerator:
         snapshot_date = holdings.as_of_date if holdings else None
         self._emit_snapshot_lots(
             aggregated_holdings, net_buys, net_buy_meta, transactions, existing_keys,
-            lot_date, snapshot_date, lines, existing_reconciled_keys,
+            lot_date, snapshot_date, lines,
+            existing_opening_qty=existing_opening_qty,
+            existing_reconciliations=existing_reconciliations,
+            latest_balance_dates=latest_balance_dates,
+            acct_lookup=acct_lookup,
         )
         self._emit_reconstructed_opening_lots(
             net_buys, net_buy_meta, aggregated_holdings, existing_keys, lot_date, transactions, lines
@@ -1725,7 +1762,6 @@ class BeancountGenerator:
         inventory never goes negative, even when the final net is non-negative.
         """
         def _tx_date(tx: Dict[str, Any]) -> str:
-            """Extract transaction date from transaction dict."""
             return str(tx.get("transaction_date") or tx.get("date") or "")
 
         cumulative: Dict[Tuple[str, str], float] = {}
@@ -1805,7 +1841,13 @@ class BeancountGenerator:
         net_buys: Dict[Tuple[str, str], float],
         net_buy_meta: Dict[Tuple[str, str], Dict[str, Any]],
     ) -> Optional[float]:
-        """Compute opening baseline quantity, returning None if the position should be omitted."""
+        """Compute opening baseline quantity, returning None if the position should be omitted.
+
+        Positions whose reconstructed baseline flips sign across the transaction
+        window (long-to-short or short-to-long) are explicitly scoped out because
+        Beancount's FIFO ``{}`` lot reduction cannot cross through zero in a
+        single trade posting.
+        """
         baseline_qty = snapshot_qty - net_buys.get(key, 0.0) if has_tx else snapshot_qty
         if has_tx and snapshot_qty > 0:
             max_deficit = net_buy_meta.get(key, {}).get("max_deficit", 0.0)
@@ -1820,6 +1862,48 @@ class BeancountGenerator:
             return None
         return baseline_qty
 
+    def _compute_existing_holding_topup(
+        self,
+        key: Tuple[str, str],
+        baseline_qty: float,
+        curr_opening_qty: float,
+        recons: List[Tuple[str, float]],
+        latest_balance_date: str,
+        lot_date: str,
+        transactions: Optional[DashboardTransactions],
+        acct_lookup: Dict[str, Dict[str, Any]],
+    ) -> Tuple[float, str]:
+        """Compute any additional opening-lot quantity and date needed for an existing holding."""
+        events: List[Tuple[str, int, float]] = []
+        if transactions and transactions.transactions:
+            for tx in transactions.transactions:
+                classified = self._classify_trade(tx, acct_lookup)
+                if classified is None or classified[0] != key:
+                    continue
+                _, tx_qty, is_tx_buy, _is_sell, _firm, _price = classified
+                tx_date = str(tx.get("transaction_date") or tx.get("date") or "")
+                events.append((tx_date, 0, tx_qty if is_tx_buy else -tx_qty))
+        for r_date, r_qty in recons:
+            events.append((r_date, 1, -r_qty))
+        events.sort(key=lambda e: (e[0], e[1]))
+
+        last_recon_plus_one = _offset_date(max(r[0] for r in recons), days=1) if recons else ""
+        cutoff_date = max(latest_balance_date, last_recon_plus_one)
+
+        running = curr_opening_qty
+        min_running = running
+        min_before_cutoff = running
+        for ev_date, _order, delta in events:
+            running += delta
+            if running < min_running:
+                min_running = running
+            if cutoff_date and ev_date < cutoff_date and running < min_before_cutoff:
+                min_before_cutoff = running
+
+        topup_qty = max(baseline_qty - curr_opening_qty, -min_running, 0.0)
+        topup_date = cutoff_date if (cutoff_date and min_before_cutoff >= -1e-6) else lot_date
+        return topup_qty, topup_date
+
     def _emit_snapshot_lots(
         self,
         aggregated_holdings: Dict[Tuple[str, str], Dict[str, Any]],
@@ -1830,11 +1914,19 @@ class BeancountGenerator:
         lot_date: str,
         snapshot_date: Optional[str],
         lines: List[str],
-        existing_reconciled_keys: Optional[Set[Tuple[str, str]]] = None,
+        *,
+        existing_opening_qty: Optional[Dict[str, float]] = None,
+        existing_reconciliations: Optional[Dict[str, List[Tuple[str, float]]]] = None,
+        latest_balance_dates: Optional[Dict[str, str]] = None,
+        acct_lookup: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> None:
         """Emit the baseline opening lot for each snapshot position acquired before the window."""
         has_tx = transactions is not None and bool(transactions.transactions)
-        already_reconciled_holdings = {k[0] for k in (existing_reconciled_keys or set())}
+        opening_qty_map = existing_opening_qty or {}
+        recon_map = existing_reconciliations or {}
+        bal_date_map = latest_balance_dates or {}
+        lookup = acct_lookup or {}
+
         for pos in sorted(
             aggregated_holdings.values(),
             key=lambda p: (p.get("b_account", ""), p.get("ticker", "")),
@@ -1849,34 +1941,51 @@ class BeancountGenerator:
             )
             if baseline_qty is None:
                 continue
-            # Flooring above ``snapshot - net_buys`` over-provisions the opening
-            # lot, so the reconstructed final quantity would exceed the asserted
-            # snapshot (unknown same-day sell/buy ordering). Record the surplus
-            # so an explicit shortfall reconciliation below brings the final
-            # quantity back to the snapshot.
-            floor_surplus = 0.0
-            if has_tx and snapshot_qty > 0:
-                floor_surplus = baseline_qty - (snapshot_qty - net_buys.get(key, 0.0))
+
+            force_cost = bool(net_buy_meta.get(key, {}).get("has_sell"))
+            recons = recon_map.get(holding_tag, [])
+            already_reconciled_qty = sum(r_qty for _, r_qty in recons)
 
             if holding_tag not in existing_keys:
                 # A sale against this ticker in the window reduces the lot with an
                 # empty ``{}`` cost spec, which Beancount matches only against costed
                 # lots; emit the baseline lot with a cost basis so the sale can book.
-                force_cost = bool(net_buy_meta.get(key, {}).get("has_sell"))
                 self._append_snapshot_lot(
                     lines, lot_date, pos.get("firm", _FIRM_BROKERAGE), ticker, holding_tag,
                     b_account, baseline_qty, snapshot_qty, pos.get("price", 0.0), pos.get("cost_basis"),
                     force_cost,
                 )
-            # Emit shortfall reconciliation even if the opening lot already exists
-            # (on append). It is applied once per holding: if any reconciliation for
-            # this holding_tag is already in the ledger, a later snapshot must not
-            # deduct the surplus again (it would break balance assertions).
-            if (round(floor_surplus, 6) > 0 and snapshot_date
-                    and holding_tag not in already_reconciled_holdings):
+                total_opening_qty = baseline_qty
+            else:
+                curr_opening_qty = opening_qty_map.get(holding_tag, baseline_qty)
+                if has_tx and snapshot_qty > 0:
+                    topup_qty, topup_date = self._compute_existing_holding_topup(
+                        key, baseline_qty, curr_opening_qty, recons,
+                        bal_date_map.get(holding_tag, ""), lot_date,
+                        transactions, lookup,
+                    )
+                    if round(topup_qty, 6) > 0:
+                        self._append_snapshot_lot(
+                            lines, topup_date, pos.get("firm", _FIRM_BROKERAGE), ticker, holding_tag,
+                            b_account, topup_qty, snapshot_qty, pos.get("price", 0.0), pos.get("cost_basis"),
+                            force_cost,
+                        )
+                        curr_opening_qty += topup_qty
+                total_opening_qty = curr_opening_qty
+
+            # Flooring above ``snapshot - net_buys`` over-provisions the opening
+            # lot, so the reconstructed final quantity would exceed the asserted
+            # snapshot (unknown same-day sell/buy ordering). Reconcile any
+            # remaining delta surplus not already disposed by a prior snapshot.
+            delta_surplus = 0.0
+            if has_tx and snapshot_qty > 0:
+                total_surplus = total_opening_qty - (snapshot_qty - net_buys.get(key, 0.0))
+                delta_surplus = total_surplus - already_reconciled_qty
+
+            if round(delta_surplus, 6) > 0 and snapshot_date:
                 self._append_shortfall_reconciliation(
                     lines, snapshot_date, pos.get("firm", _FIRM_BROKERAGE), ticker,
-                    holding_tag, b_account, floor_surplus, pos.get("price", 0.0),
+                    holding_tag, b_account, delta_surplus, pos.get("price", 0.0),
                 )
 
     def _append_shortfall_reconciliation(
@@ -2220,7 +2329,6 @@ class BeancountGenerator:
             lines.append(f'  empower_account_id: "{_escape_beancount_string(acct_id)}"\n')
 
     def _emit_investment_buy(self, ctx: Dict[str, Any], lines: List[str]) -> None:
-        """Emit transaction directive for a buy transaction."""
         primary_account = ctx["primary_account"]
         qty = ctx["qty"]
         price = ctx["price"]
@@ -2276,7 +2384,6 @@ class BeancountGenerator:
         lines.append("\n")
 
     def _emit_investment_sell(self, ctx: Dict[str, Any], lines: List[str]) -> None:
-        """Emit transaction directive for a sell transaction."""
         primary_account = ctx["primary_account"]
         qty = ctx["qty"]
         price = ctx["price"]
@@ -2302,7 +2409,6 @@ class BeancountGenerator:
         ])
 
     def _emit_investment_dividend(self, ctx: Dict[str, Any], lines: List[str]) -> None:
-        """Emit transaction directive for a dividend transaction."""
         dividend_acct = self.mapper.categories.get("Dividends") or ACCT_INCOME_DIVIDENDS
         self._emit_tx_header(
             lines, ctx["date"], ctx["inv_payee"], ctx["inv_narration"],
@@ -2322,7 +2428,6 @@ class BeancountGenerator:
         lines.append(f"  {dividend_acct:<36} {-cash:>8.2f} USD\n\n")
 
     def _emit_standard_tx(self, ctx: Dict[str, Any], lines: List[str]) -> None:
-        """Emit transaction directive for a standard (non-investment) transaction."""
         tx = ctx["tx"]
         cat_name = ctx["cat_name"]
         amount = ctx["amount"]
@@ -2417,7 +2522,6 @@ class BeancountGenerator:
     def _commit_staged_files(staged_files: List[Path], dest: Path) -> List[Path]:
         """Atomically commit staged files to destination directory."""
         def preflight() -> None:
-            """Validate that target paths are safe for overwriting."""
             for sf in staged_files:
                 target = dest / sf.name
                 _verify_not_symlink(target)

@@ -2604,6 +2604,30 @@ class TestCliCredentialsAndKeyring(unittest.TestCase):
         self.assertEqual(ret, 1)
         self.assertIn("Failed to store password in keyring: No keyring backend available", err.getvalue())
 
+    def test_run_beancount_export_invokes_reconcile_transaction_window(self):
+        from empower_personal_dashboard.cli import _run_beancount_export, parse_args
+        from empower_personal_dashboard.client import EmpowerDashboardClient
+
+        client = EmpowerDashboardClient(mock_mode=True)
+        balances = client.fetch_balances()
+        holdings = client.fetch_holdings()
+        transactions = client.fetch_transactions(start_date="2024-01-01", end_date="2024-06-30")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out_bean = Path(tmpdir) / "ledger.bean"
+            args = parse_args(["--beancount", "--output-beancount", str(out_bean), "--quiet"])
+            with patch.object(
+                client,
+                "reconcile_transaction_window",
+                wraps=client.reconcile_transaction_window,
+            ) as mock_reconcile:
+                _run_beancount_export(
+                    args, client, balances, holdings, transactions,
+                    offline_mode=True, progress_file=None,
+                )
+            mock_reconcile.assert_called_once_with(
+                transactions, holdings, policy="warn",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

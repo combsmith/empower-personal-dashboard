@@ -12,18 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-try:
-    from beancount import loader
-    _HAS_BEANCOUNT = True
-except ImportError as e:
-    # On Python 3.10+, beancount is required by the test extra, so every
-    # ImportError should bubble up. On 3.9, beancount is not available at all,
-    # so silently mark tests skipped.
-    import sys
-    if sys.version_info >= (3, 10):
-        raise
-    loader = None
-    _HAS_BEANCOUNT = False
+from beancount import loader
 
 from empower_personal_dashboard.beancount import BeancountGenerator
 from empower_personal_dashboard.exceptions import LedgerAppendError
@@ -101,296 +90,427 @@ def _vti_buy_transaction(start="2021-01-01", end="2024-10-01", quantity=20.0, pr
     )
 
 
-# Conditionally define beancount-dependent tests. On Python 3.9, where beancount
-# is not available, these classes are excluded from unittest discovery entirely
-# rather than being collected and then skipped at runtime.
-if _HAS_BEANCOUNT:
+class _BaseGeneratorTest(unittest.TestCase):
+    """Base class for tests that use BeancountGenerator."""
 
-    class _BaseGeneratorTest(unittest.TestCase):
-        """Base class for tests that use BeancountGenerator."""
+    def setUp(self):
+        self.generator = BeancountGenerator()
 
-        def setUp(self):
-            """Initialize the Beancount generator for each test."""
-            self.generator = BeancountGenerator()
 
-    class TestLedgerLoadRegression(_BaseGeneratorTest):
-        """The pre-existing lifecycle ledger must still load clean (loader harness sanity)."""
+class TestLedgerLoadRegression(_BaseGeneratorTest):
+    """The pre-existing lifecycle ledger must still load clean (loader harness sanity)."""
 
-        def test_full_lifecycle_single_file_loads(self):
-            """A complete lifecycle export must load cleanly through the Beancount loader."""
-            balances = _brokerage_balances()
-            holdings = _vti_holdings()
-            transactions = _vti_buy_transaction()
-            with tempfile.TemporaryDirectory() as tmp:
-                target = Path(tmp) / "ledger.bean"
-                self.generator.export_single_file(
-                    filepath=target, balances=balances, holdings=holdings,
-                    transactions=transactions, opening_date="2020-01-01",
-                )
-                assert_ledger_loads(self, target.read_text(encoding="utf-8"))
+    def test_full_lifecycle_single_file_loads(self):
+        """A complete lifecycle export must load cleanly through the Beancount loader."""
+        balances = _brokerage_balances()
+        holdings = _vti_holdings()
+        transactions = _vti_buy_transaction()
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "ledger.bean"
+            self.generator.export_single_file(
+                filepath=target, balances=balances, holdings=holdings,
+                transactions=transactions, opening_date="2020-01-01",
+            )
+            assert_ledger_loads(self, target.read_text(encoding="utf-8"))
 
-    class TestShortPositions(_BaseGeneratorTest):
-        """Item 1 — negative snapshot quantities preserved end to end."""
 
-        def test_current_short_emits_negative_lot_and_assertion_and_loads(self):
-            """Negative snapshot quantities produce negative opening lots that load cleanly."""
-            # A currently-held short: the snapshot reports a negative quantity and no
-            # offsetting trades. It must survive aggregation, produce a negative
-            # opening lot, and a negative unit balance assertion that loads.
-            holdings = DashboardHoldings(
-                as_of_date="2024-10-01",
-                total_value=-1200.0,
+class TestShortPositions(_BaseGeneratorTest):
+    """Item 1 — negative snapshot quantities preserved end to end."""
+
+    def test_current_short_emits_negative_lot_and_assertion_and_loads(self):
+        """Negative snapshot quantities produce negative opening lots that load cleanly."""
+        # A currently-held short: the snapshot reports a negative quantity and no
+        # offsetting trades. It must survive aggregation, produce a negative
+        # opening lot, and a negative unit balance assertion that loads.
+        holdings = DashboardHoldings(
+            as_of_date="2024-10-01",
+            total_value=-1200.0,
+            holdings=[
+                {"user_account_id": 5001, "account_name": "Taxable Brokerage",
+                 "firm_name": "Acme Brokerage", "ticker": "GE",
+                 "quantity": -10.0, "price": 12.0},
+            ],
+        )
+        balances = _brokerage_balances(balance=-1200.0)
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "short.bean"
+            self.generator.export_single_file(
+                filepath=target, balances=balances, holdings=holdings,
+            )
+            content = target.read_text(encoding="utf-8")
+        self.assertIn("-10.000000 GE", content)
+        self.assertRegex(content, r"balance\s+Assets:AcmeBrokerage:TaxableBrokerage\s+-10\.000000 GE")
+        assert_ledger_loads(self, content)
+
+    def test_current_short_distinct_from_fully_sold_security(self):
+        """Current shorts are distinct from pre-window longs that were fully sold."""
+        # SHORTCO is a current short (in the snapshot, negative) while SOLDCO is a
+        # pre-window long sold to zero (absent from the snapshot, net-sold). The
+        # short yields a negative opening lot; the fully-sold yields a positive
+        # reconstructed opening lot.
+        holdings = DashboardHoldings(
+            as_of_date="2024-10-01", total_value=-600.0,
+            holdings=[
+                {"user_account_id": 5001, "account_name": "Taxable Brokerage",
+                 "firm_name": "Acme Brokerage", "ticker": "SHORTCO",
+                 "quantity": -5.0, "price": 12.0},
+            ],
+        )
+        transactions = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-01", total_transactions=1,
+            money_in=1000.0, money_out=0.0, net_cashflow=1000.0,
+            transactions=[
+                {"user_transaction_id": "tx-sold", "account_id": "ACC-BRK-001",
+                 "user_account_id": 5001, "account_name": "Taxable Brokerage",
+                 "firm_name": "Acme Brokerage", "transaction_date": "2024-05-01",
+                 "description": "Sell SOLDCO", "amount": 1000.0, "is_cash_in": True,
+                 "is_credit": True, "transaction_type": "Sell",
+                 "investment_type": "Sell", "symbol": "SOLDCO",
+                 "price": 100.0, "quantity": 10.0},
+            ],
+        )
+        balances = _brokerage_balances(balance=-600.0)
+        holdings_out = self.generator.generate_holdings_bean(
+            holdings=holdings, balances=balances, transactions=transactions,
+        )
+        self.assertIn('"SHORTCO Position"', holdings_out)
+        self.assertRegex(holdings_out, r"-5\.000000 SHORTCO")
+        self.assertIn('"SOLDCO Opening Position"', holdings_out)
+        self.assertIn("10.000000 SOLDCO", holdings_out)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "mix.bean"
+            self.generator.export_single_file(
+                filepath=target, balances=balances, holdings=holdings,
+                transactions=transactions,
+            )
+            assert_ledger_loads(self, target.read_text(encoding="utf-8"))
+
+
+class TestDeficitFloorShortfall(_BaseGeneratorTest):
+    """Item 4 — a deficit-floored opening lot must still match the asserted snapshot."""
+
+    def test_deficit_floor_reconciles_to_snapshot_and_loads(self):
+        """Deficit-floor adjustments reconcile to the snapshot and load cleanly."""
+        # Snapshot holds 5 GE. The window sells 10 then buys 10 (net 0), so the
+        # running deficit (10) floors the opening lot to 10 — which would leave a
+        # final quantity of 10, contradicting the 5-share snapshot assertion.
+        # An explicit shortfall reconciliation must bring the final to 5.
+        holdings = DashboardHoldings(
+            as_of_date="2024-10-01", total_value=60.0,
+            holdings=[
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "ticker": "GE", "quantity": 5.0, "price": 12.0},
+            ],
+        )
+        churn = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-01", total_transactions=2,
+            money_in=0.0, money_out=0.0, net_cashflow=0.0,
+            transactions=[
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "account_type": "investment", "transaction_date": "2024-03-01",
+                 "description": "Sell GE", "amount": 100.0, "is_cash_in": True,
+                 "is_credit": True, "transaction_type": "Sell", "symbol": "GE",
+                 "price": 10.0, "quantity": 10.0},
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "account_type": "investment", "transaction_date": "2024-08-01",
+                 "description": "Buy GE", "amount": 120.0, "is_cash_out": True,
+                 "transaction_type": "Buy", "symbol": "GE",
+                 "price": 12.0, "quantity": 10.0},
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "deficit.bean"
+            self.generator.export_single_file(
+                filepath=target, holdings=holdings, transactions=churn,
+            )
+            content = target.read_text(encoding="utf-8")
+        # The floored opening lot of 10 is still emitted...
+        self.assertIn("10.000000 GE {", content)
+        # ...and the ledger loads: the shortfall reconciliation makes the final
+        # quantity equal the 5-share snapshot assertion.
+        assert_ledger_loads(self, content)
+
+    def test_deficit_floor_with_negative_naive_baseline_and_short_reconciles_and_loads(self):
+        """Long position with naive_baseline < 0 and max_deficit > 0 delays assertion to D+2; short stays at D+1 and loads."""
+        # Snapshot holds 5 GE (long) and -5 SHORTCO (short). For GE, selling 10
+        # then buying 20 gives net_buys = +10, naive_baseline = -5, max_deficit = 10
+        # -> floored baseline = 10 and a -15 shortfall reconciliation on D+1 (assertion D+2).
+        # SHORTCO has no shortfall reconciliation and is asserted at D+1.
+        holdings = DashboardHoldings(
+            as_of_date="2024-10-01", total_value=0.0,
+            holdings=[
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "ticker": "GE", "quantity": 5.0, "price": 12.0},
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "ticker": "SHORTCO", "quantity": -5.0, "price": 12.0},
+            ],
+        )
+        churn = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-01", total_transactions=2,
+            money_in=100.0, money_out=240.0, net_cashflow=-140.0,
+            transactions=[
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "account_type": "investment", "transaction_date": "2024-03-01",
+                 "description": "Sell GE", "amount": 100.0, "is_cash_in": True,
+                 "is_credit": True, "transaction_type": "Sell", "symbol": "GE",
+                 "price": 10.0, "quantity": 10.0},
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "account_type": "investment", "transaction_date": "2024-08-01",
+                 "description": "Buy GE", "amount": 240.0, "is_cash_out": True,
+                 "transaction_type": "Buy", "symbol": "GE",
+                 "price": 12.0, "quantity": 20.0},
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "deficit_neg_naive.bean"
+            self.generator.export_single_file(
+                filepath=target, holdings=holdings, transactions=churn,
+            )
+            content = target.read_text(encoding="utf-8")
+        self.assertIn("10.000000 GE {", content)
+        self.assertIn("-15.000000 GE {}", content)
+        self.assertIn("2024-10-03 balance Assets:AcmeBrokerage:TaxableBrokerage 5.000000 GE", content)
+        self.assertIn("2024-10-02 balance Assets:AcmeBrokerage:TaxableBrokerage -5.000000 SHORTCO", content)
+        assert_ledger_loads(self, content)
+
+    def test_subsequent_append_with_changed_and_deeper_surplus_reconciles_and_loads(self):
+        """Appending a later snapshot whose window has a larger surplus or deeper deficit emits delta reconciliation and loads."""
+        def holdings(as_of, qty=5.0):
+            return DashboardHoldings(
+                as_of_date=as_of, total_value=qty * 12.0,
                 holdings=[
-                    {"user_account_id": 5001, "account_name": "Taxable Brokerage",
-                     "firm_name": "Acme Brokerage", "ticker": "GE",
-                     "quantity": -10.0, "price": 12.0},
-                ],
-            )
-            balances = _brokerage_balances(balance=-1200.0)
-            with tempfile.TemporaryDirectory() as tmp:
-                target = Path(tmp) / "short.bean"
-                self.generator.export_single_file(
-                    filepath=target, balances=balances, holdings=holdings,
-                )
-                content = target.read_text(encoding="utf-8")
-            self.assertIn("-10.000000 GE", content)
-            self.assertRegex(content, r"balance\s+Assets:AcmeBrokerage:TaxableBrokerage\s+-10\.000000 GE")
-            assert_ledger_loads(self, content)
-
-        def test_current_short_distinct_from_fully_sold_security(self):
-            """Current shorts are distinct from pre-window longs that were fully sold."""
-            # SHORTCO is a current short (in the snapshot, negative) while SOLDCO is a
-            # pre-window long sold to zero (absent from the snapshot, net-sold). The
-            # short yields a negative opening lot; the fully-sold yields a positive
-            # reconstructed opening lot.
-            holdings = DashboardHoldings(
-                as_of_date="2024-10-01", total_value=-600.0,
-                holdings=[
-                    {"user_account_id": 5001, "account_name": "Taxable Brokerage",
-                     "firm_name": "Acme Brokerage", "ticker": "SHORTCO",
-                     "quantity": -5.0, "price": 12.0},
-                ],
-            )
-            transactions = DashboardTransactions(
-                start_date="2024-01-01", end_date="2024-10-01", total_transactions=1,
-                money_in=1000.0, money_out=0.0, net_cashflow=1000.0,
-                transactions=[
-                    {"user_transaction_id": "tx-sold", "account_id": "ACC-BRK-001",
-                     "user_account_id": 5001, "account_name": "Taxable Brokerage",
-                     "firm_name": "Acme Brokerage", "transaction_date": "2024-05-01",
-                     "description": "Sell SOLDCO", "amount": 1000.0, "is_cash_in": True,
-                     "is_credit": True, "transaction_type": "Sell",
-                     "investment_type": "Sell", "symbol": "SOLDCO",
-                     "price": 100.0, "quantity": 10.0},
-                ],
-            )
-            balances = _brokerage_balances(balance=-600.0)
-            holdings_out = self.generator.generate_holdings_bean(
-                holdings=holdings, balances=balances, transactions=transactions,
-            )
-            self.assertIn('"SHORTCO Position"', holdings_out)
-            self.assertRegex(holdings_out, r"-5\.000000 SHORTCO")
-            self.assertIn('"SOLDCO Opening Position"', holdings_out)
-            self.assertIn("10.000000 SOLDCO", holdings_out)
-
-            with tempfile.TemporaryDirectory() as tmp:
-                target = Path(tmp) / "mix.bean"
-                self.generator.export_single_file(
-                    filepath=target, balances=balances, holdings=holdings,
-                    transactions=transactions,
-                )
-                assert_ledger_loads(self, target.read_text(encoding="utf-8"))
-
-    class TestDeficitFloorShortfall(_BaseGeneratorTest):
-        """Item 4 — a deficit-floored opening lot must still match the asserted snapshot."""
-
-        def test_deficit_floor_reconciles_to_snapshot_and_loads(self):
-            """Deficit-floor adjustments reconcile to the snapshot and load cleanly."""
-            # Snapshot holds 5 GE. The window sells 10 then buys 10 (net 0), so the
-            # running deficit (10) floors the opening lot to 10 — which would leave a
-            # final quantity of 10, contradicting the 5-share snapshot assertion.
-            # An explicit shortfall reconciliation must bring the final to 5.
-            holdings = DashboardHoldings(
-                as_of_date="2024-10-01", total_value=60.0,
-                holdings=[
                     {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
-                     "ticker": "GE", "quantity": 5.0, "price": 12.0},
-                ],
-            )
-            churn = DashboardTransactions(
-                start_date="2024-01-01", end_date="2024-10-01", total_transactions=2,
-                money_in=0.0, money_out=0.0, net_cashflow=0.0,
-                transactions=[
-                    {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
-                     "account_type": "investment", "transaction_date": "2024-03-01",
-                     "description": "Sell GE", "amount": 100.0, "is_cash_in": True,
-                     "is_credit": True, "transaction_type": "Sell", "symbol": "GE",
-                     "price": 10.0, "quantity": 10.0},
-                    {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
-                     "account_type": "investment", "transaction_date": "2024-08-01",
-                     "description": "Buy GE", "amount": 120.0, "is_cash_out": True,
-                     "transaction_type": "Buy", "symbol": "GE",
-                     "price": 12.0, "quantity": 10.0},
-                ],
-            )
-            with tempfile.TemporaryDirectory() as tmp:
-                target = Path(tmp) / "deficit.bean"
-                self.generator.export_single_file(
-                    filepath=target, holdings=holdings, transactions=churn,
-                )
-                content = target.read_text(encoding="utf-8")
-            # The floored opening lot of 10 is still emitted...
-            self.assertIn("10.000000 GE {", content)
-            # ...and the ledger loads: the shortfall reconciliation makes the final
-            # quantity equal the 5-share snapshot assertion.
-            assert_ledger_loads(self, content)
-
-        def test_deficit_floor_with_negative_naive_baseline_reconciles_and_loads(self):
-            """Long position with naive_baseline < 0 and max_deficit > 0 delays assertion to D+2 and loads."""
-            # Snapshot holds 5 GE. Selling 10 then buying 20 gives net_buys = +10,
-            # naive_baseline = -5, max_deficit = 10 -> floored baseline = 10 and
-            # a -15 shortfall reconciliation on D+1. The assertion must be dated D+2.
-            holdings = DashboardHoldings(
-                as_of_date="2024-10-01", total_value=60.0,
-                holdings=[
-                    {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
-                     "ticker": "GE", "quantity": 5.0, "price": 12.0},
-                ],
-            )
-            churn = DashboardTransactions(
-                start_date="2024-01-01", end_date="2024-10-01", total_transactions=2,
-                money_in=100.0, money_out=240.0, net_cashflow=-140.0,
-                transactions=[
-                    {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
-                     "account_type": "investment", "transaction_date": "2024-03-01",
-                     "description": "Sell GE", "amount": 100.0, "is_cash_in": True,
-                     "is_credit": True, "transaction_type": "Sell", "symbol": "GE",
-                     "price": 10.0, "quantity": 10.0},
-                    {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
-                     "account_type": "investment", "transaction_date": "2024-08-01",
-                     "description": "Buy GE", "amount": 240.0, "is_cash_out": True,
-                     "transaction_type": "Buy", "symbol": "GE",
-                     "price": 12.0, "quantity": 20.0},
-                ],
-            )
-            with tempfile.TemporaryDirectory() as tmp:
-                target = Path(tmp) / "deficit_neg_naive.bean"
-                self.generator.export_single_file(
-                    filepath=target, holdings=holdings, transactions=churn,
-                )
-                content = target.read_text(encoding="utf-8")
-            self.assertIn("10.000000 GE {", content)
-            self.assertIn("-15.000000 GE {}", content)
-            self.assertIn("2024-10-03 balance Assets:AcmeBrokerage:TaxableBrokerage 5.000000 GE", content)
-            assert_ledger_loads(self, content)
-
-    class TestBackwardAppend(_BaseGeneratorTest):
-        """Item 3 — an append that broadens the window into the past is rejected."""
-
-        def setUp(self):
-            """Initialize test fixtures for append validation."""
-            super().setUp()
-            self.balances = _brokerage_balances()
-            self.holdings = _vti_holdings(quantity=60.0, price=280.0, cost_basis=12600.0)
-
-        def _txns(self, start, end, date):
-            """Create synthetic transaction data for append testing."""
-            return DashboardTransactions(
-                start_date=start, end_date=end, total_transactions=1,
-                money_in=0.0, money_out=4000.0, net_cashflow=-4000.0,
-                transactions=[
-                    {"user_transaction_id": f"tx-{date}", "account_id": "ACC-BRK-001",
-                     "user_account_id": 5001, "account_name": "Taxable Brokerage",
-                     "firm_name": "Acme Brokerage", "transaction_date": date,
-                     "description": "Buy VTI", "amount": 4000.0, "is_cash_out": True,
-                     "transaction_type": "Buy", "investment_type": "Buy",
-                     "symbol": "VTI", "price": 200.0, "quantity": 20.0},
+                     "ticker": "GE", "quantity": qty, "price": 12.0},
                 ],
             )
 
-        def test_backward_broadened_append_is_rejected(self):
-            """Appends that broaden the window into the past are rejected before modifying files."""
-            with tempfile.TemporaryDirectory() as tmp:
-                dest = Path(tmp) / "ledger"
-                self.generator.export_modular_ledger(
-                    destination_dir=dest, balances=self.balances, holdings=self.holdings,
-                    transactions=self._txns("2022-01-01", "2024-10-01", "2022-06-15"),
-                    opening_date="2022-01-01",
-                )
-                # A second export whose opening lot predates the persisted window start
-                # must be rejected rather than silently leaving the stale opening lot.
-                with self.assertRaises(LedgerAppendError):
-                    self.generator.export_modular_ledger(
-                        destination_dir=dest, balances=self.balances, holdings=self.holdings,
-                        transactions=self._txns("2020-01-01", "2024-10-01", "2020-06-15"),
-                        opening_date="2020-01-01",
-                    )
+        base_txs = [
+            {"user_transaction_id": "tx-ge-1", "account_name": "Taxable Brokerage",
+             "firm_name": "Acme Brokerage", "account_type": "investment",
+             "transaction_date": "2024-03-01", "description": "Sell GE",
+             "amount": 100.0, "is_cash_in": True, "is_credit": True,
+             "transaction_type": "Sell", "symbol": "GE", "price": 10.0, "quantity": 10.0},
+            {"user_transaction_id": "tx-ge-2", "account_name": "Taxable Brokerage",
+             "firm_name": "Acme Brokerage", "account_type": "investment",
+             "transaction_date": "2024-08-01", "description": "Buy GE",
+             "amount": 120.0, "is_cash_out": True, "transaction_type": "Buy",
+             "symbol": "GE", "price": 12.0, "quantity": 10.0},
+        ]
+        # Snapshot 1 (2024-10-01): baseline=10, floor_surplus=5 -> reconciles -5 on 2024-10-02
+        txns_1 = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-01", total_transactions=2,
+            money_in=100.0, money_out=120.0, net_cashflow=-20.0,
+            transactions=base_txs,
+        )
+        # Snapshot 2a (2024-10-15): same opening lot (10), but an additional buy of 2
+        # with snapshot=5 raises floor_surplus from 5 to 7 -> delta surplus = 2 on 2024-10-16.
+        txns_2a = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-15", total_transactions=3,
+            money_in=100.0, money_out=144.0, net_cashflow=-44.0,
+            transactions=base_txs + [
+                {"user_transaction_id": "tx-ge-3", "account_name": "Taxable Brokerage",
+                 "firm_name": "Acme Brokerage", "account_type": "investment",
+                 "transaction_date": "2024-10-08", "description": "Buy GE",
+                 "amount": 24.0, "is_cash_out": True, "transaction_type": "Buy",
+                 "symbol": "GE", "price": 12.0, "quantity": 2.0},
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_a = Path(tmp) / "delta_surplus.bean"
+            self.generator.export_single_file(
+                filepath=ledger_a, holdings=holdings("2024-10-01"), transactions=txns_1,
+            )
+            self.generator.export_single_file(
+                filepath=ledger_a, holdings=holdings("2024-10-15"), transactions=txns_2a,
+            )
+            content_a = ledger_a.read_text(encoding="utf-8")
+            self.assertEqual(content_a.count("Snapshot Shortfall Reconciliation"), 2)
+            self.assertIn("-2.000000 GE {}", content_a)
+            assert_ledger_loads(self, content_a)
 
-        def test_forward_append_still_works_and_loads(self):
-            """Forward appends with matching window bounds load cleanly."""
-            with tempfile.TemporaryDirectory() as tmp:
-                dest = Path(tmp) / "ledger"
+            # Snapshot 2b (2024-10-15): deeper post-snapshot deficit (sell 12 on 2024-10-05,
+            # buy 12 on 2024-10-10) requires a top-up lot (+7 GE) and delta reconciliation (-7 GE).
+            txns_2b = DashboardTransactions(
+                start_date="2024-01-01", end_date="2024-10-15", total_transactions=4,
+                money_in=244.0, money_out=264.0, net_cashflow=-20.0,
+                transactions=base_txs + [
+                    {"user_transaction_id": "tx-ge-4", "account_name": "Taxable Brokerage",
+                     "firm_name": "Acme Brokerage", "account_type": "investment",
+                     "transaction_date": "2024-10-05", "description": "Sell GE",
+                     "amount": 144.0, "is_cash_in": True, "is_credit": True,
+                     "transaction_type": "Sell", "symbol": "GE", "price": 12.0, "quantity": 12.0},
+                    {"user_transaction_id": "tx-ge-5", "account_name": "Taxable Brokerage",
+                     "firm_name": "Acme Brokerage", "account_type": "investment",
+                     "transaction_date": "2024-10-10", "description": "Buy GE",
+                     "amount": 144.0, "is_cash_out": True, "transaction_type": "Buy",
+                     "symbol": "GE", "price": 12.0, "quantity": 12.0},
+                ],
+            )
+            ledger_b = Path(tmp) / "deeper_deficit.bean"
+            self.generator.export_single_file(
+                filepath=ledger_b, holdings=holdings("2024-10-01"), transactions=txns_1,
+            )
+            self.generator.export_single_file(
+                filepath=ledger_b, holdings=holdings("2024-10-15"), transactions=txns_2b,
+            )
+            content_b = ledger_b.read_text(encoding="utf-8")
+            self.assertEqual(content_b.count("Snapshot Shortfall Reconciliation"), 2)
+            assert_ledger_loads(self, content_b)
+
+
+class TestBackwardAppend(_BaseGeneratorTest):
+    """Item 3 — an append that broadens the window into the past is rejected."""
+
+    def setUp(self):
+        super().setUp()
+        self.balances = _brokerage_balances()
+        self.holdings = _vti_holdings(quantity=60.0, price=280.0, cost_basis=12600.0)
+
+    def _txns(self, start, end, date):
+        return DashboardTransactions(
+            start_date=start, end_date=end, total_transactions=1,
+            money_in=0.0, money_out=4000.0, net_cashflow=-4000.0,
+            transactions=[
+                {"user_transaction_id": f"tx-{date}", "account_id": "ACC-BRK-001",
+                 "user_account_id": 5001, "account_name": "Taxable Brokerage",
+                 "firm_name": "Acme Brokerage", "transaction_date": date,
+                 "description": "Buy VTI", "amount": 4000.0, "is_cash_out": True,
+                 "transaction_type": "Buy", "investment_type": "Buy",
+                 "symbol": "VTI", "price": 200.0, "quantity": 20.0},
+            ],
+        )
+
+    def test_backward_broadened_append_is_rejected(self):
+        """Appends that broaden the window into the past are rejected before modifying files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "ledger"
+            self.generator.export_modular_ledger(
+                destination_dir=dest, balances=self.balances, holdings=self.holdings,
+                transactions=self._txns("2022-01-01", "2024-10-01", "2022-06-15"),
+                opening_date="2022-01-01",
+            )
+            # A second export whose opening lot predates the persisted window start
+            # must be rejected rather than silently leaving the stale opening lot.
+            with self.assertRaises(LedgerAppendError):
                 self.generator.export_modular_ledger(
                     destination_dir=dest, balances=self.balances, holdings=self.holdings,
                     transactions=self._txns("2020-01-01", "2024-10-01", "2020-06-15"),
                     opening_date="2020-01-01",
                 )
-                # Re-exporting the same data with an equal window start appends
-                # cleanly (the transaction is a duplicate, so no new lot or trade is
-                # added) and the ledger still balances.
-                self.generator.export_modular_ledger(
-                    destination_dir=dest, balances=self.balances, holdings=self.holdings,
-                    transactions=self._txns("2020-01-01", "2024-10-01", "2020-06-15"),
-                    opening_date="2020-01-01",
-                )
-                main = (dest / "main.bean").read_text(encoding="utf-8")
-                # Resolve includes into one string for the loader.
-                combined = []
-                for inc in ["accounts.bean", "holdings.bean", "balances.bean",
-                            "prices.bean", "transactions.bean"]:
-                    combined.append((dest / inc).read_text(encoding="utf-8"))
-                header = "\n".join(
-                    line for line in main.splitlines() if not line.startswith("include")
-                )
-                assert_ledger_loads(self, header + "\n" + "\n".join(combined))
 
-    class TestIncompleteWindowReconciliation(_BaseGeneratorTest):
-        """Integration test for incomplete-window reconciliation with real Beancount loader."""
-
-        def setUp(self):
-            """Initialize client and generator for incomplete-window testing."""
-            super().setUp()
-            from empower_personal_dashboard.client import EmpowerDashboardClient
-            self.client = EmpowerDashboardClient(mock_mode=True)
-
-        def test_incomplete_window_extend_policy_generates_loadable_ledger(self):
-            """Incomplete-window extend policy generates a ledger that loads cleanly.
-
-            When transactions end before the snapshot date, the client reconciles
-            the window by extending the fetch through the snapshot. The resulting
-            ledger must load without Beancount errors and balance.
-            """
-            # Create holdings snapshot at 2024-10-01 with VTI position
-            balances = _brokerage_balances(as_of="2024-10-01", balance=20100.0)
-            holdings = _vti_holdings()
-            # Incomplete transactions: end_date is before holdings.as_of_date
-            incomplete_txns = _vti_buy_transaction(start="2021-01-01", end="2024-06-30")
-            # Reconcile by extending the window to the snapshot date
-            reconciled_txns = self.client.reconcile_transaction_window(
-                incomplete_txns, holdings, policy="extend", limited=False,
+    def test_markerless_single_file_with_cash_pad_still_rejects_backward_append(self):
+        """A marker-less single-file ledger with a 2020-01-01 cash pad still enforces a 2022 opening-lot start."""
+        balances_with_cash = DashboardBalances(
+            as_of_date="2024-10-01",
+            net_worth=25100.0,
+            total_cash=5000.0,
+            total_investment=20100.0,
+            total_card_liabilities=0.0,
+            total_loan=0.0,
+            total_mortgage=0.0,
+            accounts=[
+                self.balances.accounts[0],
+                {
+                    "account_id": "ACC-CASH-001",
+                    "account_name": "Everyday Checking",
+                    "firm_name": "Acme Bank",
+                    "account_type": "cash",
+                    "balance": 5000.0,
+                    "is_asset": True,
+                    "currency": "USD",
+                    "user_account_id": 5002,
+                },
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "legacy.bean"
+            self.generator.export_single_file(
+                filepath=ledger, balances=balances_with_cash, holdings=self.holdings,
+                transactions=self._txns("2022-01-01", "2024-10-01", "2022-06-15"),
+                opening_date="2022-06-01",
             )
-            # The reconciled window must now reach the snapshot date
-            self.assertEqual(reconciled_txns.end_date, holdings.as_of_date)
-            # Generate a ledger with the extended transactions
-            with tempfile.TemporaryDirectory() as tmp:
-                target = Path(tmp) / "extended.bean"
+            # Strip comment headers (including empower_window_start) to simulate a
+            # legacy marker-less single-file ledger that contains a 2020-01-01 cash pad.
+            stripped = "\n".join(
+                line for line in ledger.read_text(encoding="utf-8").splitlines()
+                if not line.strip().startswith(";;")
+            ) + "\n"
+            self.assertIn("2020-01-01 pad Assets:AcmeBank:EverydayChecking Equity:Opening-Balances", stripped)
+            ledger.write_text(stripped, encoding="utf-8")
+
+            with self.assertRaises(LedgerAppendError):
                 self.generator.export_single_file(
-                    filepath=target, balances=balances, holdings=holdings,
-                    transactions=reconciled_txns, opening_date="2021-01-01",
+                    filepath=ledger, balances=balances_with_cash, holdings=self.holdings,
+                    transactions=self._txns("2021-01-01", "2024-10-01", "2021-06-15"),
+                    opening_date="2021-01-01",
                 )
-                content = target.read_text(encoding="utf-8")
-            # The generated ledger must load cleanly without Beancount errors
-            assert_ledger_loads(self, content)
+
+    def test_forward_append_still_works_and_loads(self):
+        """Forward appends with matching window bounds load cleanly."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "ledger"
+            self.generator.export_modular_ledger(
+                destination_dir=dest, balances=self.balances, holdings=self.holdings,
+                transactions=self._txns("2020-01-01", "2024-10-01", "2020-06-15"),
+                opening_date="2020-01-01",
+            )
+            # Re-exporting the same data with an equal window start appends
+            # cleanly (the transaction is a duplicate, so no new lot or trade is
+            # added) and the ledger still balances.
+            self.generator.export_modular_ledger(
+                destination_dir=dest, balances=self.balances, holdings=self.holdings,
+                transactions=self._txns("2020-01-01", "2024-10-01", "2020-06-15"),
+                opening_date="2020-01-01",
+            )
+            main = (dest / "main.bean").read_text(encoding="utf-8")
+            # Resolve includes into one string for the loader.
+            combined = []
+            for inc in ["accounts.bean", "holdings.bean", "balances.bean",
+                        "prices.bean", "transactions.bean"]:
+                combined.append((dest / inc).read_text(encoding="utf-8"))
+            header = "\n".join(
+                line for line in main.splitlines() if not line.startswith("include")
+            )
+            assert_ledger_loads(self, header + "\n" + "\n".join(combined))
+
+
+class TestIncompleteWindowReconciliation(_BaseGeneratorTest):
+    """Integration test for incomplete-window reconciliation with real Beancount loader."""
+
+    def setUp(self):
+        super().setUp()
+        from empower_personal_dashboard.client import EmpowerDashboardClient
+        self.client = EmpowerDashboardClient(mock_mode=True)
+
+    def test_incomplete_window_extend_policy_generates_loadable_ledger(self):
+        """Incomplete-window extend policy generates a ledger that loads cleanly.
+
+        When transactions end before the snapshot date, the client reconciles
+        the window by extending the fetch through the snapshot. The resulting
+        ledger must load without Beancount errors and balance.
+        """
+        # Create holdings snapshot at 2024-10-01 with VTI position
+        balances = _brokerage_balances(as_of="2024-10-01", balance=20100.0)
+        holdings = _vti_holdings()
+        # Incomplete transactions: end_date is before holdings.as_of_date
+        incomplete_txns = _vti_buy_transaction(start="2021-01-01", end="2024-06-30")
+        # Reconcile by extending the window to the snapshot date
+        reconciled_txns = self.client.reconcile_transaction_window(
+            incomplete_txns, holdings, policy="extend", limited=False,
+        )
+        # The reconciled window must now reach the snapshot date
+        self.assertEqual(reconciled_txns.end_date, holdings.as_of_date)
+        # Generate a ledger with the extended transactions
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "extended.bean"
+            self.generator.export_single_file(
+                filepath=target, balances=balances, holdings=holdings,
+                transactions=reconciled_txns, opening_date="2021-01-01",
+            )
+            content = target.read_text(encoding="utf-8")
+        # The generated ledger must load cleanly without Beancount errors
+        assert_ledger_loads(self, content)
 
 
 if __name__ == "__main__":

@@ -2153,46 +2153,29 @@ class TestBeancountInvestmentGrowthReconstruction(unittest.TestCase):
             content = ledger.read_text(encoding="utf-8")
         self.assertEqual(content.count("Snapshot Shortfall Reconciliation"), 1)
 
-    def test_shortfall_reconciled_keys_handles_negative_naive_baseline_and_short_positions(self):
-        """Long position with naive_baseline < 0 and max_deficit > 0 delays assertion to D+2; short stays at D+1."""
-        holdings = DashboardHoldings(
-            as_of_date="2024-10-01",
-            total_value=0.0,
-            holdings=[
-                # Long: snapshot=5, sell 10 then buy 20 -> net_buys=+10, naive_baseline=-5, max_deficit=10
-                # Floored baseline=10, shortfall reconciliation=-15 emitted on D+1 -> assertion at D+2 (2024-10-03)
-                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
-                 "ticker": "GE", "quantity": 5.0, "price": 12.0},
-                # Short: snapshot=-5, sell 10 -> net_buys=-10, naive_baseline=+5, max_deficit=10
-                # _calculate_baseline_qty returns None (no opening lot or reconciliation) -> assertion at D+1 (2024-10-02)
-                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
-                 "ticker": "SHORTCO", "quantity": -5.0, "price": 12.0},
-            ],
+    def test_calculate_baseline_qty_scopes_out_sign_flips(self):
+        """Positions that flip sign across the window are scoped out of opening-lot reconstruction."""
+        key = ("Assets:AcmeBrokerage:TaxableBrokerage", "SHORTCO")
+        # Long-to-short flip across the window (snapshot=-5, net_buys=-10 -> naive baseline=+5)
+        self.assertIsNone(
+            self.generator._calculate_baseline_qty(
+                snapshot_qty=-5.0,
+                has_tx=True,
+                key=key,
+                net_buys={key: -10.0},
+                net_buy_meta={key: {"max_deficit": 10.0}},
+            )
         )
-        txns = DashboardTransactions(
-            start_date="2024-01-01", end_date="2024-10-01", total_transactions=3,
-            money_in=200.0, money_out=240.0, net_cashflow=-40.0,
-            transactions=[
-                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
-                 "account_type": "investment", "transaction_date": "2024-03-01",
-                 "description": "Sell GE", "amount": 100.0, "is_cash_in": True,
-                 "is_credit": True, "transaction_type": "Sell", "symbol": "GE",
-                 "price": 10.0, "quantity": 10.0},
-                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
-                 "account_type": "investment", "transaction_date": "2024-08-01",
-                 "description": "Buy GE", "amount": 240.0, "is_cash_out": True,
-                 "transaction_type": "Buy", "symbol": "GE",
-                 "price": 12.0, "quantity": 20.0},
-                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
-                 "account_type": "investment", "transaction_date": "2024-04-01",
-                 "description": "Sell SHORTCO", "amount": 100.0, "is_cash_in": True,
-                 "is_credit": True, "transaction_type": "Sell", "symbol": "SHORTCO",
-                 "price": 10.0, "quantity": 10.0},
-            ],
+        # Short-to-long flip across the window (snapshot=+5, net_buys=+10, max_deficit=0 -> naive baseline=-5)
+        self.assertIsNone(
+            self.generator._calculate_baseline_qty(
+                snapshot_qty=5.0,
+                has_tx=True,
+                key=key,
+                net_buys={key: 10.0},
+                net_buy_meta={key: {"max_deficit": 0.0}},
+            )
         )
-        bal_output = self.generator.generate_balances_bean(holdings=holdings, transactions=txns)
-        self.assertIn("2024-10-03 balance Assets:AcmeBrokerage:TaxableBrokerage 5.000000 GE", bal_output)
-        self.assertIn("2024-10-02 balance Assets:AcmeBrokerage:TaxableBrokerage -5.000000 SHORTCO", bal_output)
 
     def test_inferred_opening_date_never_precedes_account_opens(self):
         from empower_personal_dashboard.beancount import _determine_opening_date
