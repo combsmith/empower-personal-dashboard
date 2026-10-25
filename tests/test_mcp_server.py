@@ -3,6 +3,7 @@ test_mcp_server.py — Unit tests for Empower Personal Dashboard FastMCP server.
 """
 
 import asyncio
+import functools
 import json
 import os
 import tempfile
@@ -21,6 +22,22 @@ from empower_personal_dashboard.mcp_server import (
 )
 
 
+
+def requires_fastmcp(test):
+    """Run the test body when the mcp extra is installed; otherwise assert the
+    documented unavailable-dependency behavior so the test never skips."""
+
+    @functools.wraps(test)
+    def wrapper(self, *args, **kwargs):
+        if FastMCP is None:
+            with self.assertRaises(ImportError):
+                create_mcp_server()
+            return None
+        return test(self, *args, **kwargs)
+
+    return wrapper
+
+
 class TestMCPServer(unittest.TestCase):
     def setUp(self) -> None:
         if FastMCP is not None:
@@ -30,13 +47,6 @@ class TestMCPServer(unittest.TestCase):
             self.client = None
             self.server = None
 
-    def _require_server(self) -> bool:
-        if self.server is None:
-            with self.assertRaises(ImportError):
-                create_mcp_server()
-            return False
-        return True
-
     def test_mask_account_identifier(self) -> None:
         self.assertEqual(_mask_account_identifier(""), "")
         self.assertEqual(_mask_account_identifier(None), "")
@@ -44,10 +54,8 @@ class TestMCPServer(unittest.TestCase):
         self.assertEqual(_mask_account_identifier("9876543210"), "****3210")
         self.assertEqual(_mask_account_identifier("123"), "123")
 
+    @requires_fastmcp
     def test_create_mcp_server_registration(self) -> None:
-        if not self._require_server():
-            return
-
         async def run_check() -> None:
             tools = await self.server.list_tools()
             tool_names = [t.name for t in tools]
@@ -75,18 +83,16 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    @requires_fastmcp
     def test_create_mcp_server_configures_password_provider(self) -> None:
-        if not self._require_server():
-            return
         client = EmpowerDashboardClient(mock_mode=True)
         self.assertIsNone(client.password_provider)
         create_mcp_server(client=client)
         self.assertIsNotNone(client.password_provider)
 
+    @requires_fastmcp
     @patch("empower_personal_dashboard.mcp_server.resolve_password")
     def test_mcp_password_provider_respects_falsy_empower_keyring(self, mock_resolve) -> None:
-        if not self._require_server():
-            return
         client = EmpowerDashboardClient(mock_mode=True, username="mcp_user@example.com")
         create_mcp_server(client=client)
         self.assertIsNotNone(client.password_provider)
@@ -98,10 +104,8 @@ class TestMCPServer(unittest.TestCase):
                 credential_helper=None,
             )
 
+    @requires_fastmcp
     def test_tool_get_net_worth_summary(self) -> None:
-        if not self._require_server():
-            return
-
         async def run_check() -> None:
             res = await self.server.call_tool("get_net_worth_summary", {})
             self.assertFalse(res.is_error)
@@ -127,10 +131,8 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    @requires_fastmcp
     def test_tool_get_balances_with_filtering(self) -> None:
-        if not self._require_server():
-            return
-
         async def run_check() -> None:
             # All accounts
             res_all = await self.server.call_tool("get_balances", {})
@@ -169,10 +171,8 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    @requires_fastmcp
     def test_tool_get_holdings_with_filter_and_limit(self) -> None:
-        if not self._require_server():
-            return
-
         async def run_check() -> None:
             # Filter by ticker
             res_vti = await self.server.call_tool("get_holdings", {"ticker": "VTI"})
@@ -228,10 +228,8 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    @requires_fastmcp
     def test_tool_get_transactions_with_filter(self) -> None:
-        if not self._require_server():
-            return
-
         async def run_check() -> None:
             res = await self.server.call_tool(
                 "get_transactions",
@@ -303,10 +301,8 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    @requires_fastmcp
     def test_tool_check_auth_status(self) -> None:
-        if not self._require_server():
-            return
-
         async def run_check() -> None:
             res = await self.server.call_tool("check_auth_status", {})
             payload = json.loads(res.content[0].text)
@@ -315,10 +311,8 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    @requires_fastmcp
     def test_auth_required_error_handling(self) -> None:
-        if not self._require_server():
-            return
-
         async def run_check() -> None:
             mock_client = MagicMock()
             mock_client.fetch_balances.side_effect = SessionExpiredError("Session token expired")
@@ -332,10 +326,8 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    @requires_fastmcp
     def test_auto_reload_session_on_mtime_change(self) -> None:
-        if not self._require_server():
-            return
-
         async def run_check() -> None:
             mock_client = MagicMock()
             mock_client.mock_mode = False
@@ -356,10 +348,8 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    @requires_fastmcp
     def test_api_error_handling(self) -> None:
-        if not self._require_server():
-            return
-
         async def run_check() -> None:
             mock_client = MagicMock()
             mock_client.fetch_balances.side_effect = EmpowerError("Upstream timeout")
@@ -373,10 +363,8 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    @requires_fastmcp
     def test_in_memory_ttl_caching(self) -> None:
-        if not self._require_server():
-            return
-
         async def run_check() -> None:
             mock_client = MagicMock()
             mock_client.fetch_balances.return_value = self.client.fetch_balances()
@@ -396,10 +384,8 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    @requires_fastmcp
     def test_tool_get_export_options(self) -> None:
-        if not self._require_server():
-            return
-
         async def run_check() -> None:
             res = await self.server.call_tool("get_export_options", {})
             self.assertFalse(res.is_error)
@@ -413,10 +399,8 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    @requires_fastmcp
     def test_tool_export_data(self) -> None:
-        if not self._require_server():
-            return
-
         async def run_check() -> None:
             with tempfile.TemporaryDirectory() as tmpdir:
                 with patch.dict(os.environ, {"EMPOWER_EXPORT_ROOT": tmpdir}):
@@ -547,14 +531,12 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    @requires_fastmcp
     def test_resources_and_prompts(self) -> None:
-        if not self._require_server():
-            return
-
         async def run_check() -> None:
             # Read resource
             res_content = await self.server.read_resource("empower://balances/summary")
-            self.assertTrue(len(res_content) > 0)
+            self.assertGreater(len(res_content), 0)
 
             res_export = await self.server.read_resource("empower://export/options")
             self.assertIn("Export Options", str(res_export))
@@ -580,10 +562,8 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    @requires_fastmcp
     def test_beancount_resources_handle_auth_error_gracefully(self) -> None:
-        if not self._require_server():
-            return
-
         async def run_check() -> None:
             from empower_personal_dashboard.exceptions import SessionExpiredError
 
@@ -607,10 +587,8 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    @requires_fastmcp
     def test_export_data_beancount_captures_balance_warnings(self) -> None:
-        if not self._require_server():
-            return
-
         async def run_check() -> None:
             from empower_personal_dashboard.exceptions import EmpowerError
 

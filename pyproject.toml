@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "empower-personal-dashboard"
-version = "0.6.0"
+version = "0.7.0"
 description = "Python client and CLI for Empower Personal Dashboard (formerly Personal Capital) with 2FA, session persistence, holdings, and transactions."
 readme = "README.md"
 license = "MIT"
@@ -48,14 +48,16 @@ keyring = [
     "keyring>=24.0.0",
 ]
 test = [
+    "beancount>=3.0.0",
     "jsonschema[format-nongpl]>=4.20.0",
     "referencing>=0.30.0",
     "pyyaml>=6.0",
     "tomli>=1.1.0; python_version < '3.11'",
     "coverage>=7.0",
-    "beancount>=3.0; python_version >= '3.10'",
 ]
+# Provides YAML mapping support plus external Beancount ledger validation tools (e.g. bean-check / beancount.loader).
 beancount = [
+    "beancount>=3.0.0",
     "pyyaml>=6.0",
 ]
 build = [
@@ -63,6 +65,7 @@ build = [
     "twine>=5.0",
 ]
 dev = [
+    "beancount>=3.0.0",
     "pytest>=8.0",
     "build>=1.0",
     "twine>=5.0",
@@ -72,9 +75,9 @@ dev = [
     "keyring>=24.0.0",
     "tomli>=1.1.0; python_version < '3.11'",
     "coverage>=7.0",
-    "beancount>=3.0; python_version >= '3.10'",
 ]
 all = [
+    "beancount>=3.0.0",
     "mcp>=1.2.0; python_version >= '3.10'",
     "keyring>=24.0.0",
     "jsonschema[format-nongpl]>=4.20.0",
@@ -85,7 +88,6 @@ all = [
     "twine>=5.0",
     "tomli>=1.1.0; python_version < '3.11'",
     "coverage>=7.0",
-    "beancount>=3.0; python_version >= '3.10'",
 ]
 
 [project.scripts]
