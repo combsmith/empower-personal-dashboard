@@ -245,6 +245,45 @@ if _HAS_BEANCOUNT:
             # quantity equal the 5-share snapshot assertion.
             assert_ledger_loads(self, content)
 
+        def test_deficit_floor_with_negative_naive_baseline_reconciles_and_loads(self):
+            """Long position with naive_baseline < 0 and max_deficit > 0 delays assertion to D+2 and loads."""
+            # Snapshot holds 5 GE. Selling 10 then buying 20 gives net_buys = +10,
+            # naive_baseline = -5, max_deficit = 10 -> floored baseline = 10 and
+            # a -15 shortfall reconciliation on D+1. The assertion must be dated D+2.
+            holdings = DashboardHoldings(
+                as_of_date="2024-10-01", total_value=60.0,
+                holdings=[
+                    {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                     "ticker": "GE", "quantity": 5.0, "price": 12.0},
+                ],
+            )
+            churn = DashboardTransactions(
+                start_date="2024-01-01", end_date="2024-10-01", total_transactions=2,
+                money_in=100.0, money_out=240.0, net_cashflow=-140.0,
+                transactions=[
+                    {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                     "account_type": "investment", "transaction_date": "2024-03-01",
+                     "description": "Sell GE", "amount": 100.0, "is_cash_in": True,
+                     "is_credit": True, "transaction_type": "Sell", "symbol": "GE",
+                     "price": 10.0, "quantity": 10.0},
+                    {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                     "account_type": "investment", "transaction_date": "2024-08-01",
+                     "description": "Buy GE", "amount": 240.0, "is_cash_out": True,
+                     "transaction_type": "Buy", "symbol": "GE",
+                     "price": 12.0, "quantity": 20.0},
+                ],
+            )
+            with tempfile.TemporaryDirectory() as tmp:
+                target = Path(tmp) / "deficit_neg_naive.bean"
+                self.generator.export_single_file(
+                    filepath=target, holdings=holdings, transactions=churn,
+                )
+                content = target.read_text(encoding="utf-8")
+            self.assertIn("10.000000 GE {", content)
+            self.assertIn("-15.000000 GE {}", content)
+            self.assertIn("2024-10-03 balance Assets:AcmeBrokerage:TaxableBrokerage 5.000000 GE", content)
+            assert_ledger_loads(self, content)
+
     class TestBackwardAppend(_BaseGeneratorTest):
         """Item 3 — an append that broadens the window into the past is rejected."""
 

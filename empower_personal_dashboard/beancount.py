@@ -1388,18 +1388,15 @@ class BeancountGenerator:
         net_buys, net_buy_meta = self._compute_net_buys(transactions, acct_lookup)
         aggregated = self._aggregate_snapshot_holdings(holdings, acct_lookup)
         for key, pos in aggregated.items():
-            naive_baseline = pos.get("quantity", 0.0) - net_buys.get(key, 0.0)
-            # The floor is a long-only construct; a negative naive baseline stays
-            # negative and never earns a reconciliation.
-            if naive_baseline < 0:
+            snapshot_qty = pos.get("quantity", 0.0)
+            if snapshot_qty <= 0:
                 continue
-            max_deficit = net_buy_meta.get(key, {}).get("max_deficit", 0.0)
-            baseline_qty = max(naive_baseline, max_deficit)
-            # A baseline rounding to zero emits no opening lot (hence no
-            # reconciliation), matching the _emit_snapshot_lots skip.
-            if round(baseline_qty, 6) == 0:
+            baseline_qty = self._calculate_baseline_qty(
+                snapshot_qty, True, key, net_buys, net_buy_meta,
+            )
+            if baseline_qty is None:
                 continue
-            if round(baseline_qty - naive_baseline, 6) > 0:
+            if round(baseline_qty - (snapshot_qty - net_buys.get(key, 0.0)), 6) > 0:
                 reconciled.add(key)
         return reconciled
 
