@@ -435,6 +435,24 @@ def _has_core_sweep_evidence(
     )
 
 
+def _is_dividend_signal(
+    tx_type_clean: str,
+    inv_type_clean: str,
+    cat_clean: str,
+    ticker: str,
+) -> bool:
+    """True when transaction, investment, or category fields denote an investment dividend."""
+    return (
+        "dividend" in tx_type_clean
+        or "dividend" in inv_type_clean
+        # A bare "dividend" category needs investment evidence (a ticker plus a
+        # transaction/investment type) before it is treated as an investment
+        # dividend; otherwise ordinary banking transactions labelled "dividend"
+        # would skip category resolution.
+        or ("dividend" in cat_clean and bool(ticker) and bool(tx_type_clean or inv_type_clean))
+    )
+
+
 def _classify_buy_sell(
     tx_type_clean: str,
     inv_type_clean: str,
@@ -442,6 +460,7 @@ def _classify_buy_sell(
     qty: float,
     price: float = 0.0,
     desc_clean: str = "",
+    cat_clean: str = "",
     custom_sweep_tickers: Optional[Set[str]] = None,
 ) -> Tuple[bool, bool]:
     """Classify whether a security transaction is an investment (is_buy, is_sell)."""
@@ -451,7 +470,7 @@ def _classify_buy_sell(
     is_explicit_sell = tx_type_clean in ("sell", "disposal") or inv_type_clean in ("sell", "disposal")
     if is_explicit_buy or is_explicit_sell:
         return is_explicit_buy, is_explicit_sell and not is_explicit_buy
-    if "dividend" in tx_type_clean or "dividend" in inv_type_clean or price <= 0:
+    if _is_dividend_signal(tx_type_clean, inv_type_clean, cat_clean, ticker) or price <= 0:
         return False, False
     raw_buy_phrase = any(p in desc_clean for p in _CORE_BUY_PHRASES)
     raw_sell_phrase = any(p in desc_clean for p in _CORE_SELL_PHRASES)
@@ -489,6 +508,9 @@ def _is_commodity_trade_tx(
     qty = _safe_positive_float(transaction.get("quantity"))
     price = _safe_positive_float(transaction.get("price"))
     desc_clean = _clean_tx_description(transaction)
+    cat_clean = clean_api_text(
+        transaction.get("category") or transaction.get("category_name") or ""
+    ).strip().lower()
     return any(
         _classify_buy_sell(
             tt,
@@ -497,6 +519,7 @@ def _is_commodity_trade_tx(
             qty,
             price=price,
             desc_clean=desc_clean,
+            cat_clean=cat_clean,
             custom_sweep_tickers=custom_sweep_tickers,
         )
     )
@@ -527,7 +550,11 @@ def _is_investment_tx(
     """
     tt = clean_api_text(transaction.get("transaction_type") or "").strip().lower()
     it = clean_api_text(transaction.get("investment_type") or "").strip().lower()
-    if "dividend" in tt or "dividend" in it:
+    cat_clean = clean_api_text(
+        transaction.get("category") or transaction.get("category_name") or ""
+    ).strip().lower()
+    ticker = _clean_ticker(transaction.get("symbol"))
+    if _is_dividend_signal(tt, it, cat_clean, ticker):
         return True
     if _is_commodity_trade_tx(transaction, custom_sweep_tickers=custom_sweep_tickers):
         return True
@@ -555,13 +582,14 @@ def _resolve_account_from_tx(
     aid = str(transaction.get("account_id") or "")
     uaid = str(transaction.get("user_account_id") or "")
     t_name = transaction.get("account_name") or ""
+    acct_info = acct_lookup.get(aid) or acct_lookup.get(uaid) or acct_lookup.get(t_name)
 
-    if _is_investment_tx(transaction, custom_sweep_tickers=custom_sweep_tickers):
+    if _is_investment_tx(transaction, custom_sweep_tickers=custom_sweep_tickers) or (
+        acct_info is not None and _has_investment_account_signal(acct_info)
+    ):
         default_firm = _FIRM_BROKERAGE
         default_type = _ACCOUNT_TYPE_INVESTMENT
         default_name = _FIRM_BROKERAGE
-
-    acct_info = acct_lookup.get(aid) or acct_lookup.get(uaid) or acct_lookup.get(t_name)
     if acct_info:
         firm = acct_info.get("firm_name") or default_firm
         acct_name = acct_info.get("account_name") or t_name or default_name
@@ -1066,6 +1094,8 @@ class BeancountGenerator:
         }
         acct_lookup = _build_account_lookup(balances)
         commodity_accounts = self._collect_commodity_accounts(holdings, acct_lookup)
+        if transactions and transactions.transactions:
+            commodity_accounts |= self._collect_commodity_tx_accounts(transactions, acct_lookup)
 
         # 1. Accounts from balances
         self._open_accounts_from_balances(
@@ -1472,6 +1502,9 @@ class BeancountGenerator:
 
         tx_type = clean_api_text(tx.get("transaction_type") or "").strip().lower()
         inv_type = clean_api_text(tx.get("investment_type") or "").strip().lower()
+        cat_clean = clean_api_text(
+            tx.get("category") or tx.get("category_name") or ""
+        ).strip().lower()
         tx_price = _safe_positive_float(tx.get("price"))
         desc_clean = _clean_tx_description(tx)
         custom_sweep_tickers = self.mapper.core_sweep_tickers
@@ -1482,6 +1515,7 @@ class BeancountGenerator:
             tx_qty,
             price=tx_price,
             desc_clean=desc_clean,
+            cat_clean=cat_clean,
             custom_sweep_tickers=custom_sweep_tickers,
         )
         if not (is_tx_buy or is_tx_sell):
@@ -1854,17 +1888,10 @@ class BeancountGenerator:
             qty,
             price=price,
             desc_clean=desc_clean,
+            cat_clean=cat_clean,
             custom_sweep_tickers=custom_sweep_tickers,
         )
-        is_dividend = (
-            "dividend" in tx_type_clean
-            or "dividend" in inv_type_clean
-            # A bare "dividend" category needs investment evidence (a ticker plus a
-            # transaction/investment type) before it is treated as an investment
-            # dividend; otherwise ordinary banking transactions labelled "dividend"
-            # would skip category resolution.
-            or ("dividend" in cat_clean and bool(ticker) and bool(tx_type_clean or inv_type_clean))
-        )
+        is_dividend = _is_dividend_signal(tx_type_clean, inv_type_clean, cat_clean, ticker)
         return is_buy, is_sell, is_dividend
 
     @staticmethod
