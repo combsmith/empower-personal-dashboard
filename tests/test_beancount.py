@@ -2830,6 +2830,107 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
         self.assertNotIn("Income:CapitalGains", output)
         self.assertIn("Equity:Transfers", output)
 
+    def test_nasdaq_money_market_suffix_and_bank_deposit_sweep_tokens(self):
+        """5-letter '*XX' money market funds and bank deposit sweep tokens classify across institutions."""
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-03",
+            total_transactions=3,
+            money_in=150.0,
+            money_out=900.0,
+            net_cashflow=-750.0,
+            transactions=[
+                {
+                    "user_transaction_id": "tx-mm-tttxx",
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": "BlackRock Liquidity Treasury Trust",
+                    "amount": 600.0,
+                    "transaction_type": "Shares Out",
+                    "investment_type": "Transfer",
+                    "symbol": "TTTXX",
+                    "price": 1.0,
+                    "quantity": 600.0,
+                },
+                {
+                    "user_transaction_id": "tx-mm-fdlxx",
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-02",
+                    "description": "Treasury Only Fund",
+                    "amount": 150.0,
+                    "transaction_type": "Shares In",
+                    "investment_type": "Transfer",
+                    "symbol": "FDLXX",
+                    "price": 1.0,
+                    "quantity": 150.0,
+                },
+                {
+                    "user_transaction_id": "tx-bank-qacds",
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-03",
+                    "description": "Insured Deposit Program",
+                    "amount": 300.0,
+                    "transaction_type": "Shares Out",
+                    "investment_type": "Transfer",
+                    "symbol": "QACDS",
+                    "price": 1.0,
+                    "quantity": 300.0,
+                },
+            ],
+        )
+        output = self.generator.generate_transactions_bean(txs)
+        self.assertIn("600.000000 TTTXX {{600.000000 USD}}", output)
+        self.assertIn("-150.000000 FDLXX {} @ 1.0000 USD", output)
+        self.assertIn("300.000000 QACDS {{300.000000 USD}}", output)
+        self.assertNotIn("Equity:Transfers", output)
+
+    def test_custom_core_sweep_tickers_from_mapping_config(self):
+        """Custom core_sweep_tickers in beancount_map.yaml classify proprietary $1.00 sweep symbols."""
+        from empower_personal_dashboard.beancount import _parse_simple_yaml
+
+        yaml_text = (
+            "accounts:\n"
+            '  "Synthetic Roth IRA": "Assets:Brokerage:SyntheticRothIRA"\n'
+            "core_sweep_tickers:\n"
+            '  - "BNKSWP1"\n'
+        )
+        parsed_simple = _parse_simple_yaml(yaml_text)
+        self.assertEqual(parsed_simple["core_sweep_tickers"], ["BNKSWP1"])
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            map_path = Path(tmp_dir) / "beancount_map.yaml"
+            map_path.write_text(yaml_text, encoding="utf-8")
+            mapper = BeancountMapper(mapping_path=map_path)
+            self.assertIn("BNKSWP1", mapper.core_sweep_tickers)
+            gen = BeancountGenerator(mapper=mapper)
+
+            txs = DashboardTransactions(
+                start_date="2026-10-01",
+                end_date="2026-10-01",
+                total_transactions=1,
+                money_in=0.0,
+                money_out=500.0,
+                net_cashflow=-500.0,
+                transactions=[
+                    {
+                        "user_transaction_id": "tx-custom-swp",
+                        "account_name": "Synthetic Roth IRA",
+                        "transaction_date": "2026-10-01",
+                        "description": "Institutional Reserve Vehicle",
+                        "amount": 500.0,
+                        "transaction_type": "Shares Out",
+                        "investment_type": "Transfer",
+                        "symbol": "BNKSWP1",
+                        "price": 1.0,
+                        "quantity": 500.0,
+                    },
+                ],
+            )
+            tx_out = gen.generate_transactions_bean(txs)
+            self.assertIn("500.000000 BNKSWP1 {{500.000000 USD}}", tx_out)
+            acct_out = gen.generate_accounts_bean(transactions=txs)
+            self.assertIn("2000-01-01 open Assets:Brokerage:SyntheticRothIRA\n", acct_out)
+
 
 if __name__ == "__main__":
     unittest.main()

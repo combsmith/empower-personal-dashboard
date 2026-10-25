@@ -77,7 +77,7 @@ _INVESTMENT_ACCOUNT_WORDS = (
     "stock", "portfolio", "529", "other",
 )
 
-# Description phrases and tickers indicating retail brokerage core money market sweeps.
+# Description phrases, NASDAQ symbology, and bank sweep tokens indicating core money market sweeps.
 _CORE_BUY_PHRASES = (
     "purchase into core account",
     "purchase into core",
@@ -94,19 +94,22 @@ _CORE_SWEEP_EVIDENCE_PHRASES = (
     "core fund",
     "cash sweep",
     "sweep",
+    "fdic",
+    "mmda",
 )
-_CORE_MONEY_MARKET_TICKERS = (
-    "SPAXX",
-    "FDRXX",
-    "FZFXX",
-    "FCASH",
-    "SPRXX",
-    "VMFXX",
-    "VUSXX",
-    "VMRXX",
-    "SWVXX",
-    "SNSXX",
-    "SNVXX",
+# Under NASDAQ's mutual fund suffix standard, 5-letter symbols ending in "XX"
+# (4th letter 'X' + 5th letter 'X') denote SEC Rule 2a-7 money market mutual funds
+# across all brokerages (e.g. SPAXX, FDLXX, FTEXX, VMFXX, VUSXX, SWVXX, TTTXX, MVRXX, JTSXX, GABXX).
+_MONEY_MARKET_MUTUAL_FUND_RE = re.compile(r"^[A-Z]{3}XX$")
+# Bank deposit sweep vehicle tokens used when a sweep is not a 5-letter mutual fund.
+_BANK_SWEEP_TICKER_TOKENS = (
+    "CASH",
+    "SWEEP",
+    "MMDA",
+    "FDIC",
+    "QACDS",
+    "QPRDS",
+    "FICA",
 )
 
 
@@ -239,7 +242,13 @@ def _format_price(price: float) -> str:
 
 def _parse_simple_yaml(content: str) -> Dict[str, Any]:
     """Lightweight fallback parser for basic YAML mapping files when PyYAML is not installed."""
-    result: Dict[str, Any] = {"accounts": {}, "categories": {}, "regex_rules": [], "transaction_overrides": {}}
+    result: Dict[str, Any] = {
+        "accounts": {},
+        "categories": {},
+        "regex_rules": [],
+        "transaction_overrides": {},
+        "core_sweep_tickers": [],
+    }
     current_section = None
     current_rule: Dict[str, str] = {}
 
@@ -293,6 +302,11 @@ def _parse_simple_yaml(content: str) -> Dict[str, Any]:
                 if k in ("pattern", "account") and v:
                     current_rule[k] = v
 
+        elif current_section == "core_sweep_tickers" and line.startswith("-"):
+            item = line[1:].strip().strip('"').strip("'")
+            if item:
+                result["core_sweep_tickers"].append(item)
+
     if current_rule and "pattern" in current_rule and "account" in current_rule:
         result["regex_rules"].append(current_rule)
 
@@ -323,13 +337,21 @@ def _clean_tx_description(tx: Dict[str, Any]) -> str:
     return clean_api_text(combined).strip().lower()
 
 
-def _has_core_sweep_evidence(ticker: str, price: float, desc_clean: str) -> bool:
+def _has_core_sweep_evidence(
+    ticker: str,
+    price: float,
+    desc_clean: str,
+    custom_sweep_tickers: Optional[Set[str]] = None,
+) -> bool:
     """True when a transaction carries core money market sweep evidence ($1.00 NAV + fund/sweep signal)."""
     if abs(price - 1.0) > 0.01:
         return False
+    ticker_upper = ticker.upper()
     return (
         any(p in desc_clean for p in _CORE_SWEEP_EVIDENCE_PHRASES)
-        or ticker.upper() in _CORE_MONEY_MARKET_TICKERS
+        or bool(_MONEY_MARKET_MUTUAL_FUND_RE.fullmatch(ticker_upper))
+        or any(tok in ticker_upper for tok in _BANK_SWEEP_TICKER_TOKENS)
+        or bool(custom_sweep_tickers and ticker_upper in custom_sweep_tickers)
     )
 
 
@@ -340,6 +362,7 @@ def _classify_buy_sell(
     qty: float,
     price: float = 0.0,
     desc_clean: str = "",
+    custom_sweep_tickers: Optional[Set[str]] = None,
 ) -> Tuple[bool, bool]:
     """Classify whether a security transaction is an investment (is_buy, is_sell)."""
     if not ticker or qty <= 0:
@@ -352,7 +375,9 @@ def _classify_buy_sell(
         return False, False
     has_core_buy_phrase = any(p in desc_clean for p in _CORE_BUY_PHRASES)
     has_core_sell_phrase = any(p in desc_clean for p in _CORE_SELL_PHRASES)
-    has_core_evidence = _has_core_sweep_evidence(ticker, price, desc_clean)
+    has_core_evidence = _has_core_sweep_evidence(
+        ticker, price, desc_clean, custom_sweep_tickers=custom_sweep_tickers
+    )
     is_core_sell = has_core_sell_phrase or (
         tx_type_clean == "shares in" and has_core_evidence and not has_core_buy_phrase
     )
@@ -362,7 +387,10 @@ def _classify_buy_sell(
     return is_core_buy, is_core_sell
 
 
-def _is_commodity_trade_tx(transaction: Dict[str, Any]) -> bool:
+def _is_commodity_trade_tx(
+    transaction: Dict[str, Any],
+    custom_sweep_tickers: Optional[Set[str]] = None,
+) -> bool:
     """True when a transaction represents a security trade or core sweep with a ticker."""
     ticker = _clean_ticker(transaction.get("symbol"))
     if not ticker:
@@ -376,10 +404,23 @@ def _is_commodity_trade_tx(transaction: Dict[str, Any]) -> bool:
     raw_price = transaction.get("price")
     price = abs(float(raw_price)) if raw_price is not None else 0.0
     desc_clean = _clean_tx_description(transaction)
-    return any(_classify_buy_sell(tt, it, ticker, qty, price=price, desc_clean=desc_clean))
+    return any(
+        _classify_buy_sell(
+            tt,
+            it,
+            ticker,
+            qty,
+            price=price,
+            desc_clean=desc_clean,
+            custom_sweep_tickers=custom_sweep_tickers,
+        )
+    )
 
 
-def _is_investment_tx(transaction: Dict[str, Any]) -> bool:
+def _is_investment_tx(
+    transaction: Dict[str, Any],
+    custom_sweep_tickers: Optional[Set[str]] = None,
+) -> bool:
     """True when a transaction represents a security trade, core sweep, or investment dividend.
 
     A security trade (buy/sell/reinvest/disposal/core sweep) requires a ticker,
@@ -393,7 +434,7 @@ def _is_investment_tx(transaction: Dict[str, Any]) -> bool:
     it = clean_api_text(transaction.get("investment_type") or "").strip().lower()
     if "dividend" in tt or "dividend" in it:
         return True
-    if _is_commodity_trade_tx(transaction):
+    if _is_commodity_trade_tx(transaction, custom_sweep_tickers=custom_sweep_tickers):
         return True
     t_name = clean_api_text(transaction.get("account_name") or "").strip().lower()
     acct_type = clean_api_text(transaction.get("account_type") or "").strip().lower()
@@ -410,6 +451,7 @@ def _resolve_account_from_tx(
     default_firm: str = _FIRM_INSTITUTION,
     default_type: str = _ACCOUNT_TYPE_BANK,
     default_name: str = _ACCOUNT_DEFAULT_NAME,
+    custom_sweep_tickers: Optional[Set[str]] = None,
 ) -> Tuple[str, str, str, str]:
     """Resolve account details from transaction and lookup table.
 
@@ -425,7 +467,7 @@ def _resolve_account_from_tx(
     uaid = str(transaction.get("user_account_id") or "")
     t_name = transaction.get("account_name") or ""
 
-    if _is_investment_tx(transaction):
+    if _is_investment_tx(transaction, custom_sweep_tickers=custom_sweep_tickers):
         default_firm = _FIRM_BROKERAGE
         default_type = _ACCOUNT_TYPE_INVESTMENT
         default_name = _FIRM_BROKERAGE
@@ -496,6 +538,7 @@ class BeancountMapper:
         self.categories: Dict[str, str] = {}
         self.regex_rules: List[Dict[str, str]] = []
         self.transaction_overrides: Dict[str, str] = {}
+        self.core_sweep_tickers: Set[str] = set()
 
         if mapping_path:
             self.load_mapping(mapping_path)
@@ -564,6 +607,14 @@ class BeancountMapper:
             self.transaction_overrides = {str(k): str(v) for k, v in raw_tx_overrides.items()}
         else:
             self.transaction_overrides = {}
+
+        raw_sweep_tickers = parsed.get("core_sweep_tickers")
+        if isinstance(raw_sweep_tickers, list):
+            self.core_sweep_tickers = {
+                _clean_ticker(str(t)) for t in raw_sweep_tickers if _clean_ticker(str(t))
+            }
+        else:
+            self.core_sweep_tickers = set()
 
     def resolve_account(
         self,
@@ -1015,10 +1066,13 @@ class BeancountGenerator:
     ) -> Set[str]:
         """Resolve transaction accounts that receive commodity (ticker) postings."""
         commodity_tx_accounts: Set[str] = set()
+        custom_sweep_tickers = self.mapper.core_sweep_tickers
         for tx in transactions.transactions:
-            if not _is_commodity_trade_tx(tx):
+            if not _is_commodity_trade_tx(tx, custom_sweep_tickers=custom_sweep_tickers):
                 continue
-            firm, name, acct_type, resolved_id = _resolve_account_from_tx(tx, acct_lookup)
+            firm, name, acct_type, resolved_id = _resolve_account_from_tx(
+                tx, acct_lookup, custom_sweep_tickers=custom_sweep_tickers
+            )
             commodity_tx_accounts.add(
                 self.mapper.resolve_account(firm, name, resolved_id, acct_type)
             )
@@ -1035,8 +1089,11 @@ class BeancountGenerator:
         if not (transactions and transactions.transactions):
             return
         commodity_tx_accounts = self._collect_commodity_tx_accounts(transactions, acct_lookup)
+        custom_sweep_tickers = self.mapper.core_sweep_tickers
         for tx in transactions.transactions:
-            firm, name, acct_type, resolved_id = _resolve_account_from_tx(tx, acct_lookup)
+            firm, name, acct_type, resolved_id = _resolve_account_from_tx(
+                tx, acct_lookup, custom_sweep_tickers=custom_sweep_tickers
+            )
             b_account = self.mapper.resolve_account(firm, name, resolved_id, acct_type)
             if b_account in seen_accounts:
                 continue
@@ -1334,13 +1391,22 @@ class BeancountGenerator:
         tx_raw_price = tx.get("price")
         tx_price = abs(float(tx_raw_price)) if tx_raw_price is not None else 0.0
         desc_clean = _clean_tx_description(tx)
+        custom_sweep_tickers = self.mapper.core_sweep_tickers
         is_tx_buy, is_tx_sell = _classify_buy_sell(
-            tx_type, inv_type, t_ticker, tx_qty, price=tx_price, desc_clean=desc_clean,
+            tx_type,
+            inv_type,
+            t_ticker,
+            tx_qty,
+            price=tx_price,
+            desc_clean=desc_clean,
+            custom_sweep_tickers=custom_sweep_tickers,
         )
         if not (is_tx_buy or is_tx_sell):
             return None
 
-        tx_firm, tx_acct_name, tx_acct_type, tx_aid = _resolve_account_from_tx(tx, acct_lookup)
+        tx_firm, tx_acct_name, tx_acct_type, tx_aid = _resolve_account_from_tx(
+            tx, acct_lookup, custom_sweep_tickers=custom_sweep_tickers
+        )
         tx_b_account = self.mapper.resolve_account(
             tx_firm, tx_acct_name, tx_aid, account_type=tx_acct_type
         )
@@ -1696,6 +1762,7 @@ class BeancountGenerator:
         qty: float,
         price: float = 0.0,
         desc_clean: str = "",
+        custom_sweep_tickers: Optional[Set[str]] = None,
     ) -> Tuple[bool, bool, bool]:
         """Classify a transaction as (is_buy, is_sell, is_dividend)."""
         is_buy, is_sell = _classify_buy_sell(
@@ -1705,6 +1772,7 @@ class BeancountGenerator:
             qty,
             price=price,
             desc_clean=desc_clean,
+            custom_sweep_tickers=custom_sweep_tickers,
         )
         is_dividend = (
             "dividend" in tx_type_clean
@@ -1742,11 +1810,14 @@ class BeancountGenerator:
         """Compute the shared per-transaction fields used by every emit handler."""
         tx_id = str(tx.get("user_transaction_id") or "")
         acct_id = str(tx.get("account_id") or "")
+        custom_sweep_tickers = self.mapper.core_sweep_tickers
 
         # Use _resolve_account_from_tx so investment transactions consistently fall
         # back to the brokerage identity (matching holdings reconciliation and
         # assertions) so their postings reconcile in one account.
-        firm, acct_name, acct_type, resolved_id = _resolve_account_from_tx(tx, acct_lookup)
+        firm, acct_name, acct_type, resolved_id = _resolve_account_from_tx(
+            tx, acct_lookup, custom_sweep_tickers=custom_sweep_tickers
+        )
         is_asset = self._resolve_is_asset(tx, acct_type, acct_lookup)
 
         date = tx.get("transaction_date") or "2000-01-01"
@@ -1774,6 +1845,7 @@ class BeancountGenerator:
             qty,
             price=price,
             desc_clean=desc_clean,
+            custom_sweep_tickers=custom_sweep_tickers,
         )
 
         # Payee/narration for investment transactions (unused by standard handling).
