@@ -384,26 +384,25 @@ def _build_account_lookup(balances: Optional[DashboardBalances]) -> Dict[str, Di
     return lookup
 
 
-def _safe_positive_float(val: Any) -> float:
-    """Safely parse ``val`` as a non-negative finite float, returning 0.0 on invalid input."""
+def _safe_float(val: Any) -> float:
+    """Safely parse ``val`` as a signed finite float, returning 0.0 on None, bool, or invalid input."""
     if val is None or isinstance(val, bool):
         return 0.0
     try:
-        parsed = abs(float(val))
+        parsed = float(val)
     except (ValueError, TypeError, OverflowError):
         return 0.0
     return parsed if math.isfinite(parsed) else 0.0
 
 
+def _safe_positive_float(val: Any) -> float:
+    """Safely parse ``val`` as a non-negative finite float, returning 0.0 on invalid input."""
+    return abs(_safe_float(val))
+
+
 def _is_negative_number(val: Any) -> bool:
     """Return True when ``val`` is a finite negative numeric value."""
-    if val is None or isinstance(val, bool):
-        return False
-    try:
-        parsed = float(val)
-    except (ValueError, TypeError, OverflowError):
-        return False
-    return math.isfinite(parsed) and parsed < 0
+    return _safe_float(val) < 0
 
 
 def _clean_tx_description(tx: Dict[str, Any]) -> str:
@@ -468,8 +467,10 @@ def _classify_buy_sell(
         return False, False
     is_explicit_buy = tx_type_clean in ("buy", "reinvest") or inv_type_clean in ("buy", "reinvest")
     is_explicit_sell = tx_type_clean in ("sell", "disposal") or inv_type_clean in ("sell", "disposal")
+    if is_explicit_buy and is_explicit_sell:
+        return False, False
     if is_explicit_buy or is_explicit_sell:
-        return is_explicit_buy, is_explicit_sell and not is_explicit_buy
+        return is_explicit_buy, is_explicit_sell
     if _is_dividend_signal(tx_type_clean, inv_type_clean, cat_clean, ticker) or price <= 0:
         return False, False
     raw_buy_phrase = any(p in desc_clean for p in _CORE_BUY_PHRASES)
@@ -503,8 +504,6 @@ def _is_commodity_trade_tx(
         return False
     tt = clean_api_text(transaction.get("transaction_type") or "").strip().lower()
     it = clean_api_text(transaction.get("investment_type") or "").strip().lower()
-    if tt in ("buy", "sell", "reinvest", "disposal") or it in ("buy", "sell", "reinvest", "disposal"):
-        return True
     qty = _safe_positive_float(transaction.get("quantity"))
     price = _safe_positive_float(transaction.get("price"))
     desc_clean = _clean_tx_description(transaction)
@@ -647,7 +646,7 @@ def _balance_account_fields(acct: Dict[str, Any]) -> Tuple[str, str, str, str, s
         str(acct.get("account_id") or ""),
         acct.get("account_type") or default_type,
         acct.get("currency") or "USD",
-        float(acct.get("balance", 0.0)),
+        _safe_float(acct.get("balance")),
     )
 
 
@@ -1361,7 +1360,7 @@ class BeancountGenerator:
         holding_units: Dict[Tuple[str, str], float] = {}
         for h in holdings.holdings:
             ticker = _clean_ticker(h.get("ticker"))
-            qty = float(h.get("quantity") or 0.0)
+            qty = _safe_float(h.get("quantity"))
             if not ticker or abs(qty) < 1e-9:
                 continue
             firm, acct_name, acct_type, acct_id = _resolve_account_from_holding(h, acct_lookup)
@@ -1392,7 +1391,7 @@ class BeancountGenerator:
             seen_tickers: Set[str] = set()
             for h in holdings.holdings:
                 ticker = _clean_ticker(h.get("ticker"))
-                price = float(h.get("price") or 0.0)
+                price = _safe_float(h.get("price"))
                 if ticker and price > 0 and ticker not in seen_tickers:
                     seen_tickers.add(ticker)
                     lines.append(f"{as_of} price {ticker} {_format_price(price)} USD\n")
@@ -1612,10 +1611,10 @@ class BeancountGenerator:
 
         for h in holdings.holdings:
             ticker = _clean_ticker(h.get("ticker"))
-            qty = float(h.get("quantity") or 0.0)
+            qty = _safe_float(h.get("quantity"))
             if not ticker or abs(qty) < 1e-9:
                 continue
-            price = float(h.get("price") or 0.0)
+            price = _safe_float(h.get("price"))
             cost_basis = h.get("cost_basis")
             firm, acct_name, acct_type, acct_id = _resolve_account_from_holding(h, acct_lookup)
             b_account = self.mapper.resolve_account(firm, acct_name, acct_id, account_type=acct_type)
@@ -1627,7 +1626,7 @@ class BeancountGenerator:
                     "ticker": ticker,
                     "quantity": qty,
                     "price": price,
-                    "cost_basis": float(cost_basis) if cost_basis is not None else None,
+                    "cost_basis": _safe_float(cost_basis) if cost_basis is not None else None,
                 }
             else:
                 self._merge_holding(aggregated[key], qty, price, cost_basis)
@@ -1639,7 +1638,7 @@ class BeancountGenerator:
         agg["quantity"] = agg.get("quantity", 0.0) + qty
         if cost_basis is not None:
             curr_cb = agg.get("cost_basis") or 0.0
-            agg["cost_basis"] = curr_cb + float(cost_basis)
+            agg["cost_basis"] = curr_cb + _safe_float(cost_basis)
         if price > 0:
             agg["price"] = price
 
@@ -1727,13 +1726,14 @@ class BeancountGenerator:
         # signs across the transaction window, the snapshot cost basis represents the
         # current position rather than the historical baseline lot.
         has_same_sign = (qty > 0 and snapshot_qty > 0) or (qty < 0 and snapshot_qty < 0)
+        cb_val = _safe_float(cost_basis)
         if qty > 0:
-            has_valid_cost_basis = cost_basis is not None and float(cost_basis) > 0
+            has_valid_cost_basis = cost_basis is not None and cb_val > 0
         else:
-            has_valid_cost_basis = cost_basis is not None and abs(float(cost_basis)) > 0
+            has_valid_cost_basis = cost_basis is not None and abs(cb_val) > 0
         if has_valid_cost_basis and has_same_sign:
             scale_ratio = abs(qty) / abs(snapshot_qty)
-            scaled_cost_basis = abs(float(cost_basis)) * scale_ratio
+            scaled_cost_basis = abs(cb_val) * scale_ratio
             lines.append(
                 f"  {b_account:<36} {_format_quantity(qty):>10} {ticker} "
                 f"{{{{{_format_cost(scaled_cost_basis)} USD}}}}\n"

@@ -3178,13 +3178,18 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
         self.assertNotIn("VMFXX", holdings_out)
 
     def test_non_numeric_quantity_or_price_falls_back_gracefully(self):
-        """Malformed non-numeric amount/quantity/price strings ('N/A', '') and overflow ints do not raise errors."""
+        """Malformed non-numeric amount/quantity/price/balance strings ('N/A', '') and zero-qty buys do not fail."""
         from empower_personal_dashboard.beancount import (
             _is_commodity_trade_tx,
             _is_negative_number,
+            _safe_float,
             _safe_positive_float,
         )
 
+        self.assertEqual(_safe_float("-45.25"), -45.25)
+        self.assertEqual(_safe_float("N/A"), 0.0)
+        self.assertEqual(_safe_float(None), 0.0)
+        self.assertEqual(_safe_float(True), 0.0)
         self.assertEqual(_safe_positive_float("N/A"), 0.0)
         self.assertEqual(_safe_positive_float(""), 0.0)
         self.assertEqual(_safe_positive_float(True), 0.0)
@@ -3195,6 +3200,12 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
         self.assertFalse(_is_negative_number(True))
         self.assertFalse(_is_negative_number(10**400))
         self.assertTrue(_is_negative_number("-25.50"))
+
+        self.assertFalse(
+            _is_commodity_trade_tx(
+                {"symbol": "VTI", "transaction_type": "Buy", "quantity": 0, "price": 250.0}
+            )
+        )
 
         malformed_tx = {
             "user_transaction_id": "tx-malformed-qty",
@@ -3217,16 +3228,27 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
             "investment_type": "Dividend",
             "symbol": "VTI",
         }
+        zero_qty_buy_tx = {
+            "user_transaction_id": "tx-zero-qty-buy",
+            "account_name": "Synthetic Roth IRA",
+            "transaction_date": "2026-10-01",
+            "description": "Zero Qty Buy",
+            "amount": 0.0,
+            "transaction_type": "Buy",
+            "symbol": "VTI",
+            "quantity": 0,
+            "price": 250.0,
+        }
         self.assertFalse(_is_commodity_trade_tx(malformed_tx))
 
         txs = DashboardTransactions(
             start_date="2026-10-01",
             end_date="2026-10-01",
-            total_transactions=2,
+            total_transactions=3,
             money_in=0.0,
             money_out=0.0,
             net_cashflow=0.0,
-            transactions=[malformed_tx, malformed_div_tx],
+            transactions=[malformed_tx, malformed_div_tx, zero_qty_buy_tx],
         )
         tx_out = self.generator.generate_transactions_bean(txs)
         self.assertIn("Equity:Transfers", tx_out)
@@ -3251,10 +3273,22 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
                     "is_asset": True,
                     "currency": "USD",
                 },
+                {
+                    "account_id": "Chk-bad",
+                    "account_name": "Everyday Checking",
+                    "firm_name": "Example Bank",
+                    "account_type": "bank",
+                    "balance": "N/A",
+                    "is_asset": True,
+                    "currency": "USD",
+                },
             ],
         )
+        acct_out = self.generator.generate_accounts_bean(balances=balances, transactions=txs)
         bal_out = self.generator.generate_balances_bean(balances, transactions=txs)
-        self.assertIn("balance Assets:Brokerage:SyntheticRothIRA", bal_out)
+        self.assertIn("2000-01-01 open Assets:ExampleBank:EverydayChecking USD", acct_out)
+        self.assertIn("2026-10-02 balance Assets:Brokerage:SyntheticRothIRA 100.00 USD", bal_out)
+        self.assertIn("2026-10-02 balance Assets:ExampleBank:EverydayChecking 0.00 USD", bal_out)
 
     def test_sweepstakes_description_does_not_classify_as_core_sweep(self):
         """Generic 'sweep' substring (e.g. 'Sweepstakes Promo ACME') at $1.00 does not book a trade."""
@@ -3285,11 +3319,16 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
         self.assertIn("Equity:Transfers", tx_out)
 
     def test_conflicting_core_sweep_signals_and_description_precedence(self):
-        """Primary description wins over conflicting original_description; contradicting type+phrase is rejected."""
+        """Primary description wins over conflicting original_description; contradicting buy+sell signals are rejected."""
+        from empower_personal_dashboard.beancount import _classify_buy_sell
+
+        self.assertEqual(_classify_buy_sell("buy", "sell", "VTI", 10.0, price=100.0), (False, False))
+        self.assertEqual(_classify_buy_sell("sell", "reinvest", "VTI", 10.0, price=100.0), (False, False))
+
         txs = DashboardTransactions(
             start_date="2026-10-01",
             end_date="2026-10-02",
-            total_transactions=3,
+            total_transactions=4,
             money_in=0.0,
             money_out=100.0,
             net_cashflow=-100.0,
@@ -3331,16 +3370,29 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
                     "price": 1.0,
                     "quantity": 50.0,
                 },
+                {
+                    "user_transaction_id": "tx-conflict-explicit-buy-sell",
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-02",
+                    "description": "Conflicting Explicit Types",
+                    "amount": 1000.0,
+                    "transaction_type": "Buy",
+                    "investment_type": "Sell",
+                    "symbol": "VTI",
+                    "price": 100.0,
+                    "quantity": 10.0,
+                },
             ],
         )
         tx_out = self.generator.generate_transactions_bean(txs)
         # First row: primary description + Shares Out agree -> booked as a buy
         self.assertIn("100.000000 SPAXX {{100.000000 USD}}", tx_out)
         self.assertNotIn("-100.000000 SPAXX {}", tx_out)
-        # Second and third rows: conflicting signals -> not booked as trades
+        # Remaining rows: conflicting signals -> not booked as trades
         self.assertNotIn("VMFXX {}", tx_out)
         self.assertNotIn("VMFXX {{", tx_out)
         self.assertNotIn("50.000000 SPAXX", tx_out)
+        self.assertNotIn("10.000000 VTI", tx_out)
 
 
 if __name__ == "__main__":
