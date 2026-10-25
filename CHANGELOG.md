@@ -7,8 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-24
+
 ### Added
-- Hardened Beancount growth-curve reconstruction with real ledger-load validation ([#48](https://github.com/combsmith/empower-personal-dashboard/issues/48)):
+- Hardened Beancount growth-curve reconstruction with real ledger-load validation ([#48](https://github.com/combsmith/empower-personal-dashboard/issues/48), [#69](https://github.com/combsmith/empower-personal-dashboard/pull/69)):
   - Preserved negative (short) snapshot quantities end to end — negative opening lots and negative commodity unit balance assertions — keeping a current short distinct from a fully-sold security.
   - Emitted an explicit shortfall reconciliation when the intra-window running-deficit floor over-provisions an opening lot, so the reconstructed final quantity still matches the asserted snapshot.
   - Persisted the exported window-start boundary in `holdings.bean` and reject (`LedgerAppendError`) an append that broadens the window into the past, which would leave the already-exported opening lot stale.
@@ -144,7 +146,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Authoritative OpenAPI 3.1 specification (`docs/openapi.yaml`) with Redocly CI linting and hermetic contract tests.
 - PyPI onboarding probe, build verification, and Trusted Publishing OIDC workflow.
 
-[Unreleased]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/combsmith/empower-personal-dashboard/compare/v0.4.0...v0.5.0
