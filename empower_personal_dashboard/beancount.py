@@ -77,7 +77,7 @@ _INVESTMENT_ACCOUNT_WORDS = (
     "stock", "portfolio", "529", "other",
 )
 
-# Description phrases indicating retail brokerage core money market sweeps.
+# Description phrases and tickers indicating retail brokerage core money market sweeps.
 _CORE_BUY_PHRASES = (
     "purchase into core account",
     "purchase into core",
@@ -87,6 +87,26 @@ _CORE_SELL_PHRASES = (
     "redemption from core account",
     "redemption from core",
     "sweep from core",
+)
+_CORE_SWEEP_EVIDENCE_PHRASES = (
+    "money market",
+    "core account",
+    "core fund",
+    "cash sweep",
+    "sweep",
+)
+_CORE_MONEY_MARKET_TICKERS = (
+    "SPAXX",
+    "FDRXX",
+    "FZFXX",
+    "FCASH",
+    "SPRXX",
+    "VMFXX",
+    "VUSXX",
+    "VMRXX",
+    "SWVXX",
+    "SNSXX",
+    "SNVXX",
 )
 
 
@@ -303,6 +323,16 @@ def _clean_tx_description(tx: Dict[str, Any]) -> str:
     return clean_api_text(combined).strip().lower()
 
 
+def _has_core_sweep_evidence(ticker: str, price: float, desc_clean: str) -> bool:
+    """True when a transaction carries core money market sweep evidence ($1.00 NAV + fund/sweep signal)."""
+    if abs(price - 1.0) > 0.01:
+        return False
+    return (
+        any(p in desc_clean for p in _CORE_SWEEP_EVIDENCE_PHRASES)
+        or ticker.upper() in _CORE_MONEY_MARKET_TICKERS
+    )
+
+
 def _classify_buy_sell(
     tx_type_clean: str,
     inv_type_clean: str,
@@ -322,8 +352,13 @@ def _classify_buy_sell(
         return False, False
     has_core_buy_phrase = any(p in desc_clean for p in _CORE_BUY_PHRASES)
     has_core_sell_phrase = any(p in desc_clean for p in _CORE_SELL_PHRASES)
-    is_core_sell = has_core_sell_phrase or (tx_type_clean == "shares in" and not has_core_buy_phrase)
-    is_core_buy = not is_core_sell and (has_core_buy_phrase or tx_type_clean == "shares out")
+    has_core_evidence = _has_core_sweep_evidence(ticker, price, desc_clean)
+    is_core_sell = has_core_sell_phrase or (
+        tx_type_clean == "shares in" and has_core_evidence and not has_core_buy_phrase
+    )
+    is_core_buy = not is_core_sell and (
+        has_core_buy_phrase or (tx_type_clean == "shares out" and has_core_evidence)
+    )
     return is_core_buy, is_core_sell
 
 

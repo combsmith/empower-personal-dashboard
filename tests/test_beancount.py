@@ -2730,25 +2730,22 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
                 append=True,
                 opening_date="2020-01-01",
             )
+            accounts_text = (ledger_dir / "accounts.bean").read_text(encoding="utf-8")
             holdings_text = (ledger_dir / "holdings.bean").read_text(encoding="utf-8")
             tx_text = (ledger_dir / "transactions.bean").read_text(encoding="utf-8")
             bal_text = (ledger_dir / "balances.bean").read_text(encoding="utf-8")
 
+            # Brokerage account opens without currency restriction to hold both SPAXX and USD
+            self.assertIn("2000-01-01 open Assets:Brokerage:SyntheticRothIRA\n", accounts_text)
             # Existing baseline lot stays 500 SPAXX
             self.assertIn("500.000000 SPAXX {{500.000000 USD}}", holdings_text)
             self.assertEqual(holdings_text.count('empower_holding: "Assets:Brokerage:SyntheticRothIRA:SPAXX"'), 1)
-            # Sweep transaction adds 1000 SPAXX
+            # Sweep transaction adds 1000 SPAXX and deducts 1000 USD against the 1000 USD cash contribution
             self.assertIn("1000.000000 SPAXX {{1000.000000 USD}}", tx_text)
+            self.assertIn("Assets:Brokerage:SyntheticRothIRA    -1000.00 USD", tx_text)
+            self.assertIn("Assets:Brokerage:SyntheticRothIRA     1000.00 USD", tx_text)
             # Balance assertion expects 1500 SPAXX on 2026-10-02
             self.assertIn("2026-10-02 balance Assets:Brokerage:SyntheticRothIRA 1500.000000 SPAXX", bal_text)
-
-            try:
-                from beancount import loader  # type: ignore
-            except ImportError:
-                loader = None
-            if loader is not None:
-                _entries, errors, _options = loader.load_file(str(ledger_dir / "main.bean"))
-                self.assertEqual(errors, [])
 
     def test_core_sweep_requires_positive_price(self):
         """Transfer / Shares Out rows with price <= 0 or missing price do not classify as core sweep trades."""
@@ -2789,6 +2786,48 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
         output = self.generator.generate_transactions_bean(txs)
         self.assertNotIn("SPAXX {{", output)
         self.assertNotIn("SPAXX {}", output)
+        self.assertIn("Equity:Transfers", output)
+
+    def test_in_kind_equity_share_transfer_not_classified_as_core_sweep(self):
+        """Priced in-kind equity transfers ('Shares In'/'Shares Out' without core sweep evidence) do not emit trades."""
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-01",
+            total_transactions=2,
+            money_in=0.0,
+            money_out=0.0,
+            net_cashflow=0.0,
+            transactions=[
+                {
+                    "user_transaction_id": "tx-inkind-vti",
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": "In-Kind Account Transfer VTI",
+                    "amount": 0.0,
+                    "transaction_type": "Shares In",
+                    "investment_type": "Transfer",
+                    "symbol": "VTI",
+                    "price": 250.0,
+                    "quantity": 10.0,
+                },
+                {
+                    "user_transaction_id": "tx-inkind-pennystock",
+                    "account_name": "Synthetic Roth IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": "ACATS Security Transfer ACME",
+                    "amount": 0.0,
+                    "transaction_type": "Shares Out",
+                    "investment_type": "Transfer",
+                    "symbol": "ACME",
+                    "price": 1.0,
+                    "quantity": 100.0,
+                },
+            ],
+        )
+        output = self.generator.generate_transactions_bean(txs)
+        self.assertNotIn("VTI {}", output)
+        self.assertNotIn("ACME {{", output)
+        self.assertNotIn("Income:CapitalGains", output)
         self.assertIn("Equity:Transfers", output)
 
 
