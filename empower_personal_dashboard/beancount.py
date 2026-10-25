@@ -12,6 +12,7 @@ Provides zero-heavy-dependency formatting for Beancount directives:
 import datetime
 import json
 import logging
+import math
 import os
 import re
 import tempfile
@@ -343,7 +344,7 @@ def _safe_positive_float(val: Any) -> float:
         parsed = abs(float(val))
     except (ValueError, TypeError):
         return 0.0
-    return parsed if parsed == parsed and parsed != float("inf") else 0.0
+    return parsed if math.isfinite(parsed) else 0.0
 
 
 def _clean_tx_description(tx: Dict[str, Any]) -> str:
