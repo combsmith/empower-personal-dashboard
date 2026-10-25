@@ -1590,6 +1590,11 @@ def _run_beancount_export(args, client, balances_res, holdings_res, transactions
         except Exception:
             logger.debug("Could not fetch balances to enrich Beancount accounts")  # lgtm[py/clear-text-logging-sensitive-data]
 
+    if client is not None and transactions_res is not None and holdings_res is not None:
+        transactions_res = client.reconcile_transaction_window(
+            transactions_res, holdings_res, policy="warn",
+        )
+
     mapper = BeancountMapper(mapping_path=args.beancount_map)
     generator = BeancountGenerator(mapper=mapper)
     should_append = not args.overwrite_ledger
