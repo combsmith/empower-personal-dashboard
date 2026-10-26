@@ -773,6 +773,7 @@ class BeancountMapper:
         transaction_type: Optional[str] = None,
         memo: Optional[str] = None,
         tx_id: Optional[Union[str, int]] = None,
+        investment_type: Optional[str] = None,
     ) -> str:
         """Resolve the offsetting balancing leg for a transaction.
 
@@ -781,7 +782,7 @@ class BeancountMapper:
         1. Regex payee rules (matching description and memo).
         2. Category name overrides from mapping.
         3. Category ID overrides from mapping.
-        4. Transfer detection (non-income and non-spending, or transfer keywords) -> Equity:Transfers.
+        4. Transfer detection (transfer/payment keywords in type, category, or description) -> Equity:Transfers.
         5. Income transactions -> Income:Uncategorized.
         6. Spending transactions -> Expenses:Uncategorized.
         7. Default fallback -> Expenses:Uncategorized.
@@ -813,16 +814,22 @@ class BeancountMapper:
         if category_id is not None and str(category_id) in self.categories:
             return self.categories[str(category_id)]
 
-        # 4. Detect transfers (non-income and non-spending, or transfer indicators in type/category/memo)
-        type_clean = (transaction_type or "").lower()
+        # 4. Detect transfers (transfer/payment/cash-move indicators in type/category/memo)
+        type_clean = clean_api_text(transaction_type or "").lower()
+        inv_type_clean = clean_api_text(investment_type or "").lower()
         desc_lower = desc_clean.lower()
         cat_lower = cat_clean.lower()
         is_transfer = (
-            (not is_income and not is_spending)
-            or "transfer" in type_clean
+            "transfer" in type_clean
+            or "transfer" in inv_type_clean
             or "transfer" in cat_lower
             or "transfer" in desc_lower
             or "payment" in type_clean
+            or type_clean in ("cash in", "cash out")
+            or inv_type_clean in ("cash in", "cash out")
+            or cat_lower in ("cash in", "cash out")
+            or "contribution" in type_clean
+            or "contribution" in inv_type_clean
         )
         if is_transfer:
             return ACCT_EQUITY_TRANSFERS
@@ -833,7 +840,7 @@ class BeancountMapper:
         if is_spending:
             return "Expenses:Uncategorized"
 
-        return ACCT_EQUITY_TRANSFERS
+        return "Expenses:Uncategorized"
 
 
 def _calculate_account_transaction_totals(
@@ -860,8 +867,9 @@ def _calculate_account_transaction_totals(
         primary_account = mapper.resolve_account(firm, name, resolved_id, acct_type)
         amount = _safe_positive_float(tx.get("amount"))
         tx_type_clean = clean_api_text(tx.get("transaction_type") or "").strip().lower()
+        inv_type_clean = clean_api_text(tx.get("investment_type") or "").strip().lower()
         is_credit = bool(tx.get("is_credit"))
-        is_cash_in = bool(tx.get("is_cash_in")) or tx_type_clean == "cash in"
+        is_cash_in = bool(tx.get("is_cash_in")) or tx_type_clean == "cash in" or inv_type_clean == "cash in"
         is_income = bool(tx.get("is_income"))
         is_liability = primary_account.startswith("Liabilities") or (not is_asset)
 
@@ -1280,13 +1288,15 @@ class BeancountGenerator:
             return
         for tx in transactions.transactions:
             cat_acct = self.mapper.resolve_category_or_payee(
-                category=tx.get("category_name"),
+                category=tx.get("category") or tx.get("category_name"),
                 description=tx.get("description"),
                 is_spending=bool(tx.get("is_spending", False)),
                 is_income=bool(tx.get("is_income", False)),
                 category_id=tx.get("category_id"),
                 transaction_type=tx.get("transaction_type"),
                 memo=tx.get("original_description"),
+                tx_id=tx.get("user_transaction_id"),
+                investment_type=tx.get("investment_type"),
             )
             if cat_acct and cat_acct not in seen_accounts:
                 seen_accounts.add(cat_acct)
@@ -2338,15 +2348,12 @@ class BeancountGenerator:
             narration_esc = _escape_beancount_string(f"{ticker} Opening Position")
             lines.append(f'{lot_date} * "{payee_esc}" "{narration_esc}"\n')
             lines.append(f'  empower_holding: "{holding_tag}"\n')
-            if opening_price > 0:
-                lines.append(
-                    f"  {b_account:<36} {_format_quantity(baseline_qty):>10} {ticker} "
-                    f"{{{_format_cost(opening_price)} USD}}\n"
-                )
-            else:
-                lines.append(
-                    f"  {b_account:<36} {_format_quantity(baseline_qty):>10} {ticker}\n"
-                )
+            if opening_price <= 0:
+                lines.append("  unknown_cost_basis: TRUE\n")
+            lines.append(
+                f"  {b_account:<36} {_format_quantity(baseline_qty):>10} {ticker} "
+                f"{{{_format_cost(opening_price)} USD}}\n"
+            )
             lines.append(f"  {ACCT_OPENING_BALANCES:<36}\n\n")
 
     def generate_transactions_bean(
@@ -2509,7 +2516,7 @@ class BeancountGenerator:
             "cat_name": cat_name,
             "amount": amount,
             "is_credit": bool(tx.get("is_credit")),
-            "is_cash_in": bool(tx.get("is_cash_in")) or tx_type_clean == "cash in",
+            "is_cash_in": bool(tx.get("is_cash_in")) or tx_type_clean == "cash in" or inv_type_clean == "cash in",
             "is_income": bool(tx.get("is_income")),
             "is_spending": bool(tx.get("is_spending", False)),
             "tx_type_clean": tx_type_clean,
@@ -2598,6 +2605,7 @@ class BeancountGenerator:
         lines.append("\n")
 
     def _emit_investment_sell(self, ctx: Dict[str, Any], lines: List[str]) -> None:
+        """Emit postings for an investment sale or disposal."""
         primary_account = ctx["primary_account"]
         qty = ctx["qty"]
         price = ctx["price"]
@@ -2613,6 +2621,12 @@ class BeancountGenerator:
             lines, ctx["date"], ctx["inv_payee"], ctx["inv_narration"],
             ctx["tag_str"], ctx["tx_id"], ctx["acct_id"],
         )
+        if price <= 0 and amount <= 0:
+            lines.extend([
+                f"  {primary_account:<36} -{_format_quantity(qty)} {ticker} {{}}\n",
+                f"  {ACCT_EQUITY_TRANSFERS}\n\n",
+            ])
+            return
         lines.append(
             f"  {primary_account:<36} -{_format_quantity(qty)} {ticker} {{}} "
             f"@ {_format_price(price)} USD\n"
@@ -2642,6 +2656,7 @@ class BeancountGenerator:
         lines.append(f"  {dividend_acct:<36} {-cash:>8.2f} USD\n\n")
 
     def _emit_standard_tx(self, ctx: Dict[str, Any], lines: List[str]) -> None:
+        """Emit postings for a standard (non-trade, non-dividend) transaction."""
         tx = ctx["tx"]
         cat_name = ctx["cat_name"]
         amount = ctx["amount"]
@@ -2659,6 +2674,7 @@ class BeancountGenerator:
             transaction_type=tx.get("transaction_type"),
             memo=tx.get("original_description"),
             tx_id=ctx.get("tx_id"),
+            investment_type=tx.get("investment_type"),
         )
 
         # Determine double-entry posting signs

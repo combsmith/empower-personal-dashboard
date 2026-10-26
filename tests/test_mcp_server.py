@@ -3,10 +3,13 @@ test_mcp_server.py — Unit tests for Empower Personal Dashboard FastMCP server.
 """
 
 import asyncio
+import errno
 import functools
+import inspect
 import json
 import os
 import tempfile
+import types
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,17 +25,109 @@ from empower_personal_dashboard.mcp_server import (
 )
 
 
+class _FakeFastMCP:
+    """Lightweight test double for FastMCP used when the optional 'mcp' package is not installed.
+
+    Note:
+        This fallback binds arguments via ``inspect.signature(fn).bind(...)`` to reject
+        unknown or missing arguments, but does not perform full Pydantic schema coercion
+        or structured-content wrapping. Full protocol validation runs in CI where the
+        ``mcp`` extra is installed.
+    """
+
+    def __init__(self, name: str, instructions: str = "") -> None:
+        """Initialize the fake MCP server registry."""
+        self.name = name
+        self.instructions = instructions
+        self._tools: dict = {}
+        self._resources: dict = {}
+        self._prompts: dict = {}
+
+    def tool(self):
+        """Register a tool callable."""
+        def decorator(fn):
+            """Store tool callable by function name."""
+            self._tools[fn.__name__] = fn
+            return fn
+
+        return decorator
+
+    def resource(self, uri: str):
+        """Register a resource callable by URI."""
+        def decorator(fn):
+            """Store resource callable by URI."""
+            self._resources[uri] = fn
+            return fn
+
+        return decorator
+
+    def prompt(self):
+        """Register a prompt callable."""
+        def decorator(fn):
+            """Store prompt callable by function name."""
+            self._prompts[fn.__name__] = fn
+            return fn
+
+        return decorator
+
+    async def list_tools(self):
+        """List registered tool descriptors."""
+        return [types.SimpleNamespace(name=n) for n in self._tools]
+
+    async def list_resources(self):
+        """List registered resource descriptors."""
+        return [types.SimpleNamespace(uri=u) for u in self._resources]
+
+    async def list_prompts(self):
+        """List registered prompt descriptors."""
+        return [types.SimpleNamespace(name=n) for n in self._prompts]
+
+    async def call_tool(self, name: str, arguments: dict):
+        """Invoke a registered tool after validating arguments against its signature."""
+        if name not in self._tools:
+            raise ValueError(f"Unknown tool: {name}")
+        fn = self._tools[name]
+        sig = inspect.signature(fn)
+        bound = sig.bind(**(arguments or {}))
+        bound.apply_defaults()
+        res = fn(*bound.args, **bound.kwargs)
+        text = res if isinstance(res, str) else json.dumps(res, default=str)
+        return types.SimpleNamespace(
+            is_error=False,
+            content=[types.SimpleNamespace(text=text)],
+        )
+
+    async def read_resource(self, uri: str):
+        """Read a registered resource by URI."""
+        if uri not in self._resources:
+            raise ValueError(f"Unknown resource: {uri}")
+        return [self._resources[uri]()]
+
+    async def get_prompt(self, name: str, arguments: dict):
+        """Render a registered prompt by name after validating arguments against its signature."""
+        if name not in self._prompts:
+            raise ValueError(f"Unknown prompt: {name}")
+        fn = self._prompts[name]
+        sig = inspect.signature(fn)
+        bound = sig.bind(**(arguments or {}))
+        bound.apply_defaults()
+        res = fn(*bound.args, **bound.kwargs)
+        return types.SimpleNamespace(
+            messages=[types.SimpleNamespace(content=types.SimpleNamespace(text=res))]
+        )
+
 
 def requires_fastmcp(test):
-    """Run the test body when the mcp extra is installed; otherwise assert the
-    documented unavailable-dependency behavior so the test never skips."""
+    """Run the test body using real FastMCP when installed, or _FakeFastMCP otherwise."""
 
     @functools.wraps(test)
     def wrapper(self, *args, **kwargs):
+        """Execute test with FastMCP or the _FakeFastMCP test double."""
         if FastMCP is None:
-            with self.assertRaises(ImportError):
-                create_mcp_server()
-            return None
+            with patch("empower_personal_dashboard.mcp_server.FastMCP", _FakeFastMCP):
+                self.client = EmpowerDashboardClient(mock_mode=True)
+                self.server = create_mcp_server(client=self.client)
+                return test(self, *args, **kwargs)
         return test(self, *args, **kwargs)
 
     return wrapper
@@ -613,7 +708,138 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    @requires_fastmcp
+    def test_export_data_local_file_not_found_returns_export_error_not_auth_required(self) -> None:
+        """Local FileNotFoundError in export_data returns EXPORT_ERROR while missing session maps to AUTH_REQUIRED."""
+        async def run_check() -> None:
+            """Verify local write errors return EXPORT_ERROR and session fetch errors return AUTH_REQUIRED."""
+            with (
+                tempfile.TemporaryDirectory() as tmpdir,
+                patch.dict(os.environ, {"EMPOWER_EXPORT_ROOT": tmpdir}),
+            ):
+                # Local file write FileNotFoundError should report EXPORT_ERROR, not AUTH_REQUIRED
+                with patch(
+                    "empower_personal_dashboard.mcp_server.export_balances_csv",
+                    side_effect=FileNotFoundError("No such file or directory: empower_balances.csv"),
+                ):
+                    res = await self.server.call_tool(
+                        "export_data",
+                        {"destination_dir": tmpdir, "scope": "balances", "export_csv": True},
+                    )
+                    payload = json.loads(res.content[0].text)
+                    self.assertEqual(payload["status"], "error")
+                    self.assertEqual(payload["error_code"], "EXPORT_ERROR")
+
+                # Missing session FileNotFoundError during API fetch still maps to AUTH_REQUIRED
+                missing_sess_client = EmpowerDashboardClient(mock_mode=True)
+                sess_path_str = str(missing_sess_client.session_file)
+                missing_sess_client.fetch_balances = MagicMock(
+                    side_effect=FileNotFoundError(errno.ENOENT, "Session file missing", sess_path_str)
+                )
+                missing_sess_client.fetch_holdings = MagicMock(
+                    side_effect=FileNotFoundError(f"Missing session at {sess_path_str}")
+                )
+                missing_sess_client.fetch_transactions = MagicMock(
+                    side_effect=FileNotFoundError(errno.ENOENT, "Session file missing", sess_path_str)
+                )
+                missing_sess_server = create_mcp_server(client=missing_sess_client)
+                for scope in ("balances", "holdings", "transactions"):
+                    res_auth = await missing_sess_server.call_tool(
+                        "export_data",
+                        {"destination_dir": tmpdir, "scope": scope, "export_csv": False},
+                    )
+                    payload_auth = json.loads(res_auth.content[0].text)
+                    self.assertEqual(payload_auth["status"], "error")
+                    self.assertEqual(payload_auth["error_code"], "AUTH_REQUIRED")
+
+        asyncio.run(run_check())
+
+    @requires_fastmcp
+    def test_non_session_file_not_found_is_not_auth_required(self) -> None:
+        """Non-session FileNotFoundError inside a fetch propagates to EXPORT_ERROR / INTERNAL_ERROR."""
+        async def run_check() -> None:
+            """Verify non-session FileNotFoundError is not masked as AUTH_REQUIRED."""
+            with (
+                tempfile.TemporaryDirectory() as tmpdir,
+                patch.dict(os.environ, {"EMPOWER_EXPORT_ROOT": tmpdir}),
+            ):
+                helper_err_client = EmpowerDashboardClient(mock_mode=True)
+                helper_err_client.fetch_balances = MagicMock(
+                    side_effect=FileNotFoundError(errno.ENOENT, "No such file or directory: 'lpass'", "lpass")
+                )
+                helper_err_client.fetch_holdings = MagicMock(
+                    side_effect=FileNotFoundError(errno.ENOENT, "No such file or directory: 'lpass'", "lpass")
+                )
+                helper_err_client.fetch_transactions = MagicMock(
+                    side_effect=FileNotFoundError("No such file or directory: 'lpass'")
+                )
+                helper_err_server = create_mcp_server(client=helper_err_client)
+                for scope in ("balances", "holdings", "transactions"):
+                    res_helper_export = await helper_err_server.call_tool(
+                        "export_data",
+                        {"destination_dir": tmpdir, "scope": scope, "export_csv": False},
+                    )
+                    payload_helper_export = json.loads(res_helper_export.content[0].text)
+                    self.assertEqual(payload_helper_export["status"], "error")
+                    self.assertEqual(payload_helper_export["error_code"], "EXPORT_ERROR")
+                    self.assertIn("lpass", payload_helper_export["message"])
+
+                res_helper_bal = await helper_err_server.call_tool("get_balances", {})
+                payload_helper_bal = json.loads(res_helper_bal.content[0].text)
+                self.assertEqual(payload_helper_bal["status"], "error")
+                self.assertEqual(payload_helper_bal["error_code"], "INTERNAL_ERROR")
+                self.assertIn("lpass", payload_helper_bal["message"])
+
+        asyncio.run(run_check())
+
+    @requires_fastmcp
+    def test_transaction_session_expiry_clears_cached_transactions(self) -> None:
+        """Session failure on a transaction fetch clears previously cached transaction windows."""
+        async def run_check() -> None:
+            """Verify cache.transactions is cleared when fetch_transactions raises SessionExpiredError."""
+            expiring_tx_client = EmpowerDashboardClient(mock_mode=True)
+            expiring_tx_server = create_mcp_server(client=expiring_tx_client)
+            res_ok = await expiring_tx_server.call_tool(
+                "get_transactions",
+                {"start_date": "2025-01-01", "end_date": "2025-01-31"},
+            )
+            self.assertEqual(json.loads(res_ok.content[0].text)["status"], "success")
+            expiring_tx_client.fetch_transactions = MagicMock(
+                side_effect=SessionExpiredError("Session expired")
+            )
+            res_exp = await expiring_tx_server.call_tool(
+                "get_transactions",
+                {"start_date": "2025-02-01", "end_date": "2025-02-28"},
+            )
+            self.assertEqual(json.loads(res_exp.content[0].text)["error_code"], "AUTH_REQUIRED")
+            res_retry = await expiring_tx_server.call_tool(
+                "get_transactions",
+                {"start_date": "2025-01-01", "end_date": "2025-01-31"},
+            )
+            self.assertEqual(json.loads(res_retry.content[0].text)["error_code"], "AUTH_REQUIRED")
+
+        asyncio.run(run_check())
+
+    def test_fake_fastmcp_rejects_unknown_names_and_arguments(self) -> None:
+        """Verify _FakeFastMCP rejects unknown tools/resources/prompts and unexpected keyword arguments."""
+        async def run_check() -> None:
+            """Check _FakeFastMCP signature and registry validation."""
+            fake_mcp = _FakeFastMCP("test")
+            with self.assertRaises(ValueError):
+                await fake_mcp.call_tool("nonexistent", {})
+            with self.assertRaises(ValueError):
+                await fake_mcp.read_resource("empower://nonexistent")
+            with self.assertRaises(ValueError):
+                await fake_mcp.get_prompt("nonexistent", {})
+            with patch("empower_personal_dashboard.mcp_server.FastMCP", _FakeFastMCP):
+                fake_server = create_mcp_server(client=EmpowerDashboardClient(mock_mode=True))
+                with self.assertRaises(TypeError):
+                    await fake_server.call_tool("get_balances", {"invalid_arg": True})
+
+        asyncio.run(run_check())
+
     def test_import_error_when_mcp_missing(self) -> None:
+        """Verify create_mcp_server raises ImportError when FastMCP is unavailable."""
         with patch("empower_personal_dashboard.mcp_server.FastMCP", None):
             with self.assertRaises(ImportError) as ctx:
                 create_mcp_server()

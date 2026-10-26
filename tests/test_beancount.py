@@ -3659,6 +3659,226 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
         self.assertNotIn("50.000000 SPAXX", tx_out)
         self.assertNotIn("10.000000 VTI", tx_out)
 
+    def test_false_flags_without_transfer_marker_falls_back_to_uncategorized_expense(self):
+        """Missing/false is_income and is_spending without transfer markers resolve to Expenses:Uncategorized."""
+        mapper = BeancountMapper()
+        self.assertEqual(
+            mapper.resolve_category_or_payee(
+                category=None,
+                description="Corner Bakery",
+                is_spending=False,
+                is_income=False,
+            ),
+            "Expenses:Uncategorized",
+        )
+        self.assertEqual(
+            mapper.resolve_category_or_payee(
+                category="General Merchandise",
+                description="Neighborhood Hardware",
+                is_spending=False,
+                is_income=False,
+                transaction_type="Purchase",
+            ),
+            "Expenses:Uncategorized",
+        )
+        # Explicit transfer or payment markers still route to Equity:Transfers
+        self.assertEqual(
+            mapper.resolve_category_or_payee(
+                category=None,
+                description="Internal Move",
+                is_spending=False,
+                is_income=False,
+                transaction_type="Transfer",
+            ),
+            "Equity:Transfers",
+        )
+        self.assertEqual(
+            mapper.resolve_category_or_payee(
+                category=None,
+                description="Shares Out",
+                is_spending=False,
+                is_income=False,
+                transaction_type="Shares Out",
+                investment_type="Transfer",
+            ),
+            "Equity:Transfers",
+        )
+        self.assertEqual(
+            mapper.resolve_category_or_payee(
+                category=None,
+                description="Deposit",
+                is_spending=False,
+                is_income=False,
+                transaction_type=None,
+                investment_type="Cash In",
+            ),
+            "Equity:Transfers",
+        )
+        self.assertEqual(
+            mapper.resolve_category_or_payee(
+                category="Cash Out",
+                description="Withdrawal",
+                is_spending=False,
+                is_income=False,
+            ),
+            "Equity:Transfers",
+        )
+        self.assertEqual(
+            mapper.resolve_category_or_payee(
+                category=None,
+                description="Withdrawal",
+                is_spending=True,
+                is_income=False,
+                transaction_type="Cash Out",
+            ),
+            "Equity:Transfers",
+        )
+        self.assertEqual(
+            mapper.resolve_category_or_payee(
+                category=None,
+                description="IRA Deposit",
+                is_spending=False,
+                is_income=True,
+                transaction_type="Contribution",
+            ),
+            "Equity:Transfers",
+        )
+        self.assertEqual(
+            mapper.resolve_category_or_payee(
+                category="Charitable Giving",
+                description="Annual charitable contribution",
+                is_spending=True,
+                is_income=False,
+            ),
+            "Expenses:Uncategorized",
+        )
+
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-01",
+            total_transactions=1,
+            money_in=0.0,
+            money_out=42.50,
+            net_cashflow=-42.50,
+            transactions=[
+                {
+                    "user_transaction_id": "tx-no-flags",
+                    "account_name": "Everyday Checking",
+                    "firm_name": "Acme Bank",
+                    "account_type": "bank",
+                    "transaction_date": "2026-10-01",
+                    "description": "Local Coffee Roasters",
+                    "amount": 42.50,
+                }
+            ],
+        )
+        tx_out = self.generator.generate_transactions_bean(txs)
+        self.assertIn("Expenses:Uncategorized", tx_out)
+        self.assertNotIn("Equity:Transfers", tx_out)
+
+        cash_in_txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-02",
+            total_transactions=2,
+            money_in=1500.0,
+            money_out=0.0,
+            net_cashflow=1500.0,
+            transactions=[
+                {
+                    "user_transaction_id": "tx-cash-in-contribution",
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "account_type": "investment",
+                    "transaction_date": "2026-10-01",
+                    "description": "Cash Contribution Current Year",
+                    "amount": 1000.0,
+                    "transaction_type": "Cash In",
+                },
+                {
+                    "user_transaction_id": "tx-inv-type-cash-in",
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "account_type": "investment",
+                    "transaction_date": "2026-10-02",
+                    "description": "Incoming Cash Move",
+                    "amount": 500.0,
+                    "investment_type": "Cash In",
+                },
+            ],
+        )
+        cash_in_out = self.generator.generate_transactions_bean(cash_in_txs)
+        self.assertIn("Equity:Transfers", cash_in_out)
+        self.assertNotIn("Expenses:Uncategorized", cash_in_out)
+        self.assertIn("Assets:AcmeBrokerage:TaxableBrokerage   500.00 USD\n", cash_in_out)
+        self.assertIn("Equity:Transfers                      -500.00 USD\n", cash_in_out)
+
+    def test_sell_with_zero_amount_and_zero_price_omits_zero_proceeds_and_capital_loss(self):
+        """A Sell/Disposal with omitted/zero price and amount does not emit @ 0.0000 USD, 0.00 USD proceeds, or CapitalGains."""
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-03",
+            total_transactions=3,
+            money_in=1000.0,
+            money_out=0.0,
+            net_cashflow=1000.0,
+            transactions=[
+                {
+                    "user_transaction_id": "tx-sell-unpriced",
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "account_type": "investment",
+                    "transaction_date": "2026-10-01",
+                    "description": "Sell VTI Unpriced",
+                    "amount": 0.0,
+                    "transaction_type": "Sell",
+                    "investment_type": "Sell",
+                    "symbol": "VTI",
+                    "price": 0.0,
+                    "quantity": 5.0,
+                },
+                {
+                    "user_transaction_id": "tx-sell-derive-price",
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "account_type": "investment",
+                    "transaction_date": "2026-10-02",
+                    "description": "Sell BND Derive Price",
+                    "amount": 500.0,
+                    "transaction_type": "Sell",
+                    "investment_type": "Sell",
+                    "symbol": "BND",
+                    "price": 0.0,
+                    "quantity": 5.0,
+                },
+                {
+                    "user_transaction_id": "tx-sell-derive-amount",
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "account_type": "investment",
+                    "transaction_date": "2026-10-03",
+                    "description": "Sell VXUS Derive Amount",
+                    "amount": 0.0,
+                    "transaction_type": "Sell",
+                    "investment_type": "Sell",
+                    "symbol": "VXUS",
+                    "price": 60.0,
+                    "quantity": 5.0,
+                },
+            ],
+        )
+        tx_out = self.generator.generate_transactions_bean(txs)
+        unpriced_block = tx_out.split("\n\n")[1]
+        self.assertIn("tx-sell-unpriced", unpriced_block)
+        self.assertIn("Assets:AcmeBrokerage:TaxableBrokerage -5.000000 VTI {}\n", unpriced_block)
+        self.assertIn("\n  Equity:Transfers", unpriced_block)
+        self.assertNotIn("@ 0.0000 USD", unpriced_block)
+        self.assertNotIn("0.00 USD", unpriced_block)
+        self.assertNotIn("Income:CapitalGains", unpriced_block)
+        self.assertIn("Assets:AcmeBrokerage:TaxableBrokerage -5.000000 BND {} @ 100.0000 USD\n", tx_out)
+        self.assertIn("Assets:AcmeBrokerage:TaxableBrokerage -5.000000 VXUS {} @ 60.0000 USD\n", tx_out)
+        self.assertNotIn("@ 0.0000 USD", tx_out)
+        self.assertNotRegex(tx_out, r"\s0\.00 USD")
+
 
 if __name__ == "__main__":
     unittest.main()
