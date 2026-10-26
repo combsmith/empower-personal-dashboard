@@ -814,7 +814,7 @@ class BeancountMapper:
         if category_id is not None and str(category_id) in self.categories:
             return self.categories[str(category_id)]
 
-        # 4. Detect transfers (transfer/payment indicators in type/category/memo)
+        # 4. Detect transfers (transfer/payment/cash-move indicators in type/category/memo)
         type_clean = clean_api_text(transaction_type or "").lower()
         inv_type_clean = clean_api_text(investment_type or "").lower()
         desc_lower = desc_clean.lower()
@@ -825,17 +825,13 @@ class BeancountMapper:
             or "transfer" in cat_lower
             or "transfer" in desc_lower
             or "payment" in type_clean
-            or (
-                not is_income
-                and not is_spending
-                and (
-                    type_clean in ("cash in", "cash out")
-                    or "contribution" in type_clean
-                    or "contribution" in inv_type_clean
-                    or "contribution" in cat_lower
-                    or "contribution" in desc_lower
-                )
-            )
+            or type_clean in ("cash in", "cash out")
+            or inv_type_clean in ("cash in", "cash out")
+            or cat_lower in ("cash in", "cash out")
+            or "contribution" in type_clean
+            or "contribution" in inv_type_clean
+            or "contribution" in cat_lower
+            or "contribution" in desc_lower
         )
         if is_transfer:
             return ACCT_EQUITY_TRANSFERS
@@ -2347,12 +2343,14 @@ class BeancountGenerator:
             if holding_tag in existing_keys:
                 continue
             firm = meta.get("firm") or _FIRM_BROKERAGE
-            opening_price = meta.get("buy_price") or meta.get("any_price") or 1.0
+            opening_price = meta.get("buy_price") or meta.get("any_price") or 0.0
 
             payee_esc = _escape_beancount_string(f"{firm} Portfolio Snapshot")
             narration_esc = _escape_beancount_string(f"{ticker} Opening Position")
             lines.append(f'{lot_date} * "{payee_esc}" "{narration_esc}"\n')
             lines.append(f'  empower_holding: "{holding_tag}"\n')
+            if opening_price <= 0:
+                lines.append("  unknown_cost_basis: TRUE\n")
             lines.append(
                 f"  {b_account:<36} {_format_quantity(baseline_qty):>10} {ticker} "
                 f"{{{_format_cost(opening_price)} USD}}\n"

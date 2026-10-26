@@ -871,11 +871,26 @@ class TestIncompleteWindowReconciliation(_BaseGeneratorTest):
         self.assertNotIn("@ 0.0000 USD", content)
         self.assertNotIn("\n  Income:CapitalGains\n", content)
         self.assertIn("\n  Equity:Transfers\n", content)
+        # Reconstructed opening lot for SOLDCO (no known buy/any price) uses 0.000000 USD
+        # with unknown_cost_basis metadata rather than inventing a $1.00/share basis.
+        self.assertIn("5.000000 SOLDCO {0.000000 USD}\n", content)
+        self.assertIn("  unknown_cost_basis: TRUE\n", content)
+        self.assertNotIn("5.000000 SOLDCO {1.000000 USD}", content)
         entries = assert_ledger_loads(self, content)
         for entry in entries:
-            if getattr(entry, "narration", "") in ("Sell VTI Unpriced", "Dispose SOLDCO Unpriced"):
+            narration = getattr(entry, "narration", "")
+            if narration == "SOLDCO Opening Position":
+                self.assertTrue(entry.meta.get("unknown_cost_basis"))
+                for posting in entry.postings:
+                    if posting.account == "Equity:Opening-Balances":
+                        self.assertNotEqual(posting.units.currency, "USD")
+            if narration in ("Sell VTI Unpriced", "Dispose SOLDCO Unpriced"):
                 for posting in entry.postings:
                     if posting.account == "Assets:AcmeBrokerage:TaxableBrokerage":
+                        self.assertNotEqual(posting.units.currency, "USD")
+            if narration == "Dispose SOLDCO Unpriced":
+                for posting in entry.postings:
+                    if posting.account == "Equity:Transfers":
                         self.assertNotEqual(posting.units.currency, "USD")
 
 

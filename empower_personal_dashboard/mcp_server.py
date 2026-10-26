@@ -196,6 +196,13 @@ def create_mcp_server(
             except Exception as e:
                 logger.warning(f"Failed to refresh session from {session_file}: {e}")
 
+    def _is_missing_session_error(exc: FileNotFoundError) -> bool:
+        """Return True when a FileNotFoundError refers to the configured session file."""
+        session_file = getattr(empower_client, "session_file", None)
+        if exc.filename and session_file is not None:
+            return Path(exc.filename).expanduser().resolve() == Path(session_file).expanduser().resolve()
+        return bool(session_file is not None and str(session_file) in str(exc))
+
     def _fetch_balances_cached() -> DashboardBalances:
         """Return cached balances or fetch fresh balances from the client."""
         _ensure_session_fresh()
@@ -205,6 +212,8 @@ def create_mcp_server(
         try:
             fresh = empower_client.fetch_balances()
         except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError) as exc:
+            if isinstance(exc, FileNotFoundError) and not _is_missing_session_error(exc):
+                raise
             _ensure_session_fresh()
             cache.balances = None
             if isinstance(exc, FileNotFoundError):
@@ -222,6 +231,8 @@ def create_mcp_server(
         try:
             fresh = empower_client.fetch_holdings()
         except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError) as exc:
+            if isinstance(exc, FileNotFoundError) and not _is_missing_session_error(exc):
+                raise
             _ensure_session_fresh()
             cache.holdings = None
             if isinstance(exc, FileNotFoundError):
@@ -244,6 +255,8 @@ def create_mcp_server(
         try:
             fresh = empower_client.fetch_transactions(start_date=start_date, end_date=end_date, limit=limit)
         except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError) as exc:
+            if isinstance(exc, FileNotFoundError) and not _is_missing_session_error(exc):
+                raise
             _ensure_session_fresh()
             cache.transactions.clear()
             if isinstance(exc, FileNotFoundError):
@@ -314,7 +327,7 @@ def create_mcp_server(
                 ]
                 res["formatted_output"] = "\n".join(lines)
             return res
-        except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError):
+        except (SessionExpiredError, RequireTwoFactorException):
             return {
                 "status": "error",
                 "error_code": "AUTH_REQUIRED",
@@ -430,7 +443,7 @@ def create_mcp_server(
             elif format.lower() == "table":
                 res["formatted_output"] = render_balances_table(filtered_balances)
             return res
-        except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError):
+        except (SessionExpiredError, RequireTwoFactorException):
             return {
                 "status": "error",
                 "error_code": "AUTH_REQUIRED",
@@ -568,7 +581,7 @@ def create_mcp_server(
                     res["formatted_output"] = render_holdings_table(temp_holdings, limit=clamped_limit, preserve_order=True)
 
             return res
-        except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError):
+        except (SessionExpiredError, RequireTwoFactorException):
             return {
                 "status": "error",
                 "error_code": "AUTH_REQUIRED",
@@ -728,7 +741,7 @@ def create_mcp_server(
                     res["formatted_output"] = render_transactions_table(temp_tx, limit=clamped_limit)
 
             return res
-        except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError):
+        except (SessionExpiredError, RequireTwoFactorException):
             return {
                 "status": "error",
                 "error_code": "AUTH_REQUIRED",
@@ -1070,7 +1083,7 @@ def create_mcp_server(
 
             gen = BeancountGenerator()
             return gen.generate_prices_bean(holdings)
-        except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError):
+        except (SessionExpiredError, RequireTwoFactorException):
             return _AUTH_REQUIRED_BEANCOUNT_COMMENT
         except EmpowerError as e:
             return f";; ERROR [API_ERROR]: Empower API error: {e}\n"
@@ -1088,7 +1101,7 @@ def create_mcp_server(
 
             gen = BeancountGenerator()
             return gen.generate_accounts_bean(balances, holdings) + "\n" + gen.generate_balances_bean(balances, holdings)
-        except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError):
+        except (SessionExpiredError, RequireTwoFactorException):
             return _AUTH_REQUIRED_BEANCOUNT_COMMENT
         except EmpowerError as e:
             return f";; ERROR [API_ERROR]: Empower API error: {e}\n"
@@ -1113,7 +1126,7 @@ def create_mcp_server(
 
             gen = BeancountGenerator()
             return gen.generate_transactions_bean(tx_data, balances=balances)
-        except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError):
+        except (SessionExpiredError, RequireTwoFactorException):
             return _AUTH_REQUIRED_BEANCOUNT_COMMENT
         except EmpowerError as e:
             return f";; ERROR [API_ERROR]: Empower API error: {e}\n"

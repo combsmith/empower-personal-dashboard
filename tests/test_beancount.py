@@ -3703,6 +3703,46 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
             ),
             "Equity:Transfers",
         )
+        self.assertEqual(
+            mapper.resolve_category_or_payee(
+                category=None,
+                description="Deposit",
+                is_spending=False,
+                is_income=False,
+                transaction_type=None,
+                investment_type="Cash In",
+            ),
+            "Equity:Transfers",
+        )
+        self.assertEqual(
+            mapper.resolve_category_or_payee(
+                category="Cash Out",
+                description="Withdrawal",
+                is_spending=False,
+                is_income=False,
+            ),
+            "Equity:Transfers",
+        )
+        self.assertEqual(
+            mapper.resolve_category_or_payee(
+                category=None,
+                description="Withdrawal",
+                is_spending=True,
+                is_income=False,
+                transaction_type="Cash Out",
+            ),
+            "Equity:Transfers",
+        )
+        self.assertEqual(
+            mapper.resolve_category_or_payee(
+                category=None,
+                description="IRA Deposit",
+                is_spending=False,
+                is_income=True,
+                transaction_type="Contribution",
+            ),
+            "Equity:Transfers",
+        )
 
         txs = DashboardTransactions(
             start_date="2026-10-01",
