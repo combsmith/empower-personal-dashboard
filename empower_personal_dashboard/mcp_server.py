@@ -155,6 +155,7 @@ def create_mcp_server(
     empower_client: Optional[EmpowerDashboardClient] = None
 
     def _default_mcp_password_provider() -> Optional[str]:
+        """Resolve the password for the configured Empower user via keyring or helper."""
         username = empower_client.username if empower_client is not None else None
         if not username:
             username = os.environ.get("EMPOWER_USERNAME") or os.environ.get("PERSONAL_CAPITAL_EMAIL")
@@ -177,6 +178,7 @@ def create_mcp_server(
             pass
 
     def _ensure_session_fresh() -> None:
+        """Reload the persisted session file and clear caches when its mtime advances."""
         nonlocal last_session_mtime
         if empower_client.mock_mode:
             return
@@ -852,6 +854,7 @@ def create_mcp_server(
             files_created: List[Dict[str, Any]] = []
 
             def _check_symlink(target_file: Path) -> Optional[Dict[str, Any]]:
+                """Return an ACCESS_DENIED payload when target_file is a symlink."""
                 if target_file.is_symlink():
                     return {
                         "status": "error",

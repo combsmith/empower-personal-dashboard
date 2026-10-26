@@ -870,7 +870,13 @@ class TestIncompleteWindowReconciliation(_BaseGeneratorTest):
             content = target.read_text(encoding="utf-8")
         self.assertNotIn("@ 0.0000 USD", content)
         self.assertNotIn("\n  Income:CapitalGains\n", content)
-        assert_ledger_loads(self, content)
+        self.assertIn("\n  Equity:Transfers\n", content)
+        entries = assert_ledger_loads(self, content)
+        for entry in entries:
+            if getattr(entry, "narration", "") in ("Sell VTI Unpriced", "Dispose SOLDCO Unpriced"):
+                for posting in entry.postings:
+                    if posting.account == "Assets:AcmeBrokerage:TaxableBrokerage":
+                        self.assertNotEqual(posting.units.currency, "USD")
 
 
 if __name__ == "__main__":

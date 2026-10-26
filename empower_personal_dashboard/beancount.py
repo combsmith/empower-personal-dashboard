@@ -2616,7 +2616,7 @@ class BeancountGenerator:
         if price <= 0 and amount <= 0:
             lines.extend([
                 f"  {primary_account:<36} -{_format_quantity(qty)} {ticker} {{}}\n",
-                f"  {primary_account}\n\n",
+                f"  {ACCT_EQUITY_TRANSFERS}\n\n",
             ])
             return
         lines.append(

@@ -3782,11 +3782,17 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
             ],
         )
         tx_out = self.generator.generate_transactions_bean(txs)
-        self.assertIn("Assets:AcmeBrokerage:TaxableBrokerage -5.000000 VTI {}\n", tx_out)
+        unpriced_block = tx_out.split("\n\n")[1]
+        self.assertIn("tx-sell-unpriced", unpriced_block)
+        self.assertIn("Assets:AcmeBrokerage:TaxableBrokerage -5.000000 VTI {}\n", unpriced_block)
+        self.assertIn("\n  Equity:Transfers", unpriced_block)
+        self.assertNotIn("@ 0.0000 USD", unpriced_block)
+        self.assertNotIn("0.00 USD", unpriced_block)
+        self.assertNotIn("Income:CapitalGains", unpriced_block)
         self.assertIn("Assets:AcmeBrokerage:TaxableBrokerage -5.000000 BND {} @ 100.0000 USD\n", tx_out)
         self.assertIn("Assets:AcmeBrokerage:TaxableBrokerage -5.000000 VXUS {} @ 60.0000 USD\n", tx_out)
         self.assertNotIn("@ 0.0000 USD", tx_out)
-        self.assertNotIn("0.00 USD", tx_out)
+        self.assertNotRegex(tx_out, r"\s0\.00 USD")
 
 
 if __name__ == "__main__":

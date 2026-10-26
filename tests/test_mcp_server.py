@@ -37,6 +37,7 @@ class _FakeFastMCP:
     def tool(self):
         """Register a tool callable."""
         def decorator(fn):
+            """Store tool callable by function name."""
             self._tools[fn.__name__] = fn
             return fn
 
@@ -45,6 +46,7 @@ class _FakeFastMCP:
     def resource(self, uri: str):
         """Register a resource callable by URI."""
         def decorator(fn):
+            """Store resource callable by URI."""
             self._resources[uri] = fn
             return fn
 
@@ -53,6 +55,7 @@ class _FakeFastMCP:
     def prompt(self):
         """Register a prompt callable."""
         def decorator(fn):
+            """Store prompt callable by function name."""
             self._prompts[fn.__name__] = fn
             return fn
 
@@ -95,6 +98,7 @@ def requires_fastmcp(test):
 
     @functools.wraps(test)
     def wrapper(self, *args, **kwargs):
+        """Execute test with FastMCP or the _FakeFastMCP test double."""
         if FastMCP is None:
             with patch("empower_personal_dashboard.mcp_server.FastMCP", _FakeFastMCP):
                 self.client = EmpowerDashboardClient(mock_mode=True)
@@ -684,6 +688,7 @@ class TestMCPServer(unittest.TestCase):
     def test_export_data_local_file_not_found_returns_export_error_not_auth_required(self) -> None:
         """Local FileNotFoundError in export_data returns EXPORT_ERROR while missing session maps to AUTH_REQUIRED."""
         async def run_check() -> None:
+            """Verify local write errors return EXPORT_ERROR and session fetch errors return AUTH_REQUIRED."""
             with (
                 tempfile.TemporaryDirectory() as tmpdir,
                 patch.dict(os.environ, {"EMPOWER_EXPORT_ROOT": tmpdir}),
@@ -725,6 +730,7 @@ class TestMCPServer(unittest.TestCase):
         asyncio.run(run_check())
 
     def test_import_error_when_mcp_missing(self) -> None:
+        """Verify create_mcp_server raises ImportError when FastMCP is unavailable."""
         with patch("empower_personal_dashboard.mcp_server.FastMCP", None):
             with self.assertRaises(ImportError) as ctx:
                 create_mcp_server()
