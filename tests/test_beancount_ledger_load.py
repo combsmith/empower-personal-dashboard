@@ -815,6 +815,84 @@ class TestIncompleteWindowReconciliation(_BaseGeneratorTest):
         # The generated ledger must load cleanly without Beancount errors
         assert_ledger_loads(self, content)
 
+    def test_sell_with_omitted_amount_and_price_loads_without_capital_loss(self):
+        """A sell that omits both price and amount loads cleanly without inferring a 100% capital loss."""
+        holdings = _vti_holdings(as_of="2024-10-01", quantity=50.0, price=280.0, cost_basis=10000.0)
+        txns = DashboardTransactions(
+            start_date="2024-01-01",
+            end_date="2024-10-01",
+            total_transactions=2,
+            money_in=0.0,
+            money_out=0.0,
+            net_cashflow=0.0,
+            transactions=[
+                {
+                    "user_transaction_id": "tx-unpriced-sell-1",
+                    "account_id": "ACC-BRK-001",
+                    "user_account_id": 5001,
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "transaction_date": "2024-06-15",
+                    "description": "Sell VTI Unpriced",
+                    "amount": None,
+                    "transaction_type": "Sell",
+                    "investment_type": "Sell",
+                    "symbol": "VTI",
+                    "price": None,
+                    "quantity": 10.0,
+                },
+                {
+                    "user_transaction_id": "tx-unpriced-sell-2",
+                    "account_id": "ACC-BRK-001",
+                    "user_account_id": 5001,
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "transaction_date": "2024-07-01",
+                    "description": "Dispose SOLDCO Unpriced",
+                    "amount": 0.0,
+                    "transaction_type": "Disposal",
+                    "investment_type": "Sell",
+                    "symbol": "SOLDCO",
+                    "price": 0.0,
+                    "quantity": 5.0,
+                },
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "unpriced_sell.bean"
+            self.generator.export_single_file(
+                filepath=target,
+                balances=_brokerage_balances(as_of="2024-10-01", balance=14000.0),
+                holdings=holdings,
+                transactions=txns,
+                opening_date="2020-01-01",
+            )
+            content = target.read_text(encoding="utf-8")
+        self.assertNotIn("@ 0.0000 USD", content)
+        self.assertNotIn("\n  Income:CapitalGains\n", content)
+        self.assertIn("\n  Equity:Transfers\n", content)
+        # Reconstructed opening lot for SOLDCO (no known buy/any price) uses 0.000000 USD
+        # with unknown_cost_basis metadata rather than inventing a $1.00/share basis.
+        self.assertIn("5.000000 SOLDCO {0.000000 USD}\n", content)
+        self.assertIn("  unknown_cost_basis: TRUE\n", content)
+        self.assertNotIn("5.000000 SOLDCO {1.000000 USD}", content)
+        entries = assert_ledger_loads(self, content)
+        for entry in entries:
+            narration = getattr(entry, "narration", "")
+            if narration == "SOLDCO Opening Position":
+                self.assertTrue(entry.meta.get("unknown_cost_basis"))
+                for posting in entry.postings:
+                    if posting.account == "Equity:Opening-Balances":
+                        self.assertNotEqual(posting.units.currency, "USD")
+            if narration in ("Sell VTI Unpriced", "Dispose SOLDCO Unpriced"):
+                for posting in entry.postings:
+                    if posting.account == "Assets:AcmeBrokerage:TaxableBrokerage":
+                        self.assertNotEqual(posting.units.currency, "USD")
+            if narration == "Dispose SOLDCO Unpriced":
+                for posting in entry.postings:
+                    if posting.account == "Equity:Transfers":
+                        self.assertNotEqual(posting.units.currency, "USD")
+
 
 if __name__ == "__main__":
     unittest.main()
