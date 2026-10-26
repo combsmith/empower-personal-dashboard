@@ -3743,6 +3743,15 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
             ),
             "Equity:Transfers",
         )
+        self.assertEqual(
+            mapper.resolve_category_or_payee(
+                category="Charitable Giving",
+                description="Annual charitable contribution",
+                is_spending=True,
+                is_income=False,
+            ),
+            "Expenses:Uncategorized",
+        )
 
         txs = DashboardTransactions(
             start_date="2026-10-01",
@@ -3769,11 +3778,11 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
 
         cash_in_txs = DashboardTransactions(
             start_date="2026-10-01",
-            end_date="2026-10-01",
-            total_transactions=1,
-            money_in=1000.0,
+            end_date="2026-10-02",
+            total_transactions=2,
+            money_in=1500.0,
             money_out=0.0,
-            net_cashflow=1000.0,
+            net_cashflow=1500.0,
             transactions=[
                 {
                     "user_transaction_id": "tx-cash-in-contribution",
@@ -3784,12 +3793,24 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
                     "description": "Cash Contribution Current Year",
                     "amount": 1000.0,
                     "transaction_type": "Cash In",
-                }
+                },
+                {
+                    "user_transaction_id": "tx-inv-type-cash-in",
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "account_type": "investment",
+                    "transaction_date": "2026-10-02",
+                    "description": "Incoming Cash Move",
+                    "amount": 500.0,
+                    "investment_type": "Cash In",
+                },
             ],
         )
         cash_in_out = self.generator.generate_transactions_bean(cash_in_txs)
         self.assertIn("Equity:Transfers", cash_in_out)
         self.assertNotIn("Expenses:Uncategorized", cash_in_out)
+        self.assertIn("Assets:AcmeBrokerage:TaxableBrokerage   500.00 USD\n", cash_in_out)
+        self.assertIn("Equity:Transfers                      -500.00 USD\n", cash_in_out)
 
     def test_sell_with_zero_amount_and_zero_price_omits_zero_proceeds_and_capital_loss(self):
         """A Sell/Disposal with omitted/zero price and amount does not emit @ 0.0000 USD, 0.00 USD proceeds, or CapitalGains."""

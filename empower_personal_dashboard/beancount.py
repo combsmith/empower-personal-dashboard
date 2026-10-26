@@ -830,8 +830,6 @@ class BeancountMapper:
             or cat_lower in ("cash in", "cash out")
             or "contribution" in type_clean
             or "contribution" in inv_type_clean
-            or "contribution" in cat_lower
-            or "contribution" in desc_lower
         )
         if is_transfer:
             return ACCT_EQUITY_TRANSFERS
@@ -869,8 +867,9 @@ def _calculate_account_transaction_totals(
         primary_account = mapper.resolve_account(firm, name, resolved_id, acct_type)
         amount = _safe_positive_float(tx.get("amount"))
         tx_type_clean = clean_api_text(tx.get("transaction_type") or "").strip().lower()
+        inv_type_clean = clean_api_text(tx.get("investment_type") or "").strip().lower()
         is_credit = bool(tx.get("is_credit"))
-        is_cash_in = bool(tx.get("is_cash_in")) or tx_type_clean == "cash in"
+        is_cash_in = bool(tx.get("is_cash_in")) or tx_type_clean == "cash in" or inv_type_clean == "cash in"
         is_income = bool(tx.get("is_income"))
         is_liability = primary_account.startswith("Liabilities") or (not is_asset)
 
@@ -2517,7 +2516,7 @@ class BeancountGenerator:
             "cat_name": cat_name,
             "amount": amount,
             "is_credit": bool(tx.get("is_credit")),
-            "is_cash_in": bool(tx.get("is_cash_in")) or tx_type_clean == "cash in",
+            "is_cash_in": bool(tx.get("is_cash_in")) or tx_type_clean == "cash in" or inv_type_clean == "cash in",
             "is_income": bool(tx.get("is_income")),
             "is_spending": bool(tx.get("is_spending", False)),
             "tx_type_clean": tx_type_clean,

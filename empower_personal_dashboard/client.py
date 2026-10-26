@@ -866,7 +866,7 @@ class EmpowerDashboardClient:
 
         try:
             result = self.fetch("/newaccount/getAccounts")
-        except SessionExpiredError:
+        except (SessionExpiredError, FileNotFoundError):
             raise
         except Exception as e:
             raise EmpowerError(f"Failed to fetch accounts from dashboard: {e}") from e
@@ -919,7 +919,7 @@ class EmpowerDashboardClient:
 
         try:
             result = self.fetch("/invest/getHoldings")
-        except SessionExpiredError:
+        except (SessionExpiredError, FileNotFoundError):
             raise
         except Exception as e:
             raise EmpowerError(f"Failed to fetch holdings from dashboard: {e}") from e
@@ -984,7 +984,7 @@ class EmpowerDashboardClient:
 
         try:
             result = self.fetch("/transaction/getUserTransactions", data=payload)
-        except SessionExpiredError:
+        except (SessionExpiredError, FileNotFoundError):
             raise
         except Exception as e:
             raise EmpowerError(f"Failed to fetch transactions from dashboard: {e}") from e

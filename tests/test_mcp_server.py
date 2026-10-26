@@ -752,8 +752,17 @@ class TestMCPServer(unittest.TestCase):
                     self.assertEqual(payload_auth["status"], "error")
                     self.assertEqual(payload_auth["error_code"], "AUTH_REQUIRED")
 
-                # Non-session FileNotFoundError inside a fetch (e.g. missing credential-helper binary)
-                # must NOT be masked as AUTH_REQUIRED; it propagates to EXPORT_ERROR / INTERNAL_ERROR
+        asyncio.run(run_check())
+
+    @requires_fastmcp
+    def test_non_session_file_not_found_is_not_auth_required(self) -> None:
+        """Non-session FileNotFoundError inside a fetch propagates to EXPORT_ERROR / INTERNAL_ERROR."""
+        async def run_check() -> None:
+            """Verify non-session FileNotFoundError is not masked as AUTH_REQUIRED."""
+            with (
+                tempfile.TemporaryDirectory() as tmpdir,
+                patch.dict(os.environ, {"EMPOWER_EXPORT_ROOT": tmpdir}),
+            ):
                 helper_err_client = EmpowerDashboardClient(mock_mode=True)
                 helper_err_client.fetch_balances = MagicMock(
                     side_effect=FileNotFoundError(errno.ENOENT, "No such file or directory: 'lpass'", "lpass")
@@ -781,40 +790,51 @@ class TestMCPServer(unittest.TestCase):
                 self.assertEqual(payload_helper_bal["error_code"], "INTERNAL_ERROR")
                 self.assertIn("lpass", payload_helper_bal["message"])
 
-                # Validate _FakeFastMCP signature checking rejects unknown arguments
-                fake_mcp = _FakeFastMCP("test")
-                with self.assertRaises(ValueError):
-                    await fake_mcp.call_tool("nonexistent", {})
-                with self.assertRaises(ValueError):
-                    await fake_mcp.read_resource("empower://nonexistent")
-                with self.assertRaises(ValueError):
-                    await fake_mcp.get_prompt("nonexistent", {})
-                with patch("empower_personal_dashboard.mcp_server.FastMCP", _FakeFastMCP):
-                    fake_server = create_mcp_server(client=EmpowerDashboardClient(mock_mode=True))
-                    with self.assertRaises(TypeError):
-                        await fake_server.call_tool("get_balances", {"invalid_arg": True})
+        asyncio.run(run_check())
 
-                # Verify that a session failure on a new transaction query clears any previously cached transactions
-                expiring_tx_client = EmpowerDashboardClient(mock_mode=True)
-                expiring_tx_server = create_mcp_server(client=expiring_tx_client)
-                res_ok = await expiring_tx_server.call_tool(
-                    "get_transactions",
-                    {"start_date": "2025-01-01", "end_date": "2025-01-31"},
-                )
-                self.assertEqual(json.loads(res_ok.content[0].text)["status"], "success")
-                expiring_tx_client.fetch_transactions = MagicMock(
-                    side_effect=SessionExpiredError("Session expired")
-                )
-                res_exp = await expiring_tx_server.call_tool(
-                    "get_transactions",
-                    {"start_date": "2025-02-01", "end_date": "2025-02-28"},
-                )
-                self.assertEqual(json.loads(res_exp.content[0].text)["error_code"], "AUTH_REQUIRED")
-                res_retry = await expiring_tx_server.call_tool(
-                    "get_transactions",
-                    {"start_date": "2025-01-01", "end_date": "2025-01-31"},
-                )
-                self.assertEqual(json.loads(res_retry.content[0].text)["error_code"], "AUTH_REQUIRED")
+    @requires_fastmcp
+    def test_transaction_session_expiry_clears_cached_transactions(self) -> None:
+        """Session failure on a transaction fetch clears previously cached transaction windows."""
+        async def run_check() -> None:
+            """Verify cache.transactions is cleared when fetch_transactions raises SessionExpiredError."""
+            expiring_tx_client = EmpowerDashboardClient(mock_mode=True)
+            expiring_tx_server = create_mcp_server(client=expiring_tx_client)
+            res_ok = await expiring_tx_server.call_tool(
+                "get_transactions",
+                {"start_date": "2025-01-01", "end_date": "2025-01-31"},
+            )
+            self.assertEqual(json.loads(res_ok.content[0].text)["status"], "success")
+            expiring_tx_client.fetch_transactions = MagicMock(
+                side_effect=SessionExpiredError("Session expired")
+            )
+            res_exp = await expiring_tx_server.call_tool(
+                "get_transactions",
+                {"start_date": "2025-02-01", "end_date": "2025-02-28"},
+            )
+            self.assertEqual(json.loads(res_exp.content[0].text)["error_code"], "AUTH_REQUIRED")
+            res_retry = await expiring_tx_server.call_tool(
+                "get_transactions",
+                {"start_date": "2025-01-01", "end_date": "2025-01-31"},
+            )
+            self.assertEqual(json.loads(res_retry.content[0].text)["error_code"], "AUTH_REQUIRED")
+
+        asyncio.run(run_check())
+
+    def test_fake_fastmcp_rejects_unknown_names_and_arguments(self) -> None:
+        """Verify _FakeFastMCP rejects unknown tools/resources/prompts and unexpected keyword arguments."""
+        async def run_check() -> None:
+            """Check _FakeFastMCP signature and registry validation."""
+            fake_mcp = _FakeFastMCP("test")
+            with self.assertRaises(ValueError):
+                await fake_mcp.call_tool("nonexistent", {})
+            with self.assertRaises(ValueError):
+                await fake_mcp.read_resource("empower://nonexistent")
+            with self.assertRaises(ValueError):
+                await fake_mcp.get_prompt("nonexistent", {})
+            with patch("empower_personal_dashboard.mcp_server.FastMCP", _FakeFastMCP):
+                fake_server = create_mcp_server(client=EmpowerDashboardClient(mock_mode=True))
+                with self.assertRaises(TypeError):
+                    await fake_server.call_tool("get_balances", {"invalid_arg": True})
 
         asyncio.run(run_check())
 
