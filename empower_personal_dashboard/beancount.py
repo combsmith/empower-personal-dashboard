@@ -825,6 +825,17 @@ class BeancountMapper:
             or "transfer" in cat_lower
             or "transfer" in desc_lower
             or "payment" in type_clean
+            or (
+                not is_income
+                and not is_spending
+                and (
+                    type_clean in ("cash in", "cash out")
+                    or "contribution" in type_clean
+                    or "contribution" in inv_type_clean
+                    or "contribution" in cat_lower
+                    or "contribution" in desc_lower
+                )
+            )
         )
         if is_transfer:
             return ACCT_EQUITY_TRANSFERS

@@ -245,6 +245,7 @@ def create_mcp_server(
             fresh = empower_client.fetch_transactions(start_date=start_date, end_date=end_date, limit=limit)
         except (SessionExpiredError, RequireTwoFactorException, FileNotFoundError) as exc:
             _ensure_session_fresh()
+            cache.transactions.clear()
             if isinstance(exc, FileNotFoundError):
                 raise SessionExpiredError(str(exc)) from exc
             raise

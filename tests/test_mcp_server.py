@@ -727,6 +727,28 @@ class TestMCPServer(unittest.TestCase):
                     self.assertEqual(payload_auth["status"], "error")
                     self.assertEqual(payload_auth["error_code"], "AUTH_REQUIRED")
 
+                # Verify that a session failure on a new transaction query clears any previously cached transactions
+                expiring_tx_client = EmpowerDashboardClient(mock_mode=True)
+                expiring_tx_server = create_mcp_server(client=expiring_tx_client)
+                res_ok = await expiring_tx_server.call_tool(
+                    "get_transactions",
+                    {"start_date": "2025-01-01", "end_date": "2025-01-31"},
+                )
+                self.assertEqual(json.loads(res_ok.content[0].text)["status"], "success")
+                expiring_tx_client.fetch_transactions = MagicMock(
+                    side_effect=SessionExpiredError("Session expired")
+                )
+                res_exp = await expiring_tx_server.call_tool(
+                    "get_transactions",
+                    {"start_date": "2025-02-01", "end_date": "2025-02-28"},
+                )
+                self.assertEqual(json.loads(res_exp.content[0].text)["error_code"], "AUTH_REQUIRED")
+                res_retry = await expiring_tx_server.call_tool(
+                    "get_transactions",
+                    {"start_date": "2025-01-01", "end_date": "2025-01-31"},
+                )
+                self.assertEqual(json.loads(res_retry.content[0].text)["error_code"], "AUTH_REQUIRED")
+
         asyncio.run(run_check())
 
     def test_import_error_when_mcp_missing(self) -> None:
