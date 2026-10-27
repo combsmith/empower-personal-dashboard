@@ -417,6 +417,9 @@ ENV/
 .pytest_cache/
 .coverage
 htmlcov/
+# Mutation testing (mutmut): mutant copies, results cache, local tmp
+mutants/
+.local-tmp/
 
 # Environment and sensitive credential files
 *.log
