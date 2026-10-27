@@ -101,11 +101,12 @@ class TestCheckMutationThresholds(unittest.TestCase):
                 {"empower_personal_dashboard.sanitizers.x_c__mutmut_1": 36},
             )
             by_module = self.mod.load_statuses(Path(tmp))
-        self.assertEqual(by_module["models"]["killed"], 1)
-        self.assertEqual(by_module["models"]["survived"], 1)
-        self.assertEqual(by_module["models"]["no tests"], 1)
-        self.assertEqual(by_module["models"]["not checked"], 1)
-        self.assertEqual(by_module["sanitizers"]["timeout"], 1)
+        models = by_module["empower_personal_dashboard/models"]
+        self.assertEqual(models["killed"], 1)
+        self.assertEqual(models["survived"], 1)
+        self.assertEqual(models["no tests"], 1)
+        self.assertEqual(models["not checked"], 1)
+        self.assertEqual(by_module["empower_personal_dashboard/sanitizers"]["timeout"], 1)
 
     def test_load_statuses_uses_meta_filename_for_init_module(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -115,7 +116,7 @@ class TestCheckMutationThresholds(unittest.TestCase):
                 {"empower_personal_dashboard.x_create_server__mutmut_1": 1},
             )
             by_module = self.mod.load_statuses(Path(tmp))
-        self.assertEqual(by_module["__init__"]["killed"], 1)
+        self.assertEqual(by_module["empower_personal_dashboard/__init__"]["killed"], 1)
         self.assertNotIn("x_create_server__mutmut_1", by_module)
 
     def test_main_passes_when_thresholds_met(self):
@@ -170,6 +171,87 @@ class TestCheckMutationThresholds(unittest.TestCase):
             )
             code = self.mod.main(["--mutants-dir", tmp, "--threshold", "beancount=80"])
         self.assertEqual(code, 2)
+
+    def test_load_statuses_keys_same_basename_by_path(self):
+        # Same file name in different subpackages must not merge (issue #125).
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_meta(tmp, "pkg/a/models.py.meta", {"pkg.a.models.x_f__mutmut_1": 1})
+            _write_meta(
+                tmp,
+                "pkg/b/models.py.meta",
+                {"pkg.b.models.x_f__mutmut_1": 0, "pkg.b.models.x_f__mutmut_2": 0},
+            )
+            by_module = self.mod.load_statuses(Path(tmp))
+        self.assertEqual(set(by_module), {"pkg/a/models", "pkg/b/models"})
+        self.assertEqual(self.mod.compute_score(by_module["pkg/a/models"]), 100.0)
+        self.assertEqual(self.mod.compute_score(by_module["pkg/b/models"]), 0.0)
+
+    def test_main_gates_same_basename_modules_separately(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_meta(tmp, "pkg/a/models.py.meta", {"pkg.a.models.x_f__mutmut_1": 1})
+            _write_meta(tmp, "pkg/b/models.py.meta", {"pkg.b.models.x_f__mutmut_1": 0})
+            passing = self.mod.main(
+                ["--mutants-dir", tmp, "--threshold", "pkg/a/models=90"]
+            )
+            failing = self.mod.main(
+                ["--mutants-dir", tmp, "--threshold", "pkg/b/models=90"]
+            )
+        self.assertEqual(passing, 0)
+        self.assertEqual(failing, 1)
+
+    def test_main_accepts_full_path_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_meta(
+                tmp,
+                "empower_personal_dashboard/models.py.meta",
+                {"empower_personal_dashboard.models.x_a__mutmut_1": 0},
+            )
+            code = self.mod.main(
+                ["--mutants-dir", tmp, "--threshold", "empower_personal_dashboard/models=80"]
+            )
+        self.assertEqual(code, 1)
+
+    def test_main_short_alias_resolves_when_unambiguous(self):
+        # models=80 must gate empower_personal_dashboard/models, not go missing.
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_meta(
+                tmp,
+                "empower_personal_dashboard/models.py.meta",
+                {"empower_personal_dashboard.models.x_a__mutmut_1": 0},
+            )
+            _write_meta(
+                tmp,
+                "empower_personal_dashboard/sanitizers.py.meta",
+                {"empower_personal_dashboard.sanitizers.x_a__mutmut_1": 1},
+            )
+            breach = self.mod.main(["--mutants-dir", tmp, "--threshold", "models=80"])
+            ok = self.mod.main(["--mutants-dir", tmp, "--threshold", "sanitizers=80"])
+        self.assertEqual(breach, 1)
+        self.assertEqual(ok, 0)
+
+    def test_main_errors_on_ambiguous_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_meta(tmp, "pkg/a/models.py.meta", {"pkg.a.models.x_f__mutmut_1": 1})
+            _write_meta(tmp, "pkg/b/models.py.meta", {"pkg.b.models.x_f__mutmut_1": 1})
+            code = self.mod.main(["--mutants-dir", tmp, "--threshold", "models=50"])
+        self.assertEqual(code, 2)
+
+    def test_resolve_thresholds_exact_key_beats_alias(self):
+        # A top-level models.py is keyed "models"; it wins over pkg/models.
+        resolved = self.mod.resolve_thresholds(
+            {"models": 50.0}, ["models", "pkg/models"]
+        )
+        self.assertEqual(resolved, {"models": 50.0})
+
+    def test_resolve_thresholds_ambiguous_alias_names_candidates(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.mod.resolve_thresholds({"models": 50.0}, ["pkg/a/models", "pkg/b/models"])
+        self.assertIn("pkg/a/models", str(ctx.exception))
+        self.assertIn("pkg/b/models", str(ctx.exception))
+
+    def test_resolve_thresholds_keeps_unknown_name_for_no_data_report(self):
+        resolved = self.mod.resolve_thresholds({"beancount": 80.0}, ["pkg/models"])
+        self.assertEqual(resolved, {"beancount": 80.0})
 
 
 if __name__ == "__main__":

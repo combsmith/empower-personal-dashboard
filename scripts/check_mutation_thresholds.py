@@ -7,6 +7,12 @@ aggregates them by source module, prints a per-module mutation score, and —
 unless ``--report-only`` is given — exits non-zero when a module falls below
 its ``--threshold MODULE=SCORE`` gate.
 
+Modules are keyed by their meta file's path relative to the mutants directory,
+minus ``.py.meta`` (``empower_personal_dashboard/models``), so same-named files
+in different subpackages are scored separately. ``--threshold`` accepts that
+key or, when exactly one module has that file name, the short name
+(``models``). An ambiguous short name is an error.
+
 Score definition (aligned with Stryker's mutation score):
 detected / (detected + undetected) * 100, where detected = killed + timeout
 and undetected = survived + no tests. A "no tests" mutant is a coverage gap,
@@ -15,7 +21,7 @@ segfault, skipped, not checked, caught by type check, ...) are reported in
 the "other" column but excluded from the score.
 
 Exit codes: 0 = all gates met (or report-only), 1 = a gate was breached,
-2 = missing or unusable mutation data.
+2 = missing or unusable mutation data, or a bad/ambiguous ``--threshold``.
 
 Stdlib only. See docs/mutation-triage.md for baselines and gate values.
 """
@@ -27,7 +33,7 @@ import json
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional
 
 # Mirrors mutmut.stats.status_by_exit_code (mutmut 3.x). Unknown codes are
 # "suspicious", matching mutmut's defaultdict behaviour.
@@ -66,13 +72,15 @@ def module_of(mutant_key: str) -> str:
 def load_statuses(mutants_dir: Path) -> Dict[str, Counter]:
     """Aggregate mutant statuses by module from every ``*.py.meta`` file.
 
-    The module is taken from the meta file name (``beancount.py.meta`` ->
-    ``beancount``), not from the mutant key: keys for module-level functions
-    (e.g. in ``__init__.py``) have no module component to split on.
+    The module is the meta file's path relative to ``mutants_dir`` minus
+    ``.py.meta`` (``pkg/beancount.py.meta`` -> ``pkg/beancount``), not the
+    mutant key: keys for module-level functions (e.g. in ``__init__.py``)
+    have no module component to split on, and a bare file name would merge
+    same-named modules from different subpackages.
     """
     by_module: Dict[str, Counter] = defaultdict(Counter)
     for meta_path in sorted(mutants_dir.rglob("*.py.meta")):
-        module = meta_path.name[: -len(".meta")].removesuffix(".py")
+        module = meta_path.relative_to(mutants_dir).as_posix()[: -len(".py.meta")]
         try:
             data = json.loads(meta_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -106,13 +114,40 @@ def _parse_thresholds(raw) -> Dict[str, float]:
     return thresholds
 
 
+def resolve_thresholds(thresholds: Dict[str, float],
+                       modules: Iterable[str]) -> Dict[str, float]:
+    """Map each threshold name to a module key.
+
+    An exact key wins. Otherwise a short name (``models``) resolves to the
+    single module whose last path component matches it; more than one match
+    raises ValueError. A name matching nothing is kept as-is so the caller
+    reports it as NO DATA.
+    """
+    modules = sorted(modules)
+    resolved: Dict[str, float] = {}
+    for name, gate in thresholds.items():
+        if name in modules:
+            resolved[name] = gate
+            continue
+        matches = [m for m in modules if m.rsplit("/", 1)[-1] == name]
+        if len(matches) > 1:
+            raise ValueError(
+                f"ambiguous threshold module {name!r} matches "
+                f"{', '.join(matches)}; use the full path key"
+            )
+        resolved[matches[0] if matches else name] = gate
+    return resolved
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mutants-dir", default="mutants",
                         help="mutmut output directory (default: mutants)")
     parser.add_argument("--threshold", action="append", default=[],
                         metavar="MODULE=SCORE",
-                        help="per-module minimum score; repeatable")
+                        help="per-module minimum score; MODULE is a path key "
+                             "(pkg/models) or an unambiguous short name "
+                             "(models); repeatable")
     parser.add_argument("--report-only", action="store_true",
                         help="print scores but never fail on a breach")
     args = parser.parse_args(argv)
@@ -133,15 +168,23 @@ def main(argv=None) -> int:
         print(f"error: no *.py.meta mutation data under {mutants_dir}", file=sys.stderr)
         return 2
 
-    print(f"{'module':<16} {'score':>7} {'killed':>7} {'survived':>9} "
+    try:
+        thresholds = resolve_thresholds(thresholds, by_module)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+
+    modules = sorted(set(by_module) | set(thresholds))
+    width = max(16, *(len(m) for m in modules))
+    print(f"{'module':<{width}} {'score':>7} {'killed':>7} {'survived':>9} "
           f"{'no tests':>9} {'timeout':>8} {'other':>6}  gate")
     breached = []
     missing = []
-    for module in sorted(set(by_module) | set(thresholds)):
+    for module in modules:
         counts = by_module.get(module)
         if counts is None:
             missing.append(module)
-            print(f"{module:<16} {'n/a':>7} {'-':>7} {'-':>9} {'-':>9} {'-':>8} {'-':>6}  "
+            print(f"{module:<{width}} {'n/a':>7} {'-':>7} {'-':>9} {'-':>9} {'-':>8} {'-':>6}  "
                   f"{thresholds[module]:.1f}  NO DATA")
             continue
         score = compute_score(counts)
@@ -156,7 +199,7 @@ def main(argv=None) -> int:
             if score is None or score < gate:
                 breached.append(module)
                 flag = "  BREACH"
-        print(f"{module:<16} {score_text:>7} {counts.get('killed', 0):>7} "
+        print(f"{module:<{width}} {score_text:>7} {counts.get('killed', 0):>7} "
               f"{counts.get('survived', 0):>9} {counts.get('no tests', 0):>9} "
               f"{counts.get('timeout', 0):>8} {other:>6}  {gate_text}{flag}")
 

@@ -72,6 +72,13 @@ python scripts/check_mutation_thresholds.py --mutants-dir mutants \
   --threshold models=95 --threshold sanitizers=90 --threshold beancount=91
 ```
 
+The checker keys each module by its path under `mutants/` minus `.py.meta`
+(e.g. `empower_personal_dashboard/models`), so same-named files in different
+subpackages get separate scores and gates. `--threshold` accepts that full
+key, or a short name such as `models` when exactly one module has that file
+name. An ambiguous short name exits 2 and lists the candidates; switch those
+gates to full path keys before widening the mutation scope.
+
 Before strengthening, the baselines were: `models` 33.8%, `sanitizers`
 95.2%, `beancount` helpers 71.8%. Tests added: exact-dict and full-field
 `from_dict` assertions in `tests/test_models.py`, and direct helper tests in
