@@ -11,8 +11,12 @@ CI (source of truth):
 
 1. GitHub Actions → **Mutation Testing** → Run workflow.
 2. Pick `target`: `all`, `models`, `sanitizers`, or `beancount-helpers`.
-3. Set `clean: true` after non-Python changes (fixtures, config) to wipe the
-   `mutants/` cache. Set `enforce: true` to apply the gates below.
+3. Set `enforce: true` to apply the gates below. `clean` wipes a local
+   `mutants/` cache; hosted runners start empty, so it has no effect in CI
+   until a cache is restored between runs.
+4. Read the result from the **Report per-module scores** step, not the run
+   badge. The job sets `continue-on-error: true`, so a gate breach turns that
+   step red while the run still finishes green.
 
 Locally (Python 3.12, project venv):
 
@@ -32,8 +36,11 @@ mutmut 3 is pytest-only. pytest collects the existing `unittest.TestCase`
 tests unchanged; no test migration is involved. Config lives in
 `[tool.mutmut]` in `pyproject.toml`. Per-module scores come from
 `scripts/check_mutation_thresholds.py` (mutmut reports run-wide totals only).
-Score = killed / (killed + survived). Timeout, no-tests, skipped, and
-not-checked mutants are reported but excluded from the score.
+Score follows Stryker's definition: detected / (detected + undetected),
+where detected = killed + timeout and undetected = survived + no tests. A
+no-tests mutant is a coverage gap, so it counts against the module.
+Suspicious, segfault, skipped, and not-checked mutants are reported in the
+`other` column but excluded from the score.
 
 ## Phase 0 baseline (pre-mutation, Python 3.12)
 
@@ -109,6 +116,8 @@ category-only dividend handling. They are killed by
 Promote from `workflow_dispatch` to a CI check only when all of these hold,
 in a separate PR:
 
-- 3 consecutive dispatch runs with stable per-module scores.
+- 3 consecutive dispatch runs with stable per-module scores, judged by the
+  **Report per-module scores** step outcome (the run itself is always green
+  while `continue-on-error: true` is set).
 - Full `all` runtime under 30 minutes.
 - This file current: baselines, gates, and equivalents all recorded.

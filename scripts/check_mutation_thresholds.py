@@ -7,10 +7,12 @@ aggregates them by source module, prints a per-module mutation score, and —
 unless ``--report-only`` is given — exits non-zero when a module falls below
 its ``--threshold MODULE=SCORE`` gate.
 
-Score definition: killed / (killed + survived) * 100. Mutants with any other
-status (timeout, no tests, skipped, not checked, ...) are reported in the
-table but excluded from the score, mirroring how mutmut itself treats them
-as undecided rather than killed or survived.
+Score definition (aligned with Stryker's mutation score):
+detected / (detected + undetected) * 100, where detected = killed + timeout
+and undetected = survived + no tests. A "no tests" mutant is a coverage gap,
+so it counts against the module. Errors and undecided statuses (suspicious,
+segfault, skipped, not checked, caught by type check, ...) are reported in
+the "other" column but excluded from the score.
 
 Exit codes: 0 = all gates met (or report-only), 1 = a gate was breached,
 2 = missing or unusable mutation data.
@@ -80,14 +82,18 @@ def load_statuses(mutants_dir: Path) -> Dict[str, Counter]:
     return dict(by_module)
 
 
+DETECTED = ("killed", "timeout")
+UNDETECTED = ("survived", "no tests")
+
+
 def compute_score(counts) -> Optional[float]:
     """Mutation score in percent, or None when nothing was decided."""
-    killed = counts.get("killed", 0)
-    survived = counts.get("survived", 0)
-    decided = killed + survived
+    detected = sum(counts.get(status, 0) for status in DETECTED)
+    undetected = sum(counts.get(status, 0) for status in UNDETECTED)
+    decided = detected + undetected
     if decided == 0:
         return None
-    return killed / decided * 100.0
+    return detected / decided * 100.0
 
 
 def _parse_thresholds(raw) -> Dict[str, float]:
@@ -127,19 +133,20 @@ def main(argv=None) -> int:
         print(f"error: no *.py.meta mutation data under {mutants_dir}", file=sys.stderr)
         return 2
 
-    print(f"{'module':<16} {'score':>7} {'killed':>7} {'survived':>9} {'other':>6}  gate")
+    print(f"{'module':<16} {'score':>7} {'killed':>7} {'survived':>9} "
+          f"{'no tests':>9} {'timeout':>8} {'other':>6}  gate")
     breached = []
     missing = []
     for module in sorted(set(by_module) | set(thresholds)):
         counts = by_module.get(module)
         if counts is None:
             missing.append(module)
-            print(f"{module:<16} {'n/a':>7} {'-':>7} {'-':>9} {'-':>6}  "
+            print(f"{module:<16} {'n/a':>7} {'-':>7} {'-':>9} {'-':>9} {'-':>8} {'-':>6}  "
                   f"{thresholds[module]:.1f}  NO DATA")
             continue
         score = compute_score(counts)
-        decided_other = sum(
-            v for k, v in counts.items() if k not in ("killed", "survived")
+        other = sum(
+            v for k, v in counts.items() if k not in DETECTED + UNDETECTED
         )
         gate = thresholds.get(module)
         gate_text = f"{gate:.1f}" if gate is not None else "-"
@@ -150,7 +157,8 @@ def main(argv=None) -> int:
                 breached.append(module)
                 flag = "  BREACH"
         print(f"{module:<16} {score_text:>7} {counts.get('killed', 0):>7} "
-              f"{counts.get('survived', 0):>9} {decided_other:>6}  {gate_text}{flag}")
+              f"{counts.get('survived', 0):>9} {counts.get('no tests', 0):>9} "
+              f"{counts.get('timeout', 0):>8} {other:>6}  {gate_text}{flag}")
 
     if missing:
         print(f"error: no mutation data for gated module(s): {', '.join(missing)}",

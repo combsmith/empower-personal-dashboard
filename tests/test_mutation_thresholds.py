@@ -42,13 +42,46 @@ class TestCheckMutationThresholds(unittest.TestCase):
         key2 = "empower_personal_dashboard.models.x_to_dict__mutmut_3"
         self.assertEqual(self.mod.module_of(key2), "models")
 
-    def test_score_counts_only_killed_and_survived(self):
-        counts = {"killed": 8, "survived": 2, "timeout": 5, "no tests": 3}
+    def test_score_counts_no_tests_as_undetected(self):
+        # A mutant no test covers is a coverage gap, not an undecided result.
+        counts = {"killed": 8, "survived": 2, "no tests": 10}
+        self.assertEqual(self.mod.compute_score(counts), 40.0)
+
+    def test_score_counts_timeout_as_detected(self):
+        # Matches Stryker: a mutant that hangs the suite was detected.
+        counts = {"killed": 6, "survived": 2, "timeout": 2}
+        self.assertEqual(self.mod.compute_score(counts), 80.0)
+
+    def test_score_excludes_errors_and_unchecked(self):
+        counts = {
+            "killed": 8,
+            "survived": 2,
+            "suspicious": 4,
+            "segfault": 1,
+            "skipped": 3,
+            "not checked": 50,
+            "caught by type check": 2,
+        }
         self.assertEqual(self.mod.compute_score(counts), 80.0)
 
     def test_score_none_when_nothing_checked(self):
         self.assertIsNone(self.mod.compute_score({"killed": 0, "survived": 0}))
         self.assertIsNone(self.mod.compute_score({}))
+        self.assertIsNone(self.mod.compute_score({"not checked": 12}))
+
+    def test_main_fails_when_untested_mutants_drag_score_below_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_meta(
+                tmp,
+                "empower_personal_dashboard/models.py.meta",
+                {
+                    "empower_personal_dashboard.models.x_a__mutmut_1": 1,
+                    "empower_personal_dashboard.models.x_b__mutmut_1": 5,
+                    "empower_personal_dashboard.models.x_b__mutmut_2": 33,
+                },
+            )
+            code = self.mod.main(["--mutants-dir", tmp, "--threshold", "models=50"])
+        self.assertEqual(code, 1)
 
     def test_load_statuses_aggregates_by_module(self):
         with tempfile.TemporaryDirectory() as tmp:
