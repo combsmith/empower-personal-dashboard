@@ -97,6 +97,11 @@ This repository adheres to strict Test-Driven Development as mandated by the org
 
   # Probe PyPI status, build sdist/wheel, and run twine verification
   python3 scripts/pypi_onboard.py --dry-run
+
+  # Mutation testing pilot (Python 3.12, manual dispatch; see docs/mutation-triage.md)
+  # CI: Actions -> Mutation Testing -> Run workflow. Local equivalent:
+  .venv/bin/mutmut run "empower_personal_dashboard.models*"
+  .venv/bin/python scripts/check_mutation_thresholds.py --mutants-dir mutants --report-only
   ```
 
 ---

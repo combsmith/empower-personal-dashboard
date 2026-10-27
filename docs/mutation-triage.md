@@ -1,0 +1,123 @@
+# Mutation testing — triage, baselines, and gates
+
+Mutation testing pilot for `empower-personal-dashboard`. Plan and decisions:
+[Discussion #123](https://github.com/combsmith/empower-personal-dashboard/discussions/123).
+Decided posture: `workflow_dispatch` first, moving to a CI check; all pilot
+modules; per-module thresholds; equivalent mutants recorded in this file.
+
+## How to run
+
+CI (source of truth):
+
+1. GitHub Actions → **Mutation Testing** → Run workflow.
+2. Pick `target`: `all`, `models`, `sanitizers`, or `beancount-helpers`.
+3. Set `enforce: true` to apply the gates below. `clean` wipes a local
+   `mutants/` cache; hosted runners start empty, so it has no effect in CI
+   until a cache is restored between runs.
+4. Read the result from the **Report per-module scores** step, not the run
+   badge. The job sets `continue-on-error: true`, so a gate breach turns that
+   step red while the run still finishes green.
+
+Locally (Python 3.12, project venv):
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -e ".[mcp,test,mutation]"
+mkdir -p .local-tmp
+TMPDIR=$PWD/.local-tmp .venv/bin/mutmut run "empower_personal_dashboard.models*"
+.venv/bin/python scripts/check_mutation_thresholds.py --mutants-dir mutants --report-only
+```
+
+Use a non-symlinked `TMPDIR` on macOS: the ledger/session path guards refuse
+symlinked directories, which otherwise fails unrelated tests. Linux CI is
+unaffected.
+
+mutmut 3 is pytest-only. pytest collects the existing `unittest.TestCase`
+tests unchanged; no test migration is involved. Config lives in
+`[tool.mutmut]` in `pyproject.toml`. Per-module scores come from
+`scripts/check_mutation_thresholds.py` (mutmut reports run-wide totals only).
+Score follows Stryker's definition: detected / (detected + undetected),
+where detected = killed + timeout and undetected = survived + no tests. A
+no-tests mutant is a coverage gap, so it counts against the module.
+Suspicious, segfault, skipped, and not-checked mutants are reported in the
+`other` column but excluded from the score.
+
+## Phase 0 baseline (pre-mutation, Python 3.12)
+
+- Suite: 432 tests. Green in Linux CI. Locally on macOS, 2 `test_client`
+  reauthentication tests error because they hardcode `/tmp/dummy_sess.json`
+  and macOS `/tmp` is symlinked; this is environmental, not a code failure.
+- Coverage: `beancount.py` 95%, `models.py` 98%, `sanitizers.py` 100%.
+
+## Pilot baselines and gates
+
+Measured on branch `feat/mutation-testing-pilot` after test strengthening.
+The `beancount` score covers only the pilot helper subset (`_safe_float`,
+`_safe_positive_float`, `_is_negative_number`, `_clean_tx_description`,
+`_has_core_sweep_evidence`, `_is_dividend_signal`, `_classify_buy_sell`,
+`_is_commodity_trade_tx`, `_has_investment_account_signal`,
+`_is_investment_tx`); the rest of `beancount.py` is not yet mutated.
+
+| Module | Baseline | Killed | Survived | Gate |
+|---|---|---|---|---|
+| `models` | 100.0% | 548 | 0 | 95 |
+| `sanitizers` | 95.2% | 20 | 1 | 90 |
+| `beancount` (helpers) | 98.1% | 310 | 6 | 91 |
+
+Gates are baseline minus ~5 points. They are enforced only when the workflow
+is dispatched with `enforce: true`, via:
+
+```bash
+python scripts/check_mutation_thresholds.py --mutants-dir mutants \
+  --threshold models=95 --threshold sanitizers=90 --threshold beancount=91
+```
+
+Before strengthening, the baselines were: `models` 33.8%, `sanitizers`
+95.2%, `beancount` helpers 71.8%. Tests added: exact-dict and full-field
+`from_dict` assertions in `tests/test_models.py`, and direct helper tests in
+`tests/test_beancount_helpers.py`.
+
+## Equivalent mutants
+
+A mutant is equivalent when the change cannot alter observable behaviour.
+Each surviving pilot mutant is listed here, per the committed-file decision.
+Re-check this list whenever a listed function changes.
+
+| Mutant | Verdict | Rationale |
+|---|---|---|
+| `empower_personal_dashboard.sanitizers.x_clean_api_text__mutmut_11` | equivalent | `"\ufffd"` → `"\uFFFD"` is the same code point; escape-spelling only |
+| `empower_personal_dashboard.beancount.x__classify_buy_sell__mutmut_2` | equivalent | Default `desc_clean` `""` → `"XXXX"` matches no buy/sell phrase, like `""` |
+| `empower_personal_dashboard.beancount.x__classify_buy_sell__mutmut_3` | equivalent | Default `cat_clean` `""` → `"XXXX"` contains no `dividend`, like `""` |
+| `empower_personal_dashboard.beancount.x__is_commodity_trade_tx__mutmut_47` | equivalent | Missing category fallback `"XXXX"` contains no `dividend`, like `""` |
+| `empower_personal_dashboard.beancount.x__has_investment_account_signal__mutmut_8` | equivalent | Missing `account_type` fallback `"XXXX"` contains no signal word, like `""` |
+| `empower_personal_dashboard.beancount.x__has_investment_account_signal__mutmut_19` | equivalent | Missing `account_name` fallback token `xxxx` is not an investment token, like `""` |
+| `empower_personal_dashboard.beancount.x__is_investment_tx__mutmut_28` | equivalent | Missing category fallback `"XXXX"` contains no `dividend`, like `""` |
+
+The four type-field fallbacks in `_is_investment_tx` / `_is_commodity_trade_tx`
+(`__mutmut_8`, `__mutmut_16`, `__mutmut_15`, `__mutmut_23`) were first recorded
+as equivalent and are **not**: with both type fields absent, `"XXXX"` flips
+`bool(tx_type_clean or inv_type_clean)` in `_is_dividend_signal`, changing
+category-only dividend handling. They are killed by
+`test_category_dividend_without_any_type_is_not_investment` and
+`test_category_dividend_without_type_does_not_block_phrase_trade` in
+`tests/test_beancount_helpers.py` (PR #124 review).
+
+## Triage workflow for new survivors
+
+1. Reproduce with `.venv/bin/mutmut show <mutant>` (use the full `empower_personal_dashboard.…` key) and read the diff.
+2. If the diff can change behaviour, write the smallest failing assertion
+   first, keep it as a regression test, and re-run the target.
+3. If it cannot, add a row above with a one-line rationale.
+4. Never add a test that only kills a mutant without asserting a real
+   requirement. Record it as equivalent instead.
+
+## Promotion to a CI check
+
+Promote from `workflow_dispatch` to a CI check only when all of these hold,
+in a separate PR:
+
+- 3 consecutive dispatch runs with stable per-module scores, judged by the
+  **Report per-module scores** step outcome (the run itself is always green
+  while `continue-on-error: true` is set).
+- Full `all` runtime under 30 minutes.
+- This file current: baselines, gates, and equivalents all recorded.
