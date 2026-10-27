@@ -78,13 +78,13 @@ Re-check this list whenever a listed function changes.
 
 | Mutant | Verdict | Rationale |
 |---|---|---|
-| `sanitizers.x_clean_api_text__mutmut_11` | equivalent | `"\ufffd"` → `"\uFFFD"` is the same code point; escape-spelling only |
-| `beancount.x__classify_buy_sell__mutmut_2` | equivalent | Default `desc_clean` `""` → `"XXXX"` matches no buy/sell phrase, like `""` |
-| `beancount.x__classify_buy_sell__mutmut_3` | equivalent | Default `cat_clean` `""` → `"XXXX"` contains no `dividend`, like `""` |
-| `beancount.x__is_commodity_trade_tx__mutmut_47` | equivalent | Missing category fallback `"XXXX"` contains no `dividend`, like `""` |
-| `beancount.x__has_investment_account_signal__mutmut_8` | equivalent | Missing `account_type` fallback `"XXXX"` contains no signal word, like `""` |
-| `beancount.x__has_investment_account_signal__mutmut_19` | equivalent | Missing `account_name` fallback token `xxxx` is not an investment token, like `""` |
-| `beancount.x__is_investment_tx__mutmut_28` | equivalent | Missing category fallback `"XXXX"` contains no `dividend`, like `""` |
+| `empower_personal_dashboard.sanitizers.x_clean_api_text__mutmut_11` | equivalent | `"\ufffd"` → `"\uFFFD"` is the same code point; escape-spelling only |
+| `empower_personal_dashboard.beancount.x__classify_buy_sell__mutmut_2` | equivalent | Default `desc_clean` `""` → `"XXXX"` matches no buy/sell phrase, like `""` |
+| `empower_personal_dashboard.beancount.x__classify_buy_sell__mutmut_3` | equivalent | Default `cat_clean` `""` → `"XXXX"` contains no `dividend`, like `""` |
+| `empower_personal_dashboard.beancount.x__is_commodity_trade_tx__mutmut_47` | equivalent | Missing category fallback `"XXXX"` contains no `dividend`, like `""` |
+| `empower_personal_dashboard.beancount.x__has_investment_account_signal__mutmut_8` | equivalent | Missing `account_type` fallback `"XXXX"` contains no signal word, like `""` |
+| `empower_personal_dashboard.beancount.x__has_investment_account_signal__mutmut_19` | equivalent | Missing `account_name` fallback token `xxxx` is not an investment token, like `""` |
+| `empower_personal_dashboard.beancount.x__is_investment_tx__mutmut_28` | equivalent | Missing category fallback `"XXXX"` contains no `dividend`, like `""` |
 
 The four type-field fallbacks in `_is_investment_tx` / `_is_commodity_trade_tx`
 (`__mutmut_8`, `__mutmut_16`, `__mutmut_15`, `__mutmut_23`) were first recorded
@@ -97,7 +97,7 @@ category-only dividend handling. They are killed by
 
 ## Triage workflow for new survivors
 
-1. Reproduce with `mutmut show <mutant>` and read the diff.
+1. Reproduce with `.venv/bin/mutmut show <mutant>` (use the full `empower_personal_dashboard.…` key) and read the diff.
 2. If the diff can change behaviour, write the smallest failing assertion
    first, keep it as a regression test, and re-run the target.
 3. If it cannot, add a row above with a one-line rationale.

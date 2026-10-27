@@ -81,7 +81,7 @@ class DashboardBalances:
             total_other_assets=float(data.get("total_other_assets", 0.0)),
             total_other_liabilities=float(data.get("total_other_liabilities", 0.0)),
             accounts=list(data.get("accounts", [])),
-            mode=data.get("mode", "historical"),
+            mode=data.get("mode", "live"),
         )
 
 
@@ -141,7 +141,7 @@ class DashboardHoldings:
             as_of_date=data.get("as_of_date", ""),
             total_value=float(data.get("total_value", 0.0)),
             holdings=list(data.get("holdings", [])),
-            mode=data.get("mode", "historical"),
+            mode=data.get("mode", "live"),
         )
 
 
@@ -234,7 +234,7 @@ class DashboardTransactions:
             money_out=float(data.get("money_out", 0.0)),
             net_cashflow=float(data.get("net_cashflow", 0.0)),
             transactions=txs,
-            mode=data.get("mode", "historical"),
+            mode=data.get("mode", "live"),
         )
 
 

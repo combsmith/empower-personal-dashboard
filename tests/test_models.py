@@ -169,7 +169,7 @@ class TestModels(unittest.TestCase):
         self.assertEqual(empty.net_worth, 0.0)
         self.assertEqual(empty.total_card_liabilities, 0.0)
         self.assertEqual(empty.accounts, [])
-        self.assertEqual(empty.mode, "historical")
+        self.assertEqual(empty.mode, "live")
 
     def test_investment_holding_to_dict_exact(self):
         holding = InvestmentHolding(
@@ -230,7 +230,7 @@ class TestModels(unittest.TestCase):
         self.assertEqual(restored.as_of_date, "")
         self.assertEqual(restored.total_value, 0.0)
         self.assertEqual(restored.holdings, [])
-        self.assertEqual(restored.mode, "historical")
+        self.assertEqual(restored.mode, "live")
 
     def test_transaction_to_dict_exact_and_from_dict(self):
         tx = Transaction(
@@ -298,7 +298,7 @@ class TestModels(unittest.TestCase):
         )
         self.assertEqual(restored.total_transactions, 1)
         self.assertEqual(restored.money_in, 0.0)
-        self.assertEqual(restored.mode, "historical")
+        self.assertEqual(restored.mode, "live")
         self.assertTrue(restored.is_complete)
 
     def test_from_dict_maps_every_field(self):
