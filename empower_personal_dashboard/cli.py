@@ -1006,7 +1006,7 @@ def _load_holdings(args, client, in_holdings_file, progress_file):
     return holdings_res
 
 
-def _summarize_transactions(tx_list, mode="historical"):
+def _summarize_transactions(tx_list, mode="live"):
     """Build a DashboardTransactions summary (date span + cashflow) over a list of records."""
     dates = [t.get("transaction_date") for t in tx_list if t.get("transaction_date")]
     s_date = min(dates) if dates else "2026-01-01"
