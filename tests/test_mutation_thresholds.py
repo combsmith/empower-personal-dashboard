@@ -249,6 +249,13 @@ class TestCheckMutationThresholds(unittest.TestCase):
         self.assertIn("pkg/a/models", str(ctx.exception))
         self.assertIn("pkg/b/models", str(ctx.exception))
 
+    def test_resolve_thresholds_rejects_duplicate_resolved_key(self):
+        with self.assertRaises(ValueError) as ctx:
+            self.mod.resolve_thresholds(
+                {"models": 95.0, "pkg/models": 50.0}, ["pkg/models"]
+            )
+        self.assertIn("duplicate", str(ctx.exception))
+
     def test_resolve_thresholds_keeps_unknown_name_for_no_data_report(self):
         resolved = self.mod.resolve_thresholds({"beancount": 80.0}, ["pkg/models"])
         self.assertEqual(resolved, {"beancount": 80.0})

@@ -127,6 +127,8 @@ def resolve_thresholds(thresholds: Dict[str, float],
     resolved: Dict[str, float] = {}
     for name, gate in thresholds.items():
         if name in modules:
+            if name in resolved:
+                raise ValueError(f"duplicate threshold for module {name!r}")
             resolved[name] = gate
             continue
         matches = [m for m in modules if m.rsplit("/", 1)[-1] == name]
@@ -135,7 +137,10 @@ def resolve_thresholds(thresholds: Dict[str, float],
                 f"ambiguous threshold module {name!r} matches "
                 f"{', '.join(matches)}; use the full path key"
             )
-        resolved[matches[0] if matches else name] = gate
+        target = matches[0] if matches else name
+        if target in resolved:
+            raise ValueError(f"duplicate threshold for module {target!r}")
+        resolved[target] = gate
     return resolved
 
 
