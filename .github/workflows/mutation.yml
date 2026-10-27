@@ -104,16 +104,25 @@ jobs:
       - name: Report per-module scores
         env:
           ENFORCE: ${{ inputs.enforce }}
+          TARGET: ${{ inputs.target }}
         run: |
           # Gates are the --threshold values recorded in docs/mutation-triage.md.
-          # Until baselines are recorded this runs report-only. With
+          # Only the selected target is gated: unselected modules have no
+          # decided mutants on a fresh runner and would false-fail. With
           # enforce=true the wrapper exits 1 on a breach; the job itself
           # stays non-blocking via continue-on-error above.
           if [ "$ENFORCE" = "true" ]; then
-            python scripts/check_mutation_thresholds.py --mutants-dir mutants \
-              --threshold models=95 \
-              --threshold sanitizers=90 \
-              --threshold beancount=91
+            args=()
+            case "$TARGET" in
+              models|all) args+=(--threshold models=95) ;;
+            esac
+            case "$TARGET" in
+              sanitizers|all) args+=(--threshold sanitizers=90) ;;
+            esac
+            case "$TARGET" in
+              beancount-helpers|all) args+=(--threshold beancount=91) ;;
+            esac
+            python scripts/check_mutation_thresholds.py --mutants-dir mutants "${args[@]}"
           else
             python scripts/check_mutation_thresholds.py --mutants-dir mutants --report-only
           fi

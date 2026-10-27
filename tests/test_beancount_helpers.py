@@ -255,6 +255,35 @@ class TestCommodityAndInvestmentTx(unittest.TestCase):
         self.assertFalse(_is_commodity_trade_tx({**base, "category_name": "Dividend"}))
         self.assertTrue(_is_commodity_trade_tx(base))
 
+    def test_category_dividend_without_any_type_is_not_investment(self):
+        # _is_dividend_signal requires a type field for category-only
+        # dividends. Absent both, this is not an investment tx — and the
+        # "XXXX" fallback mutants flip bool(tx or inv), so this pins it.
+        self.assertFalse(_is_investment_tx({"symbol": "VTI", "category": "Dividend"}))
+        self.assertFalse(
+            _is_commodity_trade_tx(
+                {
+                    "symbol": "VTI",
+                    "category": "Dividend",
+                    "description": "Coffee Shop",
+                    "quantity": 10,
+                    "price": 100,
+                }
+            )
+        )
+
+    def test_category_dividend_without_type_does_not_block_phrase_trade(self):
+        # Same guard from the trade side: with no type field, a category-only
+        # dividend does not suppress a core purchase phrase trade.
+        tx = {
+            "symbol": "VTI",
+            "category": "Dividend",
+            "description": "Purchase into core account",
+            "quantity": 10,
+            "price": 100,
+        }
+        self.assertTrue(_is_commodity_trade_tx(tx))
+
     def test_account_signal_fallback(self):
         self.assertTrue(_is_investment_tx({"account_type": "Brokerage Account"}))
         self.assertTrue(_is_investment_tx({"account_name": "My Roth IRA"}))

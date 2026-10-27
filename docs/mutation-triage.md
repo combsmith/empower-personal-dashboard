@@ -19,6 +19,7 @@ Locally (Python 3.12, project venv):
 ```bash
 python3.12 -m venv .venv
 .venv/bin/python -m pip install -e ".[mcp,test,mutation]"
+mkdir -p .local-tmp
 TMPDIR=$PWD/.local-tmp .venv/bin/mutmut run "empower_personal_dashboard.models*"
 .venv/bin/python scripts/check_mutation_thresholds.py --mutants-dir mutants --report-only
 ```
@@ -54,7 +55,7 @@ The `beancount` score covers only the pilot helper subset (`_safe_float`,
 |---|---|---|---|---|
 | `models` | 100.0% | 548 | 0 | 95 |
 | `sanitizers` | 95.2% | 20 | 1 | 90 |
-| `beancount` (helpers) | 96.8% | 306 | 10 | 91 |
+| `beancount` (helpers) | 98.1% | 310 | 6 | 91 |
 
 Gates are baseline minus ~5 points. They are enforced only when the workflow
 is dispatched with `enforce: true`, via:
@@ -80,14 +81,19 @@ Re-check this list whenever a listed function changes.
 | `sanitizers.x_clean_api_text__mutmut_11` | equivalent | `"\ufffd"` → `"\uFFFD"` is the same code point; escape-spelling only |
 | `beancount.x__classify_buy_sell__mutmut_2` | equivalent | Default `desc_clean` `""` → `"XXXX"` matches no buy/sell phrase, like `""` |
 | `beancount.x__classify_buy_sell__mutmut_3` | equivalent | Default `cat_clean` `""` → `"XXXX"` contains no `dividend`, like `""` |
-| `beancount.x__is_commodity_trade_tx__mutmut_15` | equivalent | Missing `transaction_type` fallback `"XXXX"` matches no known type, like `""` |
-| `beancount.x__is_commodity_trade_tx__mutmut_23` | equivalent | Missing `investment_type` fallback `"XXXX"` matches no known type, like `""` |
 | `beancount.x__is_commodity_trade_tx__mutmut_47` | equivalent | Missing category fallback `"XXXX"` contains no `dividend`, like `""` |
 | `beancount.x__has_investment_account_signal__mutmut_8` | equivalent | Missing `account_type` fallback `"XXXX"` contains no signal word, like `""` |
 | `beancount.x__has_investment_account_signal__mutmut_19` | equivalent | Missing `account_name` fallback token `xxxx` is not an investment token, like `""` |
-| `beancount.x__is_investment_tx__mutmut_8` | equivalent | Missing `transaction_type` fallback `"XXXX"` matches no known type, like `""` |
-| `beancount.x__is_investment_tx__mutmut_16` | equivalent | Missing `investment_type` fallback `"XXXX"` matches no known type, like `""` |
 | `beancount.x__is_investment_tx__mutmut_28` | equivalent | Missing category fallback `"XXXX"` contains no `dividend`, like `""` |
+
+The four type-field fallbacks in `_is_investment_tx` / `_is_commodity_trade_tx`
+(`__mutmut_8`, `__mutmut_16`, `__mutmut_15`, `__mutmut_23`) were first recorded
+as equivalent and are **not**: with both type fields absent, `"XXXX"` flips
+`bool(tx_type_clean or inv_type_clean)` in `_is_dividend_signal`, changing
+category-only dividend handling. They are killed by
+`test_category_dividend_without_any_type_is_not_investment` and
+`test_category_dividend_without_type_does_not_block_phrase_trade` in
+`tests/test_beancount_helpers.py` (PR #124 review).
 
 ## Triage workflow for new survivors
 
