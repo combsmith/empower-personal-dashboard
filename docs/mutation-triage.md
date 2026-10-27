@@ -4,19 +4,19 @@ Mutation testing pilot for `empower-personal-dashboard`. Plan and decisions:
 [Discussion #123](https://github.com/combsmith/empower-personal-dashboard/discussions/123).
 Decided posture: `workflow_dispatch` first, moving to a CI check; all pilot
 modules; per-module thresholds; equivalent mutants recorded in this file.
+Status: promoted to a CI check on every pull request and push to `main`
+after the validation cycle in #126.
 
 ## How to run
 
-CI (source of truth):
+CI (source of truth): the **Mutation Testing** workflow runs the `all`
+target on every pull request and push to `main` and fails the
+`mutation (all)` check when any gate below is breached. Each run starts from
+an empty `mutants/` directory; there is no cache to go stale.
 
-1. GitHub Actions → **Mutation Testing** → Run workflow.
-2. Pick `target`: `all`, `models`, `sanitizers`, or `beancount-helpers`.
-3. Set `enforce: true` to apply the gates below. `clean` wipes a local
-   `mutants/` cache; hosted runners start empty, so it has no effect in CI
-   until a cache is restored between runs.
-4. Read the result from the **Report per-module scores** step, not the run
-   badge. The job sets `continue-on-error: true`, so a gate breach turns that
-   step red while the run still finishes green.
+For a single target or a report-only run: GitHub Actions → **Mutation
+Testing** → Run workflow, pick `target` (`all`, `models`, `sanitizers`, or
+`beancount-helpers`), and set `enforce: false` to report without failing.
 
 Locally (Python 3.12, project venv):
 
@@ -64,8 +64,8 @@ The `beancount` score covers only the pilot helper subset (`_safe_float`,
 | `sanitizers` | 95.2% | 20 | 1 | 90 |
 | `beancount` (helpers) | 98.1% | 310 | 6 | 91 |
 
-Gates are baseline minus ~5 points. They are enforced only when the workflow
-is dispatched with `enforce: true`, via:
+Gates are baseline minus ~5 points. They are enforced on every pull request
+and push to `main`, and on manual dispatches unless `enforce: false`, via:
 
 ```bash
 python scripts/check_mutation_thresholds.py --mutants-dir mutants \
@@ -113,11 +113,18 @@ category-only dividend handling. They are killed by
 
 ## Promotion to a CI check
 
-Promote from `workflow_dispatch` to a CI check only when all of these hold,
-in a separate PR:
+Criteria (all met 2026-10-27, tracked in #126):
 
-- 3 consecutive dispatch runs with stable per-module scores, judged by the
-  **Report per-module scores** step outcome (the run itself is always green
-  while `continue-on-error: true` is set).
-- Full `all` runtime under 30 minutes.
+- 3 consecutive dispatch runs with stable per-module scores: runs
+  [40601096626](https://github.com/combsmith/empower-personal-dashboard/actions/runs/40601096626),
+  [40601477260](https://github.com/combsmith/empower-personal-dashboard/actions/runs/40601477260) and
+  [40601801177](https://github.com/combsmith/empower-personal-dashboard/actions/runs/40601801177)
+  on `main` at `38b2cb7` produced identical counts. A `models`-only enforced run,
+  [40602106030](https://github.com/combsmith/empower-personal-dashboard/actions/runs/40602106030),
+  confirmed single-target gating.
+- Full `all` runtime under 30 minutes: about 2.5 minutes per run.
 - This file current: baselines, gates, and equivalents all recorded.
+
+To widen the mutation scope later, first key modules by path (#125), then
+record the new module's baseline and gate here and add it to the
+workflow's pattern list.
