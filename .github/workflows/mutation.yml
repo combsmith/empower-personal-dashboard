@@ -1,0 +1,129 @@
+# Mutation testing pilot (mutmut) — manual dispatch only.
+#
+# Plan: Discussion #123 (Decisions: workflow_dispatch first, moving to a CI
+# check; all pilot modules; per-module thresholds; committed triage file).
+# The job is non-blocking by design (`continue-on-error: true`), mirroring
+# the org's TalkTerm/Stryker mutation job posture. Scores and gates live in
+# docs/mutation-triage.md; scripts/check_mutation_thresholds.py enforces
+# them once baselines are recorded (until then it runs report-only via the
+# `enforce` input defaulting to false).
+#
+# mutmut 3 is pytest-only and requires Python >= 3.10, so this job runs on
+# Python 3.12 only (mirroring the coverage job in ci.yml). pytest collects
+# the existing unittest.TestCase suite unchanged.
+name: Mutation Testing
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Mutant target to run"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - models
+          - sanitizers
+          - beancount-helpers
+      clean:
+        description: "Wipe the mutants/ cache before running"
+        required: true
+        default: false
+        type: boolean
+      enforce:
+        description: "Fail the score step when a per-module gate is breached"
+        required: true
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: mutation-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mutation:
+    name: mutation (${{ inputs.target }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    continue-on-error: true
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e ".[mcp,test,mutation]"
+
+      - name: Resolve mutant patterns
+        id: patterns
+        env:
+          TARGET: ${{ inputs.target }}
+        run: |
+          case "$TARGET" in
+            models)
+              echo 'patterns=empower_personal_dashboard.models*' >> "$GITHUB_OUTPUT"
+              ;;
+            sanitizers)
+              echo 'patterns=empower_personal_dashboard.sanitizers*' >> "$GITHUB_OUTPUT"
+              ;;
+            beancount-helpers)
+              echo 'patterns=empower_personal_dashboard.beancount.x*_safe_float* empower_personal_dashboard.beancount.x*_safe_positive_float* empower_personal_dashboard.beancount.x*_is_negative_number* empower_personal_dashboard.beancount.x*_clean_tx_description* empower_personal_dashboard.beancount.x*_has_core_sweep_evidence* empower_personal_dashboard.beancount.x*_is_dividend_signal* empower_personal_dashboard.beancount.x*_classify_buy_sell* empower_personal_dashboard.beancount.x*_is_commodity_trade_tx* empower_personal_dashboard.beancount.x*_has_investment_account_signal* empower_personal_dashboard.beancount.x*_is_investment_tx*' >> "$GITHUB_OUTPUT"
+              ;;
+            all)
+              echo 'patterns=empower_personal_dashboard.models* empower_personal_dashboard.sanitizers* empower_personal_dashboard.beancount.x*_safe_float* empower_personal_dashboard.beancount.x*_safe_positive_float* empower_personal_dashboard.beancount.x*_is_negative_number* empower_personal_dashboard.beancount.x*_clean_tx_description* empower_personal_dashboard.beancount.x*_has_core_sweep_evidence* empower_personal_dashboard.beancount.x*_is_dividend_signal* empower_personal_dashboard.beancount.x*_classify_buy_sell* empower_personal_dashboard.beancount.x*_is_commodity_trade_tx* empower_personal_dashboard.beancount.x*_has_investment_account_signal* empower_personal_dashboard.beancount.x*_is_investment_tx*' >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
+      - name: Clean mutant cache
+        if: inputs.clean
+        run: rm -rf mutants
+
+      - name: Run mutation tests
+        env:
+          PATTERNS: ${{ steps.patterns.outputs.patterns }}
+        run: |
+          # Word-splitting is intentional: each pattern is one mutmut argument.
+          # shellcheck disable=SC2086
+          mutmut run $PATTERNS
+          mutmut export-cicd-stats || true
+
+      - name: Report per-module scores
+        env:
+          ENFORCE: ${{ inputs.enforce }}
+        run: |
+          # Gates are the --threshold values recorded in docs/mutation-triage.md.
+          # Until baselines are recorded this runs report-only. With
+          # enforce=true the wrapper exits 1 on a breach; the job itself
+          # stays non-blocking via continue-on-error above.
+          if [ "$ENFORCE" = "true" ]; then
+            python scripts/check_mutation_thresholds.py --mutants-dir mutants \
+              --threshold models=95 \
+              --threshold sanitizers=90 \
+              --threshold beancount=91
+          else
+            python scripts/check_mutation_thresholds.py --mutants-dir mutants --report-only
+          fi
+
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: mutation-report-${{ inputs.target }}
+          path: |
+            mutants/**/*.meta
+          retention-days: 30
+          if-no-files-found: warn
