@@ -66,7 +66,7 @@ build = [
 ]
 # Mutation testing pilot (see docs/mutation-triage.md). mutmut 3 is
 # pytest-only and requires Python >= 3.10, so this extra is installed
-# only by the workflow_dispatch mutation job on Python 3.12. pytest runs
+# only by the mutation CI job (mutation.yml) on Python 3.12. pytest runs
 # the existing unittest.TestCase suite unchanged. pytest is capped below
 # 9.2: mutmut 3.8's harness reads the private `item._nodeid`, which pytest
 # 9.2 removed, so stats collection crashes. Lift the cap once mutmut ships
