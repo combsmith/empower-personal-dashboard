@@ -7,6 +7,8 @@ import urllib.error
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import yaml
+
 try:
     import tomllib
 except ModuleNotFoundError:
@@ -237,12 +239,13 @@ class TestPackaging(unittest.TestCase):
         self.assertTrue(MUTATION_WORKFLOW.exists(), "mutation.yml workflow must exist")
         text = MUTATION_WORKFLOW.read_text(encoding="utf-8")
 
-        # Runs on every PR and push to main, with no path filter.
-        self.assertIn("pull_request:", text)
-        self.assertIn("push:", text)
-        self.assertIn("branches: [main]", text)
-        self.assertNotIn("paths:", text)
-        self.assertNotIn("paths-ignore:", text)
+        # Runs on every PR and push to main, with no path filter. Each trigger
+        # is checked on its own so one event cannot satisfy the other's filter.
+        # YAML 1.1 parses the bare key `on` as True, so accept either key.
+        triggers = yaml.safe_load(text)
+        triggers = triggers.get("on", triggers.get(True))
+        for event in ("pull_request", "push"):
+            self.assertEqual(triggers[event], {"branches": ["main"]}, event)
 
         # A gate breach must fail the job.
         self.assertNotIn("continue-on-error", text)
@@ -262,7 +265,8 @@ class TestPackaging(unittest.TestCase):
         # Every push to main keeps its own run instead of being displaced
         # from the single pending slot of a shared concurrency group.
         self.assertIn(
-            "group: mutation-${{ github.event_name == 'pull_request' && github.ref || github.sha }}",
+            "group: mutation-${{ github.event_name }}-"
+            "${{ github.event_name == 'pull_request' && github.ref || github.sha }}",
             text,
         )
 

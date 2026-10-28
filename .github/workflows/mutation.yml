@@ -39,10 +39,11 @@ on:
 permissions: {}
 
 # Pull requests share one group per ref and cancel superseded runs. Pushes to
-# main and manual dispatches get one group per commit: GitHub keeps only one
-# pending run per group, so a shared main group would drop queued pushes.
+# main and manual dispatches get one group per event and commit: GitHub keeps
+# only one pending run per group, so a shared group would let a dispatch on the
+# same SHA displace a queued push run.
 concurrency:
-  group: mutation-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: mutation-${{ github.event_name }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
