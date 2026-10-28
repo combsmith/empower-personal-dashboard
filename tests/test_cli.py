@@ -384,6 +384,288 @@ class TestCLI(unittest.TestCase):
         self.assertIsNone(kwargs.get("limit"))
 
 
+_HOSTILE_OSC52 = "\x1b]52;c;ZXZpbA==\x07"
+_HOSTILE_CSI = "\x1b[2J\x1b[31m"
+
+
+def _has_terminal_controls(text):
+    """True if text contains ESC or any C0/C1 control other than newline."""
+    return any(
+        (ord(ch) < 0x20 and ch != "\n") or 0x7F <= ord(ch) <= 0x9F
+        for ch in text
+    )
+
+
+def _hostile_balances():
+    from empower_personal_dashboard.models import DashboardBalances
+
+    return DashboardBalances.from_dict({
+        "as_of_date": "2026-01-31" + _HOSTILE_CSI,
+        "net_worth": 100.0,
+        "mode": "offline" + _HOSTILE_OSC52,
+        "accounts": [{
+            "firm_name": "Synthetic Bank" + _HOSTILE_OSC52,
+            "account_name": "Checking" + _HOSTILE_CSI,
+            "account_type": "BANK\x9b31m",
+            "balance": -12.5,
+        }],
+    })
+
+
+def _hostile_holdings():
+    from empower_personal_dashboard.models import DashboardHoldings
+
+    return DashboardHoldings.from_dict({
+        "as_of_date": "2026-01-31" + _HOSTILE_CSI,
+        "total_value": 10.0,
+        "mode": "offline",
+        "holdings": [{
+            "ticker": "SYN" + _HOSTILE_CSI,
+            "description": _HOSTILE_OSC52 + "Synthetic Index Fund",
+            "account_name": "Brokerage\x07",
+            "holding_type": "ETF\x1b[0m",
+            "quantity": 1.0,
+            "price": 10.0,
+            "value": 10.0,
+        }],
+    })
+
+
+def _hostile_transactions():
+    from empower_personal_dashboard.models import DashboardTransactions
+
+    return DashboardTransactions.from_dict({
+        "start_date": "2026-01-01" + _HOSTILE_CSI,
+        "end_date": "2026-01-31",
+        "mode": "offline",
+        "transactions": [{
+            "transaction_date": "2026-01-02\x1b[1A",
+            "account_name": "Checking" + _HOSTILE_OSC52,
+            "description": "Synthetic Grocery" + _HOSTILE_CSI,
+            "transaction_type": "DEBIT\x00",
+            "amount": 12.5,
+            "status": "posted\x1b]0;pwned\x1b\\",
+        }],
+    })
+
+
+class TestTerminalOutputEscaping(unittest.TestCase):
+    """Imported text must not reach terminal-rendered output with control sequences (#131)."""
+
+    def test_render_balances_strips_control_sequences(self):
+        from empower_personal_dashboard.cli import render_balances_markdown, render_balances_table
+
+        for render in (render_balances_markdown, render_balances_table):
+            with self.subTest(render=render.__name__):
+                out = render(_hostile_balances())
+                self.assertFalse(_has_terminal_controls(out), repr(out))
+                self.assertIn("| Synthetic Bank | Checking | `BANK31m` | -$12.50 |", out)
+                self.assertIn("(2026-01-31)", out)
+                self.assertIn("`offline`", out)
+
+    def test_render_holdings_strips_control_sequences(self):
+        from empower_personal_dashboard.cli import render_holdings_markdown, render_holdings_table
+
+        for render in (render_holdings_markdown, render_holdings_table):
+            with self.subTest(render=render.__name__):
+                out = render(_hostile_holdings())
+                self.assertFalse(_has_terminal_controls(out), repr(out))
+                self.assertIn("| `SYN` | Synthetic Index Fund | Brokerage | `ETF` |", out)
+                self.assertIn("(2026-01-31)", out)
+
+    def test_render_holdings_truncates_on_visible_text(self):
+        from empower_personal_dashboard.cli import render_holdings_markdown
+        from empower_personal_dashboard.models import DashboardHoldings
+
+        holdings = DashboardHoldings.from_dict({
+            "holdings": [{
+                "description": _HOSTILE_CSI * 5 + "Short Fund",
+                "account_name": _HOSTILE_CSI * 5 + "Short Acct",
+                "value": 1.0,
+            }],
+        })
+        out = render_holdings_markdown(holdings)
+        self.assertIn("| Short Fund | Short Acct |", out)
+
+    def test_render_transactions_strips_control_sequences(self):
+        from empower_personal_dashboard.cli import render_transactions_markdown, render_transactions_table
+
+        for render in (render_transactions_markdown, render_transactions_table):
+            with self.subTest(render=render.__name__):
+                out = render(_hostile_transactions())
+                self.assertFalse(_has_terminal_controls(out), repr(out))
+                self.assertIn("| 2026-01-02 | Checking | Synthetic Grocery | `DEBIT` | -$12.50 | `posted` |", out)
+                self.assertIn("(2026-01-01 to 2026-01-31)", out)
+
+    def _run_cli_with_balances_file(self, fmt):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            in_path = Path(tmpdir) / "balances.json"
+            in_path.write_text(json.dumps(_hostile_balances().to_dict()), encoding="utf-8")
+            argv = ["empower", "--input-balances", str(in_path), "--format", fmt]
+            buf = io.StringIO()
+            with patch.object(sys, "argv", argv), contextlib.redirect_stdout(buf):
+                self.assertEqual(cli_main(), 0)
+            return buf.getvalue()
+
+    def test_cli_table_and_markdown_output_strip_control_sequences(self):
+        for fmt in ("table", "markdown"):
+            with self.subTest(fmt=fmt):
+                out = self._run_cli_with_balances_file(fmt)
+                self.assertIn("Synthetic Bank", out)
+                self.assertFalse(_has_terminal_controls(out), repr(out))
+
+    def test_cli_json_output_is_not_display_escaped(self):
+        # JSON stays a faithful data format: json.dumps escapes control characters
+        # as \\u001b etc., so the raw values round-trip and no ESC byte is emitted.
+        out = self._run_cli_with_balances_file("json")
+        self.assertNotIn("\x1b", out)
+        # Skip the "[+] Loaded ..." progress line that precedes the JSON document.
+        payload = json.loads(out[out.index("{"):])
+        self.assertEqual(payload["balances"]["accounts"][0]["firm_name"], "Synthetic Bank" + _HOSTILE_OSC52)
+
+    def test_cli_loaded_transactions_progress_line_strips_control_sequences(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            in_path = Path(tmpdir) / "transactions.json"
+            in_path.write_text(json.dumps(_hostile_transactions().to_dict()), encoding="utf-8")
+            argv = ["empower", "--transactions", "--input-transactions", str(in_path), "--format", "table"]
+            buf = io.StringIO()
+            with patch.object(sys, "argv", argv), contextlib.redirect_stdout(buf):
+                self.assertEqual(cli_main(), 0)
+            out = buf.getvalue()
+            self.assertIn("transactions (2026-01-01 to 2026-01-31)", out)
+            self.assertFalse(_has_terminal_controls(out), repr(out))
+
+
+class TestCsvFormulaNeutralisation(unittest.TestCase):
+    """CSV exports must keep formula-leading text cells literal (#135)."""
+
+    @staticmethod
+    def _read_rows(path):
+        import csv
+
+        with open(path, "r", newline="", encoding="utf-8") as f:
+            return list(csv.DictReader(f))
+
+    def test_export_transactions_csv_neutralises_text_but_not_numbers(self):
+        from empower_personal_dashboard.cli import export_transactions_csv
+        from empower_personal_dashboard.models import DashboardTransactions
+
+        txs = DashboardTransactions.from_dict({"transactions": [{
+            "transaction_date": "2026-01-02",
+            "account_name": "@SUM(A1:A9)",
+            "description": '=HYPERLINK("https://example.invalid","x")',
+            "amount": -12.5,
+            "transaction_type": "+DEBIT",
+            "symbol": "-SYN",
+            "price": -1.25,
+            "quantity": 2.0,
+            "status": "\t=1+1",
+            "category_id": 7,
+            "user_transaction_id": "\r=1",
+        }]})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "t.csv"
+            export_transactions_csv(txs, path)
+            row = self._read_rows(path)[0]
+        self.assertEqual(row["account_name"], "'@SUM(A1:A9)")
+        self.assertEqual(row["description"], '\'=HYPERLINK("https://example.invalid","x")')
+        self.assertEqual(row["transaction_type"], "'+DEBIT")
+        self.assertEqual(row["symbol"], "'-SYN")
+        self.assertEqual(row["status"], "'\t=1+1")
+        self.assertEqual(row["user_transaction_id"], "'\r=1")
+        # Numeric columns stay numeric: negative amounts are not quoted.
+        self.assertEqual(row["amount"], "-12.5")
+        self.assertEqual(row["price"], "-1.25")
+        self.assertEqual(row["category_id"], "7")
+        self.assertEqual(row["transaction_date"], "2026-01-02")
+
+    def test_export_balances_csv_neutralises_text_but_not_numbers(self):
+        from empower_personal_dashboard.cli import export_balances_csv
+        from empower_personal_dashboard.models import DashboardBalances
+
+        balances = DashboardBalances.from_dict({"accounts": [{
+            "firm_name": "=cmd|' /C calc'!A0",
+            "account_name": "+Checking",
+            "account_type": "-BANK",
+            "balance": -250.75,
+            "is_asset": False,
+            "currency": "@USD",
+            "last_refreshed": "2026-01-31",
+        }]})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "b.csv"
+            export_balances_csv(balances, path)
+            row = self._read_rows(path)[0]
+        self.assertEqual(row["institution"], "'=cmd|' /C calc'!A0")
+        self.assertEqual(row["account_name"], "'+Checking")
+        self.assertEqual(row["account_type"], "'-BANK")
+        self.assertEqual(row["currency"], "'@USD")
+        self.assertEqual(row["balance"], "-250.75")
+        self.assertEqual(row["is_asset"], "False")
+        self.assertEqual(row["last_refreshed"], "2026-01-31")
+
+    def test_export_holdings_csv_neutralises_text_but_not_numbers(self):
+        from empower_personal_dashboard.cli import export_holdings_csv
+        from empower_personal_dashboard.models import DashboardHoldings
+
+        holdings = DashboardHoldings.from_dict({"holdings": [{
+            "account_name": "@Brokerage",
+            "ticker": "=SYN",
+            "cusip": "+000000000",
+            "description": "-Synthetic Fund",
+            "holding_type": "\tETF",
+            "quantity": 3.0,
+            "price": 10.0,
+            "value": 30.0,
+            "cost_basis": 25.0,
+            "holding_percentage": 1.5,
+            "one_day_percent_change": -0.4,
+            "one_day_value_change": -1.2,
+        }]})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "h.csv"
+            export_holdings_csv(holdings, path)
+            row = self._read_rows(path)[0]
+        self.assertEqual(row["account_name"], "'@Brokerage")
+        self.assertEqual(row["ticker"], "'=SYN")
+        self.assertEqual(row["cusip"], "'+000000000")
+        self.assertEqual(row["description"], "'-Synthetic Fund")
+        self.assertEqual(row["holding_type"], "'\tETF")
+        self.assertEqual(row["one_day_percent_change"], "-0.4")
+        self.assertEqual(row["one_day_value_change"], "-1.2")
+        self.assertEqual(row["quantity"], "3.0")
+
+    @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
+    def test_merged_archive_csv_is_neutralised_and_jsonl_untouched(self, mock_txs):
+        # Reachability path from #135: a formula-bearing description in an archive
+        # selected for --merge flows into the companion CSV.
+        from empower_personal_dashboard.models import DashboardTransactions
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            out = Path(tmpdir) / "transactions.jsonl"
+            out.write_text(json.dumps({
+                "user_transaction_id": "OLD1", "transaction_date": "2026-01-02",
+                "description": "=1+1", "amount": -5.0, "status": "posted",
+            }) + "\n", encoding="utf-8")
+            mock_txs.return_value = DashboardTransactions.from_dict({"transactions": [{
+                "user_transaction_id": "TX2", "transaction_date": "2026-01-03",
+                "description": "Synthetic Grocery", "amount": 7.0, "status": "posted",
+            }]})
+            argv = [
+                "empower", "--transactions", "--merge", "--csv",
+                "--output-transactions", str(out),
+                "--quiet", "--session-file", "/nonexistent/session.json", "--mock",
+            ]
+            with patch.object(sys, "argv", argv):
+                self.assertEqual(cli_main(), 0)
+            records = [json.loads(line) for line in out.read_text(encoding="utf-8").splitlines() if line.strip()]
+            self.assertIn("=1+1", [r["description"] for r in records])
+            rows = {r["user_transaction_id"]: r for r in self._read_rows(out.with_suffix(".csv"))}
+            self.assertEqual(rows["OLD1"]["description"], "'=1+1")
+            self.assertEqual(rows["OLD1"]["amount"], "-5.0")
+            self.assertEqual(rows["TX2"]["description"], "Synthetic Grocery")
+
+
 class TestMergeTransactionRecords(unittest.TestCase):
     def test_updates_in_place_appends_and_preserves_order(self):
         from empower_personal_dashboard.cli import merge_transaction_records

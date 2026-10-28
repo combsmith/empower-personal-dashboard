@@ -58,7 +58,7 @@ from .credentials import (
     resolve_password,
     set_password_in_keyring,
 )
-from .sanitizers import clean_api_text
+from .sanitizers import clean_api_text, csv_safe_cell, terminal_safe_text
 from .models import DashboardBalances, DashboardHoldings, DashboardTransactions
 
 logger = logging.getLogger(__name__)
@@ -343,6 +343,11 @@ def format_currency(val: float) -> str:
     return f"${val:,.2f}"
 
 
+def _csv_safe_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Neutralise formula-leading string cells; numeric cells are left as-is."""
+    return {key: csv_safe_cell(value) for key, value in row.items()}
+
+
 def export_balances_csv(balances: DashboardBalances, filepath: Path) -> None:
     filepath.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = ["institution", "account_name", "account_type", "balance", "is_asset", "currency", "last_refreshed"]
@@ -350,7 +355,7 @@ def export_balances_csv(balances: DashboardBalances, filepath: Path) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for acct in balances.accounts:
-            writer.writerow({
+            writer.writerow(_csv_safe_row({
                 "institution": acct.get("firm_name", ""),
                 "account_name": acct.get("account_name", ""),
                 "account_type": acct.get("account_type", ""),
@@ -358,7 +363,7 @@ def export_balances_csv(balances: DashboardBalances, filepath: Path) -> None:
                 "is_asset": acct.get("is_asset", True),
                 "currency": acct.get("currency", "USD"),
                 "last_refreshed": acct.get("last_refreshed", ""),
-            })
+            }))
 
 
 def export_holdings_csv(holdings: DashboardHoldings, filepath: Path) -> None:
@@ -372,7 +377,7 @@ def export_holdings_csv(holdings: DashboardHoldings, filepath: Path) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for h in holdings.holdings:
-            writer.writerow({
+            writer.writerow(_csv_safe_row({
                 "account_name": h.get("account_name", ""),
                 "ticker": h.get("ticker", ""),
                 "cusip": h.get("cusip", ""),
@@ -385,7 +390,7 @@ def export_holdings_csv(holdings: DashboardHoldings, filepath: Path) -> None:
                 "holding_percentage": h.get("holding_percentage") if h.get("holding_percentage") is not None else "",
                 "one_day_percent_change": h.get("one_day_percent_change") if h.get("one_day_percent_change") is not None else "",
                 "one_day_value_change": h.get("one_day_value_change") if h.get("one_day_value_change") is not None else "",
-            })
+            }))
 
 
 def export_transactions_csv(transactions: DashboardTransactions, filepath: Path) -> None:
@@ -399,7 +404,7 @@ def export_transactions_csv(transactions: DashboardTransactions, filepath: Path)
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for tx in transactions.transactions:
-            writer.writerow({
+            writer.writerow(_csv_safe_row({
                 "transaction_date": tx.get("transaction_date", ""),
                 "account_name": tx.get("account_name", ""),
                 "description": tx.get("description", ""),
@@ -412,14 +417,14 @@ def export_transactions_csv(transactions: DashboardTransactions, filepath: Path)
                 "status": tx.get("status", ""),
                 "category_id": tx.get("category_id") if tx.get("category_id") is not None else "",
                 "user_transaction_id": tx.get("user_transaction_id", ""),
-            })
+            }))
 
 
 def render_balances_markdown(balances: DashboardBalances) -> str:
     lines = [
-        f"### Empower Personal Dashboard Balance Snapshot ({balances.as_of_date})",
+        f"### Empower Personal Dashboard Balance Snapshot ({terminal_safe_text(balances.as_of_date)})",
         "",
-        f"- **Mode**: `{balances.mode}`",
+        f"- **Mode**: `{terminal_safe_text(balances.mode)}`",
         f"- **Total Net Worth**: **{format_currency(balances.net_worth)}**",
         f"- **Total Investments**: {format_currency(balances.total_investment)}",
         f"- **Total Cash / Banking**: {format_currency(balances.total_cash)}",
@@ -434,9 +439,9 @@ def render_balances_markdown(balances: DashboardBalances) -> str:
     ]
 
     for entry in balances.accounts:
-        institution = entry.get("firm_name", "—")
-        display_name = entry.get("account_name", "Account")
-        category = entry.get("account_type", "OTHER")
+        institution = terminal_safe_text(entry.get("firm_name", "—"))
+        display_name = terminal_safe_text(entry.get("account_name", "Account"))
+        category = terminal_safe_text(entry.get("account_type", "OTHER"))
         amount = entry.get("balance", 0.0)
         lines.append(f"| {institution} | {display_name} | `{category}` | {format_currency(amount)} |")
 
@@ -456,9 +461,9 @@ def render_holdings_markdown(
 ) -> str:
     title_suffix = "" if preserve_order else " by Value"
     lines = [
-        f"### Empower Personal Dashboard Holdings ({holdings.as_of_date})",
+        f"### Empower Personal Dashboard Holdings ({terminal_safe_text(holdings.as_of_date)})",
         "",
-        f"- **Mode**: `{holdings.mode}`",
+        f"- **Mode**: `{terminal_safe_text(holdings.mode)}`",
         f"- **Total Portfolio Value**: **{format_currency(holdings.total_value)}**",
         f"- **Total Positions**: {len(holdings.holdings)}",
         "",
@@ -472,14 +477,14 @@ def render_holdings_markdown(
     display_holdings = sorted_holdings[:limit] if limit else sorted_holdings
 
     for h in display_holdings:
-        ticker = h.get("ticker") or "—"
-        desc = h.get("description", "—")
+        ticker = terminal_safe_text(h.get("ticker")) or "—"
+        desc = terminal_safe_text(h.get("description", "—"))
         if len(desc) > 35:
             desc = desc[:32] + "..."
-        acct = h.get("account_name", "—")
+        acct = terminal_safe_text(h.get("account_name", "—"))
         if len(acct) > 25:
             acct = acct[:22] + "..."
-        htype = h.get("holding_type", "OTHER")
+        htype = terminal_safe_text(h.get("holding_type", "OTHER"))
         shares = f"{h.get('quantity', 0.0):,.2f}"
         price = format_currency(h.get("price", 0.0))
         val = format_currency(h.get("value", 0.0))
@@ -506,9 +511,9 @@ def render_holdings_table(
 
 def render_transactions_markdown(transactions: DashboardTransactions, limit: Optional[int] = 25) -> str:
     lines = [
-        f"### Empower Personal Dashboard Transactions ({transactions.start_date} to {transactions.end_date})",
+        f"### Empower Personal Dashboard Transactions ({terminal_safe_text(transactions.start_date)} to {terminal_safe_text(transactions.end_date)})",
         "",
-        f"- **Mode**: `{transactions.mode}`",
+        f"- **Mode**: `{terminal_safe_text(transactions.mode)}`",
         f"- **Total Transactions**: {transactions.total_transactions}",
         f"- **Money In**: {format_currency(transactions.money_in)}",
         f"- **Money Out**: {format_currency(transactions.money_out)}",
@@ -523,17 +528,17 @@ def render_transactions_markdown(transactions: DashboardTransactions, limit: Opt
     display_txs = transactions.transactions[:limit] if limit else transactions.transactions
 
     for tx in display_txs:
-        date = tx.get("transaction_date", "—")
-        acct = tx.get("account_name", "—")
+        date = terminal_safe_text(tx.get("transaction_date", "—"))
+        acct = terminal_safe_text(tx.get("account_name", "—"))
         if len(acct) > 25:
             acct = acct[:22] + "..."
-        desc = tx.get("description", "—")
+        desc = terminal_safe_text(tx.get("description", "—"))
         if len(desc) > 35:
             desc = desc[:32] + "..."
-        ttype = tx.get("transaction_type", "—")
+        ttype = terminal_safe_text(tx.get("transaction_type", "—"))
         amt = tx.get("amount", 0.0)
         amt_str = f"+{format_currency(amt)}" if tx.get("is_credit") or tx.get("is_cash_in") else f"-{format_currency(amt)}"
-        status = tx.get("status", "posted")
+        status = terminal_safe_text(tx.get("status", "posted"))
         lines.append(f"| {date} | {acct} | {desc} | `{ttype}` | {amt_str} | `{status}` |")
 
     if limit and len(transactions.transactions) > limit:
@@ -1268,7 +1273,7 @@ def _load_transactions_from_file(args, in_transactions_file, progress_file):
         transactions_res.end_date = ed
 
     if not args.quiet:
-        print(f"[+] Loaded {transactions_res.total_transactions} transactions ({transactions_res.start_date} to {transactions_res.end_date}) from: {in_t}", file=progress_file)
+        print(f"[+] Loaded {transactions_res.total_transactions} transactions ({terminal_safe_text(transactions_res.start_date)} to {terminal_safe_text(transactions_res.end_date)}) from: {in_t}", file=progress_file)
     return transactions_res
 
 

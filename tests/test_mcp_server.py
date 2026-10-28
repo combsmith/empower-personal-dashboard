@@ -226,6 +226,66 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    @staticmethod
+    def _hostile_balances():
+        """Synthetic balances whose text fields carry terminal escapes and formula prefixes."""
+        from empower_personal_dashboard.models import DashboardBalances
+
+        return DashboardBalances.from_dict({
+            "as_of_date": "2026-01-31\x1b[2J",
+            "net_worth": 100.0,
+            "mode": "offline",
+            "accounts": [{
+                "firm_name": "=Synthetic Bank\x1b]52;c;ZXZpbA==\x07",
+                "account_name": "Checking\x1b[31m",
+                "account_type": "CASH",
+                "balance": -12.5,
+            }],
+        })
+
+    @requires_fastmcp
+    def test_formatted_output_strips_terminal_control_sequences(self) -> None:
+        def has_controls(text: str) -> bool:
+            return any((ord(c) < 0x20 and c != "\n") or 0x7F <= ord(c) <= 0x9F for c in text)
+
+        async def run_check() -> None:
+            with patch.object(self.client, "fetch_balances", return_value=self._hostile_balances()):
+                for tool in ("get_net_worth_summary", "get_balances"):
+                    for fmt in ("markdown", "table"):
+                        with self.subTest(tool=tool, fmt=fmt):
+                            res = await self.server.call_tool(tool, {"format": fmt})
+                            payload = json.loads(res.content[0].text)
+                            self.assertEqual(payload["status"], "success")
+                            out = payload["formatted_output"]
+                            self.assertIn("(2026-01-31)", out)
+                            self.assertFalse(has_controls(out), repr(out))
+
+        asyncio.run(run_check())
+
+    @requires_fastmcp
+    def test_export_data_csv_neutralises_formula_cells(self) -> None:
+        import csv
+
+        async def run_check() -> None:
+            with tempfile.TemporaryDirectory() as tmpdir, \
+                    patch.dict(os.environ, {"EMPOWER_EXPORT_ROOT": tmpdir}), \
+                    patch.object(self.client, "fetch_balances", return_value=self._hostile_balances()):
+                res = await self.server.call_tool(
+                    "export_data",
+                    {"destination_dir": tmpdir, "scope": "balances", "export_csv": True},
+                )
+                payload = json.loads(res.content[0].text)
+                self.assertEqual(payload["status"], "success")
+                with open(Path(tmpdir) / "empower_balances.csv", newline="", encoding="utf-8") as f:
+                    row = next(csv.DictReader(f))
+                self.assertTrue(row["institution"].startswith("'=Synthetic Bank"))
+                self.assertEqual(row["balance"], "-12.5")
+                # The JSON snapshot keeps the original value.
+                saved = json.loads((Path(tmpdir) / "empower_balances.json").read_text(encoding="utf-8"))
+                self.assertTrue(saved["accounts"][0]["firm_name"].startswith("=Synthetic Bank"))
+
+        asyncio.run(run_check())
+
     @requires_fastmcp
     def test_tool_get_balances_with_filtering(self) -> None:
         async def run_check() -> None:

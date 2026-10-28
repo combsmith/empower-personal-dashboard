@@ -47,6 +47,7 @@ from empower_personal_dashboard.models import (
     DashboardHoldings,
     DashboardTransactions,
 )
+from empower_personal_dashboard.sanitizers import terminal_safe_text
 
 logger = logging.getLogger("empower_personal_dashboard.mcp")
 
@@ -302,7 +303,7 @@ def create_mcp_server(
             fmt = format.lower()
             if fmt == "markdown":
                 res["formatted_output"] = (
-                    f"### Empower Net Worth Summary ({balances.as_of_date})\n\n"
+                    f"### Empower Net Worth Summary ({terminal_safe_text(balances.as_of_date)})\n\n"
                     f"- **Net Worth**: **{format_currency(balances.net_worth)}**\n"
                     f"- **Total Investments**: {format_currency(balances.total_investment)}\n"
                     f"- **Total Cash / Banking**: {format_currency(balances.total_cash)}\n"
@@ -313,7 +314,7 @@ def create_mcp_server(
                 )
             elif fmt == "table":
                 lines = [
-                    f"### Empower Net Worth Summary ({balances.as_of_date})",
+                    f"### Empower Net Worth Summary ({terminal_safe_text(balances.as_of_date)})",
                     "",
                     "| Category | Amount |",
                     "| :--- | ---: |",
