@@ -18,9 +18,10 @@ import logging
 import os
 import sys
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from empower_personal_dashboard.cli import (
     export_balances_csv,
@@ -87,14 +88,32 @@ def _sanitize_account_dict(acct: Dict[str, Any]) -> Dict[str, Any]:
     return clean
 
 
-class _DataCache:
-    """Thread-safe, lightweight in-memory TTL cache to prevent aggressive upstream polling."""
+# Upper bound on distinct cached transaction windows; each entry can hold a full history snapshot.
+_TRANSACTION_CACHE_MAX_ENTRIES = 16
 
-    def __init__(self, ttl_seconds: int = 300) -> None:
+_TransactionCacheKey = Tuple[Optional[str], Optional[str], Optional[int]]
+
+
+class _DataCache:
+    """Thread-safe, lightweight in-memory TTL cache to prevent aggressive upstream polling.
+
+    Transaction windows are bounded: expired entries are dropped and at most
+    ``max_transaction_entries`` windows are kept, evicting the least recently used.
+    """
+
+    def __init__(self, ttl_seconds: int = 300, max_transaction_entries: int = _TRANSACTION_CACHE_MAX_ENTRIES) -> None:
         self.ttl = ttl_seconds
+        self.max_transaction_entries = max(1, int(max_transaction_entries))
         self.balances: Optional[tuple[float, DashboardBalances]] = None
         self.holdings: Optional[tuple[float, DashboardHoldings]] = None
-        self.transactions: Dict[str, tuple[float, DashboardTransactions]] = {}
+        self.transactions: OrderedDict[_TransactionCacheKey, tuple[float, DashboardTransactions]] = OrderedDict()
+
+    @staticmethod
+    def transactions_key(
+        start_date: Optional[str], end_date: Optional[str], limit: Optional[int]
+    ) -> _TransactionCacheKey:
+        """Build a canonical cache key; None/zero/negative limits all mean an untruncated fetch."""
+        return (start_date, end_date, limit if limit and limit > 0 else None)
 
     def get_balances(self) -> Optional[DashboardBalances]:
         if self.balances and (time.time() - self.balances[0] < self.ttl):
@@ -112,15 +131,25 @@ class _DataCache:
     def set_holdings(self, data: DashboardHoldings) -> None:
         self.holdings = (time.time(), data)
 
-    def get_transactions(self, key: str) -> Optional[DashboardTransactions]:
-        if key in self.transactions:
-            ts, data = self.transactions[key]
-            if time.time() - ts < self.ttl:
-                return data
+    def get_transactions(self, key: _TransactionCacheKey) -> Optional[DashboardTransactions]:
+        entry = self.transactions.get(key)
+        if entry is None:
+            return None
+        ts, data = entry
+        if time.time() - ts < self.ttl:
+            self.transactions.move_to_end(key)
+            return data
+        del self.transactions[key]
         return None
 
-    def set_transactions(self, key: str, data: DashboardTransactions) -> None:
-        self.transactions[key] = (time.time(), data)
+    def set_transactions(self, key: _TransactionCacheKey, data: DashboardTransactions) -> None:
+        now = time.time()
+        for stale_key in [k for k, (ts, _) in self.transactions.items() if now - ts >= self.ttl]:
+            del self.transactions[stale_key]
+        self.transactions[key] = (now, data)
+        self.transactions.move_to_end(key)
+        while len(self.transactions) > self.max_transaction_entries:
+            self.transactions.popitem(last=False)
 
 
 def create_mcp_server(
@@ -248,7 +277,7 @@ def create_mcp_server(
     ) -> DashboardTransactions:
         """Return cached transactions for the query window or fetch fresh transactions."""
         _ensure_session_fresh()
-        key = f"{start_date}_{end_date}_{limit}"
+        key = _DataCache.transactions_key(start_date, end_date, limit)
         cached = cache.get_transactions(key)
         if cached:
             return cached
