@@ -846,6 +846,339 @@ class TestMCPServer(unittest.TestCase):
             self.assertIn("pip install 'empower-personal-dashboard[mcp]'", str(ctx.exception))
 
 
+# Synthetic, obviously fake bearer tokens (Zero-PII): never real secrets.
+_TEST_TOKEN = "synthetic-test-token-" + "a" * 32
+_WRONG_TOKEN = "synthetic-test-token-" + "b" * 32
+
+
+async def _drive_asgi(app, *, scope_type="http", method="GET", path="/sse", headers=None):
+    """Drive an ASGI app in-process (no sockets) and return the messages it sent."""
+    raw_headers = [(b"host", b"127.0.0.1:8000")]
+    for key, value in (headers or {}).items():
+        raw_headers.append((key.lower().encode("latin-1"), value.encode("latin-1")))
+    scope = {
+        "type": scope_type,
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": method,
+        "scheme": "http" if scope_type == "http" else "ws",
+        "path": path,
+        "raw_path": path.encode("latin-1"),
+        "root_path": "",
+        "query_string": b"",
+        "headers": raw_headers,
+        "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 8000),
+    }
+    if scope_type == "lifespan":
+        scope = {"type": "lifespan", "asgi": {"version": "3.0"}}
+    incoming = [{"type": "http.request", "body": b"", "more_body": False}]
+    sent = []
+
+    async def receive():
+        if incoming:
+            return incoming.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        sent.append(message)
+
+    await app(scope, receive, send)
+    return sent
+
+
+def _response_status(messages):
+    """Return the HTTP status from a list of sent ASGI messages (or None)."""
+    for message in messages:
+        if message["type"] == "http.response.start":
+            return message["status"]
+    return None
+
+
+class _RecordingApp:
+    """Inner ASGI app that records calls and answers 200 OK."""
+
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def __call__(self, scope, receive, send):
+        self.calls.append(scope["type"])
+        if scope["type"] == "http":
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
+
+class TestMCPHttpTransportAuth(unittest.TestCase):
+    """Issue #136: HTTP (SSE) transport must not expose the owner's session unauthenticated."""
+
+    def test_is_loopback_host(self) -> None:
+        from empower_personal_dashboard.mcp_server import _is_loopback_host
+
+        for host in ("127.0.0.1", "127.0.0.5", "::1", "[::1]", "localhost", "LOCALHOST"):
+            self.assertTrue(_is_loopback_host(host), host)
+        for host in ("0.0.0.0", "::", "", "192.168.0.10", "10.0.0.1", "example.test", "localhost.example.test"):
+            self.assertFalse(_is_loopback_host(host), host)
+
+    def test_resolve_token_refuses_non_loopback_without_token(self) -> None:
+        from empower_personal_dashboard.mcp_server import (
+            MCPTransportSecurityError,
+            _resolve_http_auth_token,
+        )
+
+        for host in ("0.0.0.0", "::", "192.168.0.10"):
+            with self.assertRaises(MCPTransportSecurityError) as ctx:
+                _resolve_http_auth_token(host, require_auth=False, environ={})
+            self.assertIn("EMPOWER_MCP_AUTH_TOKEN", str(ctx.exception))
+            self.assertIn(host, str(ctx.exception))
+
+    def test_resolve_token_allows_loopback_without_token(self) -> None:
+        from empower_personal_dashboard.mcp_server import _resolve_http_auth_token
+
+        self.assertIsNone(_resolve_http_auth_token("127.0.0.1", require_auth=False, environ={}))
+        self.assertIsNone(_resolve_http_auth_token("localhost", require_auth=False, environ={"EMPOWER_MCP_AUTH_TOKEN": "  "}))
+
+    def test_resolve_token_require_auth_on_loopback(self) -> None:
+        from empower_personal_dashboard.mcp_server import (
+            MCPTransportSecurityError,
+            _resolve_http_auth_token,
+        )
+
+        with self.assertRaises(MCPTransportSecurityError) as ctx:
+            _resolve_http_auth_token("127.0.0.1", require_auth=True, environ={})
+        self.assertIn("--require-auth", str(ctx.exception))
+        token = _resolve_http_auth_token(
+            "127.0.0.1", require_auth=True, environ={"EMPOWER_MCP_AUTH_TOKEN": _TEST_TOKEN}
+        )
+        self.assertEqual(token, _TEST_TOKEN)
+
+    def test_resolve_token_rejects_weak_or_malformed_token_without_echoing_it(self) -> None:
+        from empower_personal_dashboard.mcp_server import (
+            MCPTransportSecurityError,
+            _resolve_http_auth_token,
+        )
+
+        for bad in ("short-synthetic", "synthetic token with spaces " + "c" * 32, "synthetic-é-" + "d" * 32):
+            with self.assertRaises(MCPTransportSecurityError) as ctx:
+                _resolve_http_auth_token("0.0.0.0", require_auth=False, environ={"EMPOWER_MCP_AUTH_TOKEN": bad})
+            self.assertNotIn(bad, str(ctx.exception))
+
+    def test_middleware_rejects_missing_wrong_and_non_bearer_credentials(self) -> None:
+        from empower_personal_dashboard.mcp_server import BearerTokenAuthMiddleware
+
+        inner = _RecordingApp()
+        app = BearerTokenAuthMiddleware(inner, _TEST_TOKEN)
+        cases = [
+            {},
+            {"Authorization": f"Bearer {_WRONG_TOKEN}"},
+            {"Authorization": f"Basic {_TEST_TOKEN}"},
+            {"Authorization": "Bearer"},
+            {"Authorization": f"Bearer {_TEST_TOKEN}x"},
+        ]
+        for headers in cases:
+            messages = asyncio.run(_drive_asgi(app, headers=headers))
+            self.assertEqual(_response_status(messages), 401, headers)
+            start = messages[0]
+            header_map = {k.lower(): v for k, v in start["headers"]}
+            self.assertTrue(header_map[b"www-authenticate"].startswith(b"Bearer"))
+            body = b"".join(m.get("body", b"") for m in messages if m["type"] == "http.response.body")
+            self.assertNotIn(_TEST_TOKEN.encode(), body)
+        self.assertEqual(inner.calls, [])
+
+    def test_middleware_passes_through_with_correct_token(self) -> None:
+        from empower_personal_dashboard.mcp_server import BearerTokenAuthMiddleware
+
+        inner = _RecordingApp()
+        app = BearerTokenAuthMiddleware(inner, _TEST_TOKEN)
+        for scheme in ("Bearer", "bearer"):
+            messages = asyncio.run(_drive_asgi(app, headers={"Authorization": f"{scheme} {_TEST_TOKEN}"}))
+            self.assertEqual(_response_status(messages), 200)
+        self.assertEqual(inner.calls, ["http", "http"])
+
+    def test_middleware_lifespan_passthrough_and_websocket_rejected(self) -> None:
+        from empower_personal_dashboard.mcp_server import BearerTokenAuthMiddleware
+
+        inner = _RecordingApp()
+        app = BearerTokenAuthMiddleware(inner, _TEST_TOKEN)
+        asyncio.run(_drive_asgi(app, scope_type="lifespan"))
+        self.assertEqual(inner.calls, ["lifespan"])
+        messages = asyncio.run(_drive_asgi(app, scope_type="websocket"))
+        self.assertEqual(messages, [{"type": "websocket.close", "code": 1008}])
+        self.assertEqual(inner.calls, ["lifespan"])
+
+    def test_middleware_requires_non_empty_token(self) -> None:
+        from empower_personal_dashboard.mcp_server import BearerTokenAuthMiddleware
+
+        with self.assertRaises(ValueError):
+            BearerTokenAuthMiddleware(_RecordingApp(), "")
+
+    def test_build_sse_app_mcp1_style_clears_localhost_only_host_check_off_loopback(self) -> None:
+        """mcp 1.x: sse_app(mount_path) reads transport_security from server.settings."""
+        from empower_personal_dashboard.mcp_server import (
+            BearerTokenAuthMiddleware,
+            build_sse_app,
+        )
+
+        inner = _RecordingApp()
+
+        class _V1Server:
+            def __init__(self) -> None:
+                self.settings = types.SimpleNamespace(transport_security=object())
+
+            def sse_app(self, mount_path=None):
+                return inner
+
+        loopback = _V1Server()
+        self.assertIs(build_sse_app(loopback, host="127.0.0.1"), inner)
+        self.assertIsNotNone(loopback.settings.transport_security)
+
+        remote = _V1Server()
+        wrapped = build_sse_app(remote, host="0.0.0.0", auth_token=_TEST_TOKEN)
+        self.assertIsInstance(wrapped, BearerTokenAuthMiddleware)
+        self.assertIsNone(remote.settings.transport_security)
+
+    def test_build_sse_app_mcp2_style_passes_host(self) -> None:
+        from empower_personal_dashboard.mcp_server import build_sse_app
+
+        seen = {}
+        inner = _RecordingApp()
+
+        class _V2Server:
+            def sse_app(self, *, host="127.0.0.1"):
+                seen["host"] = host
+                return inner
+
+        self.assertIs(build_sse_app(_V2Server(), host="::1"), inner)
+        self.assertEqual(seen["host"], "::1")
+
+    def test_build_sse_app_fails_loudly_without_sse_support(self) -> None:
+        from empower_personal_dashboard.mcp_server import (
+            MCPTransportSecurityError,
+            build_sse_app,
+        )
+
+        with self.assertRaises(MCPTransportSecurityError):
+            build_sse_app(object(), host="127.0.0.1")
+
+    @unittest.skipIf(FastMCP is None, "requires the optional 'mcp' package")
+    def test_real_sdk_sse_app_is_gated_by_bearer_token(self) -> None:
+        from empower_personal_dashboard.mcp_server import build_sse_app
+
+        server = create_mcp_server(client=EmpowerDashboardClient(mock_mode=True))
+        app = build_sse_app(server, host="127.0.0.1", auth_token=_TEST_TOKEN)
+
+        unauth = asyncio.run(_drive_asgi(app, method="GET", path="/sse"))
+        self.assertEqual(_response_status(unauth), 401)
+        wrong = asyncio.run(
+            _drive_asgi(app, method="POST", path="/messages/", headers={"Authorization": f"Bearer {_WRONG_TOKEN}"})
+        )
+        self.assertEqual(_response_status(wrong), 401)
+        # With the right token the request reaches the SDK, which rejects it for its own
+        # reason (no session_id), proving pass-through without opening a long-lived stream.
+        authed = asyncio.run(
+            _drive_asgi(
+                app,
+                method="POST",
+                path="/messages/",
+                headers={"Authorization": f"Bearer {_TEST_TOKEN}", "Content-Type": "application/json"},
+            )
+        )
+        self.assertNotIn(_response_status(authed), (None, 401))
+
+    def _run_main(self, argv, env=None, build_error=None):
+        """Run mcp_server.main() with the server, app builder, and socket runner stubbed."""
+        from empower_personal_dashboard import mcp_server
+
+        fake_server = MagicMock()
+        serve = MagicMock()
+        built_app = object()
+        build = MagicMock(return_value=built_app, side_effect=build_error)
+        stderr = __import__("io").StringIO()
+        environ = {k: v for k, v in os.environ.items() if k != "EMPOWER_MCP_AUTH_TOKEN"}
+        environ.update(env or {})
+        with patch.object(mcp_server, "FastMCP", object()), \
+                patch.object(mcp_server, "create_mcp_server", return_value=fake_server) as create, \
+                patch.object(mcp_server, "build_sse_app", build), \
+                patch.object(mcp_server, "_serve_http_app", serve), \
+                patch.dict(os.environ, environ, clear=True), \
+                patch("sys.argv", ["empower-mcp", "--sandbox"] + argv), \
+                patch("sys.stderr", stderr), \
+                self.assertLogs("empower_personal_dashboard.mcp", level="DEBUG") as logs:
+            mcp_server.logger.debug("capture start")
+            exit_code = None
+            try:
+                mcp_server.main()
+            except SystemExit as exc:
+                exit_code = exc.code
+        return types.SimpleNamespace(
+            exit_code=exit_code,
+            stderr=stderr.getvalue(),
+            logs="\n".join(logs.output),
+            server=fake_server,
+            create=create,
+            build=build,
+            serve=serve,
+            app=built_app,
+        )
+
+    def test_main_refuses_sse_on_all_interfaces_without_token(self) -> None:
+        result = self._run_main(["--transport", "sse", "--host", "0.0.0.0"])
+        self.assertEqual(result.exit_code, 2)
+        self.assertIn("EMPOWER_MCP_AUTH_TOKEN", result.stderr)
+        self.assertIn("0.0.0.0", result.stderr)
+        result.create.assert_not_called()
+        result.serve.assert_not_called()
+        result.server.run.assert_not_called()
+
+    def test_main_refuses_require_auth_on_loopback_without_token(self) -> None:
+        result = self._run_main(["--transport", "sse", "--require-auth"])
+        self.assertEqual(result.exit_code, 2)
+        self.assertIn("--require-auth", result.stderr)
+        result.serve.assert_not_called()
+
+    def test_main_serves_sse_on_loopback_without_token(self) -> None:
+        result = self._run_main(["--transport", "sse", "--port", "8123"])
+        self.assertIsNone(result.exit_code)
+        result.build.assert_called_once_with(result.server, host="127.0.0.1", auth_token=None)
+        result.serve.assert_called_once()
+        args, kwargs = result.serve.call_args
+        self.assertIs(args[0], result.app)
+        self.assertEqual(kwargs["host"], "127.0.0.1")
+        self.assertEqual(kwargs["port"], 8123)
+        result.server.run.assert_not_called()
+
+    def test_main_serves_sse_on_all_interfaces_with_token_and_never_logs_it(self) -> None:
+        result = self._run_main(
+            ["--transport", "sse", "--host", "0.0.0.0", "--debug"],
+            env={"EMPOWER_MCP_AUTH_TOKEN": _TEST_TOKEN},
+        )
+        self.assertIsNone(result.exit_code)
+        result.build.assert_called_once_with(result.server, host="0.0.0.0", auth_token=_TEST_TOKEN)
+        result.serve.assert_called_once()
+        self.assertIn("bearer", result.logs.lower())
+        self.assertNotIn(_TEST_TOKEN, result.logs)
+        self.assertNotIn(_TEST_TOKEN, result.stderr)
+
+    def test_main_exits_cleanly_when_sdk_cannot_build_sse_app(self) -> None:
+        from empower_personal_dashboard.mcp_server import MCPTransportSecurityError
+
+        result = self._run_main(
+            ["--transport", "sse"], build_error=MCPTransportSecurityError("synthetic: no SSE app")
+        )
+        self.assertEqual(result.exit_code, 2)
+        self.assertIn("synthetic: no SSE app", result.stderr)
+        result.serve.assert_not_called()
+
+    def test_main_stdio_unaffected_by_http_auth(self) -> None:
+        result = self._run_main([], env={})
+        self.assertIsNone(result.exit_code)
+        result.server.run.assert_called_once_with(transport="stdio")
+        result.build.assert_not_called()
+        result.serve.assert_not_called()
+        # --host is ignored for stdio, so a non-loopback value must not block it.
+        result = self._run_main(["--host", "0.0.0.0"], env={})
+        self.assertIsNone(result.exit_code)
+        result.server.run.assert_called_once_with(transport="stdio")
+
 
 if __name__ == "__main__":
     unittest.main()

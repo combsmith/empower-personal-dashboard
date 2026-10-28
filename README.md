@@ -37,6 +37,7 @@ This library provides full programmatic and CLI access to:
 - [Model Context Protocol (MCP) Server](#model-context-protocol-mcp-server)
   - [Installation with MCP Support](#installation-with-mcp-support)
   - [Configuration for AI Agents](#configuration-for-ai-agents)
+  - [Networked SSE Transport & Client Authentication](#networked-sse-transport--client-authentication)
   - [MCP Tools & Resources](#mcp-tools--resources)
 - [OpenAPI 3.1 Specification & Contract Testing](#openapi-31-specification--contract-testing)
   - [Two-Tier Architecture](#two-tier-architecture)
@@ -270,6 +271,32 @@ uvx --from "empower-personal-dashboard[mcp]" empower-mcp
   }
 }
 ```
+
+### Networked SSE Transport & Client Authentication
+
+`stdio` (the default) is the recommended transport: only the agent that launched the process can talk to it. The optional `--transport sse` HTTP server is different. **Every client that can reach it acts with your Empower session**, so it is locked down by default:
+
+* **Loopback only by default.** `--host` defaults to `127.0.0.1`, and on loopback no token is needed (`localhost`, `127.0.0.0/8` and `::1` count as loopback). The MCP SDK's Host/Origin checks are left on for loopback to block DNS-rebinding attacks from web pages.
+* **Bearer token required off loopback.** If `--host` is anything else (for example `0.0.0.0`, a LAN IP or a hostname), the server **refuses to start** unless `EMPOWER_MCP_AUTH_TOKEN` is set to a random secret of at least 32 printable ASCII characters. Once set, the token is checked on **every** HTTP request (any host, loopback included) with a constant-time comparison. Requests without `Authorization: Bearer <token>` get `401`. The token is read only from the environment, never from a CLI flag (which would show up in `ps`), and it is never logged.
+* **`--require-auth`** makes the token mandatory on loopback too. Use it when a tunnel or reverse proxy (Tailscale Funnel, Cloudflare Tunnel, nginx) forwards traffic to a loopback port, or on a shared multi-user machine. In both cases "loopback" no longer means "only me".
+
+```bash
+# Loopback only (no token needed)
+empower-mcp --transport sse --port 8000
+
+# Reachable from the network: a token is mandatory
+export EMPOWER_MCP_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+empower-mcp --transport sse --host 0.0.0.0 --port 8000
+
+# Behind a tunnel / reverse proxy that forwards to loopback
+empower-mcp --transport sse --require-auth
+```
+
+Clients must send `Authorization: Bearer $EMPOWER_MCP_AUTH_TOKEN` on both the `/sse` stream and `/messages/` posts. A bearer token travels in cleartext over plain HTTP, so put TLS in front of it (a reverse proxy or tunnel) whenever traffic leaves the machine.
+
+> **Breaking change:** older releases started `--transport sse --host 0.0.0.0` with no authentication. That command now exits with an error until `EMPOWER_MCP_AUTH_TOKEN` is set.
+
+If you embed `create_mcp_server()` and serve its SDK app yourself, wrap it the same way: `empower_personal_dashboard.mcp_server.build_sse_app(server, host=..., auth_token=...)` returns the SSE ASGI app behind `BearerTokenAuthMiddleware`.
 
 ### MCP Tools & Resources
 

@@ -34,7 +34,23 @@ We decided to implement **Option 1: Co-located Native FastMCP Server with Out-of
    - **Consumption (In-Band):** The MCP server runs headlessly, consuming the existing session file. If the session is missing or expired, tools fail fast with structured error responses instructing the user to re-authenticate via the terminal. Passwords and 2FA verification codes are **never** routed through the LLM context.
 4. **Dual Transport Support (`stdio` + `sse`):**
    - **`stdio` (Default):** Zero-overhead local subprocess execution for desktop agent runtimes (Claude Desktop, Antigravity CLI, Cursor, Windsurf).
-   - **`sse` (Networked):** Built-in Server-Sent Events HTTP server for self-hosted container environments (e.g. home NAS, local server behind Tailscale Funnel / Cloudflare Tunnel).
+   - **`sse` (Networked):** Built-in Server-Sent Events HTTP server for self-hosted container environments (e.g. home NAS, local server behind Tailscale Funnel / Cloudflare Tunnel). Client authentication is mandatory off loopback; see the amendment below.
+
+### Amendment (2026-10-27): HTTP transport client authentication (issue #136)
+
+**Context.** Every MCP client acts with the owner's Empower session. `stdio` is authenticated by construction (only the parent process holds the pipe). The `sse` HTTP app from the SDK had no client authentication, so binding it to `0.0.0.0`, which the CLI help used to suggest, exposed balances, holdings and transactions to anything that could reach the port (CWE-306).
+
+**Decision.**
+1. `--host` stays `127.0.0.1` by default. Unauthenticated HTTP is allowed **only** on a loopback bind (`localhost`, `127.0.0.0/8`, `::1`).
+2. A non-loopback bind **refuses to start** (exit code 2, clear message on stderr) unless `EMPOWER_MCP_AUTH_TOKEN` holds a random secret of at least 32 printable ASCII characters. `--require-auth` extends that requirement to loopback for tunnel, reverse-proxy and multi-user setups. Once a token is configured, it is enforced on every HTTP request whatever the bind address.
+3. Enforcement is a small pure-ASGI `BearerTokenAuthMiddleware` around the SDK's `sse_app()`. It uses `hmac.compare_digest`, returns `401` with `WWW-Authenticate: Bearer`, closes websockets with 1008, and passes lifespan events through. The token comes only from the environment (never argv) and is never logged.
+4. `main()` builds the app and runs uvicorn itself instead of calling `server.run(transport="sse", ...)`. mcp 1.x `FastMCP.run()` does not accept `host`/`port`, so the HTTP path is now version-portable too.
+
+**Why middleware instead of the SDK's `auth=` / `token_verifier=`.** Those hooks are OAuth 2.1 resource-server plumbing. They require `AuthSettings` (issuer URL, resource server URL) and have different signatures in mcp 1.x and 2.x (and none in early 1.x), and a single-user static token does not fit them well. Wrapping the returned ASGI app behaves identically from mcp 1.x through 2.x and can be tested hermetically by driving the ASGI app directly.
+
+**DNS rebinding.** For loopback binds, the SDK's own Host/Origin validation (`TransportSecuritySettings`, auto-enabled for `127.0.0.1`/`localhost`/`::1` in recent 1.x and in 2.x) is kept. Off loopback it only allows localhost names, so it is disabled there, matching mcp 2.x defaults, and the bearer token is the control. Very old mcp 1.x releases without `TransportSecuritySettings` have no rebinding protection on loopback. Use `--require-auth` there.
+
+**Consequences.** This is a breaking change: `--transport sse --host 0.0.0.0` without a token no longer starts. TLS is still out of scope. Operators exposing the port beyond the machine should terminate TLS at a proxy or tunnel.
 
 ---
 
