@@ -1924,6 +1924,252 @@ class TestClientReauthenticateAndAutoRefresh(unittest.TestCase):
         self.assertEqual(reauth_calls, 1)
 
 
+class TestLocalFileHandlingHardening(unittest.TestCase):
+    """Regression tests for local file handling (issues #132, #134, #138)."""
+
+    def _swap_dir_for_symlink(self, victim_dir: Path, attacker_dir: Path) -> Path:
+        """Rename ``victim_dir`` aside and plant a symlink to ``attacker_dir`` in its place."""
+        moved = victim_dir.with_name(victim_dir.name + "_moved")
+        os.rename(victim_dir, moved)
+        victim_dir.symlink_to(attacker_dir, target_is_directory=True)
+        return moved
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
+    def test_save_session_refuses_parent_swapped_after_validation(self):
+        # #132: the session directory is validated by path, then later used by
+        # path again. An ancestor swapped for a symlink in between must not
+        # redirect the write into the attacker's directory.
+        import empower_personal_dashboard.client as client_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            victim_dir = root / "sessions"
+            victim_dir.mkdir()
+            attacker_dir = root / "attacker"
+            attacker_dir.mkdir()
+            planted = attacker_dir / "session.json"
+            planted.write_text("ATTACKER-OWNED", encoding="utf-8")
+
+            real_guard = client_mod._safe_fs_path
+
+            def racing_guard(path, **kwargs):
+                checked = real_guard(path, **kwargs)
+                self._swap_dir_for_symlink(victim_dir, attacker_dir)
+                return checked
+
+            client = EmpowerDashboardClient(session_file=victim_dir / "session.json", mock_mode=True)
+            client.csrf = "synthetic-csrf"
+            with patch.object(client_mod, "_safe_fs_path", side_effect=racing_guard):
+                with self.assertRaises(ValueError):
+                    client.save_session(victim_dir / "session.json")
+
+            self.assertEqual(planted.read_text(encoding="utf-8"), "ATTACKER-OWNED")
+            self.assertEqual(
+                [p.name for p in attacker_dir.iterdir()],
+                ["session.json"],
+                "no temp or session file may be created in the attacker directory",
+            )
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
+    def test_save_session_stays_anchored_to_pinned_directory(self):
+        # #132: once the destination directory is opened, a swap during the
+        # write must not change where the replace lands.
+        import empower_personal_dashboard.client as client_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            victim_dir = root / "sessions"
+            victim_dir.mkdir()
+            attacker_dir = root / "attacker"
+            attacker_dir.mkdir()
+            planted = attacker_dir / "session.json"
+            planted.write_text("ATTACKER-OWNED", encoding="utf-8")
+            moved = {}
+            real_dump = client_mod.json.dump
+
+            def racing_dump(obj, fp, **kwargs):
+                moved["dir"] = self._swap_dir_for_symlink(victim_dir, attacker_dir)
+                return real_dump(obj, fp, **kwargs)
+
+            client = EmpowerDashboardClient(session_file=victim_dir / "session.json", mock_mode=True)
+            client.csrf = "synthetic-csrf"
+            with patch.object(client_mod.json, "dump", side_effect=racing_dump):
+                client.save_session(victim_dir / "session.json")
+
+            self.assertEqual(planted.read_text(encoding="utf-8"), "ATTACKER-OWNED")
+            written = moved["dir"] / "session.json"
+            self.assertTrue(written.exists())
+            self.assertEqual(json.loads(written.read_text(encoding="utf-8"))["csrf"], "synthetic-csrf")
+            self.assertEqual(written.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(sorted(p.name for p in moved["dir"].iterdir()), ["session.json"])
+
+    def _isolated_logger(self):
+        """Detach the process-wide client logger's handlers; return a restore callback."""
+        import logging as _logging
+
+        logger = _logging.getLogger("EmpowerDashboardClient")
+        saved_handlers = logger.handlers[:]
+        saved_level = logger.level
+        for h in saved_handlers:
+            logger.removeHandler(h)
+
+        def restore():
+            for h in logger.handlers[:]:
+                logger.removeHandler(h)
+                h.close()
+            for h in saved_handlers:
+                logger.addHandler(h)
+            logger.setLevel(saved_level)
+
+        return logger, restore
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits")
+    def test_log_file_created_owner_only_despite_permissive_umask(self):
+        # #134: the detailed log receives API response bodies; it must be
+        # created 0600 even when the process umask would allow group/other read.
+        logger, restore = self._isolated_logger()
+        old_umask = os.umask(0o022)
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                log_path = Path(tmpdir).resolve() / "logs" / "debug.log"
+                client = EmpowerDashboardClient(log_file=log_path, mock_mode=True, debug=True)
+                client._log_debug("synthetic response body")
+                for h in logger.handlers:
+                    h.flush()
+                self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
+                self.assertIn("synthetic response body", log_path.read_text(encoding="utf-8"))
+        finally:
+            os.umask(old_umask)
+            restore()
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits")
+    def test_log_file_existing_mode_is_not_loosened(self):
+        # #134: opening an existing log for append keeps its stricter mode.
+        logger, restore = self._isolated_logger()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                log_path = Path(tmpdir).resolve() / "debug.log"
+                log_path.write_text("", encoding="utf-8")
+                os.chmod(log_path, 0o600)
+                EmpowerDashboardClient(log_file=log_path, mock_mode=True, debug=True)
+                self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
+        finally:
+            restore()
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
+    def test_load_session_refuses_symlinked_session_file(self):
+        # #138: a symlinked session file can point at an attacker-authored
+        # document; the loader must refuse it like the writer does.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            attacker_doc = root / "attacker.json"
+            attacker_doc.write_text(
+                json.dumps({"version": 2, "base_url": "https://attacker.example", "csrf": "evil", "cookies": []}),
+                encoding="utf-8",
+            )
+            link = root / "session.json"
+            link.symlink_to(attacker_doc)
+
+            client = EmpowerDashboardClient(session_file=root / "other.json", mock_mode=False)
+            self.assertFalse(client.load_session(link))
+            self.assertEqual(client.base_url, "https://home.personalcapital.com")
+            self.assertNotEqual(client.csrf, "evil")
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
+    def test_load_session_refuses_session_inside_symlinked_directory(self):
+        # #138: a symlinked parent directory redirects the read just like a symlinked leaf.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            attacker_dir = root / "attacker"
+            attacker_dir.mkdir()
+            (attacker_dir / "session.json").write_text(
+                json.dumps({"version": 2, "base_url": "https://attacker.example", "csrf": "evil", "cookies": []}),
+                encoding="utf-8",
+            )
+            linked_dir = root / "linked"
+            linked_dir.symlink_to(attacker_dir, target_is_directory=True)
+
+            client = EmpowerDashboardClient(session_file=root / "other.json", mock_mode=False)
+            self.assertFalse(client.load_session(linked_dir / "session.json"))
+            self.assertNotEqual(client.csrf, "evil")
+
+    def test_load_session_ignores_unknown_base_url(self):
+        # #138: the session file must not be able to point the client (and the
+        # later password POST) at an arbitrary origin.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_file = Path(tmpdir).resolve() / "session.json"
+            session_file.write_text(
+                json.dumps(
+                    {
+                        "version": 2,
+                        "base_url": "https://attacker.example",
+                        "csrf": "synthetic-csrf",
+                        "cookies": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            client = EmpowerDashboardClient(session_file=Path(tmpdir) / "other.json", mock_mode=False)
+            self.assertTrue(client.load_session(session_file))
+            self.assertEqual(client.base_url, "https://home.personalcapital.com")
+            self.assertEqual(client.api_endpoint, "https://home.personalcapital.com/api")
+            # The rest of the session still loads.
+            self.assertEqual(client.csrf, "synthetic-csrf")
+
+    def test_load_session_keeps_code_920_migration_origin(self):
+        # Code 920 routing persists MIGRATED_BASE_URL through save_session; a
+        # later load must still honor it.
+        from empower_personal_dashboard.client import MIGRATED_BASE_URL
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_file = Path(tmpdir).resolve() / "session.json"
+            migrated = EmpowerDashboardClient(session_file=session_file, mock_mode=False)
+            migrated.base_url = MIGRATED_BASE_URL
+            migrated.api_endpoint = f"{MIGRATED_BASE_URL}/api"
+            migrated.save_session(session_file)
+
+            client = EmpowerDashboardClient(session_file=Path(tmpdir) / "other.json", mock_mode=False)
+            self.assertTrue(client.load_session(session_file))
+            self.assertEqual(client.base_url, MIGRATED_BASE_URL)
+            self.assertEqual(client.api_endpoint, f"{MIGRATED_BASE_URL}/api")
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits")
+    def test_save_and_load_session_through_execute_only_ancestor(self):
+        # Pinning walks every path component; an ancestor that grants search
+        # (x) but not read permission must still be traversable, as it is for
+        # a plain pathname write.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            gate = Path(tmpdir).resolve() / "gate"
+            session_file = gate / "inner" / "session.json"
+            session_file.parent.mkdir(parents=True)
+            os.chmod(gate, 0o300)
+            try:
+                client = EmpowerDashboardClient(session_file=session_file, mock_mode=True)
+                client.csrf = "synthetic-csrf"
+                client.save_session(session_file)
+                reloaded = EmpowerDashboardClient(session_file=Path(tmpdir) / "other.json", mock_mode=False)
+                self.assertTrue(reloaded.load_session(session_file))
+                self.assertEqual(reloaded.csrf, "synthetic-csrf")
+            finally:
+                os.chmod(gate, 0o700)
+
+    def test_save_session_uses_path_fallback_without_dir_fd_support(self):
+        # Platforms without dir_fd/O_NOFOLLOW (e.g. Windows) fall back to the
+        # validated-path write instead of crashing.
+        from empower_personal_dashboard import _safe_io
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_file = Path(tmpdir).resolve() / "nested" / "session.json"
+            client = EmpowerDashboardClient(session_file=session_file, mock_mode=True)
+            client.csrf = "synthetic-csrf"
+            with patch.object(_safe_io, "DIR_FD_SUPPORTED", False):
+                client.save_session(session_file)
+                reloaded = EmpowerDashboardClient(session_file=Path(tmpdir) / "other.json", mock_mode=False)
+                self.assertTrue(reloaded.load_session(session_file))
+            self.assertEqual(reloaded.csrf, "synthetic-csrf")
+            self.assertEqual([p.name for p in session_file.parent.iterdir()], ["session.json"])
+
+
 if __name__ == "__main__":
     unittest.main()
 
