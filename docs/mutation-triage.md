@@ -17,6 +17,8 @@ an empty `mutants/` directory; there is no cache to go stale.
 For a single target or a report-only run: GitHub Actions → **Mutation
 Testing** → Run workflow, pick `target` (`all`, `models`, `sanitizers`, or
 `beancount-helpers`), and set `enforce: false` to report without failing.
+Manual runs report as `mutation dispatch (<target>)`, never as the required
+`mutation (all)` check.
 
 Locally (Python 3.12, project venv):
 

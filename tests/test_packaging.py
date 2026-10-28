@@ -15,6 +15,7 @@ except ModuleNotFoundError:
 ROOT = Path(__file__).resolve().parent.parent
 PYPROJECT_PATH = ROOT / "pyproject.toml"
 PUBLISH_WORKFLOW = ROOT / ".github" / "workflows" / "publish.yml"
+MUTATION_WORKFLOW = ROOT / ".github" / "workflows" / "mutation.yml"
 EXPECTED_VERSION = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))["project"]["version"]
 
 
@@ -230,6 +231,52 @@ class TestPackaging(unittest.TestCase):
             code = main(["--version"])
         self.assertEqual(code, 0)
         self.assertEqual(buf.getvalue().strip(), expected_version)
+
+    def test_mutation_workflow_structure(self):
+        """Pin the contract of the required `mutation (all)` check (#126)."""
+        self.assertTrue(MUTATION_WORKFLOW.exists(), "mutation.yml workflow must exist")
+        text = MUTATION_WORKFLOW.read_text(encoding="utf-8")
+
+        # Runs on every PR and push to main, with no path filter.
+        self.assertIn("pull_request:", text)
+        self.assertIn("push:", text)
+        self.assertIn("branches: [main]", text)
+        self.assertNotIn("paths:", text)
+        self.assertNotIn("paths-ignore:", text)
+
+        # A gate breach must fail the job.
+        self.assertNotIn("continue-on-error", text)
+        self.assertIn(
+            "ENFORCE: ${{ github.event_name != 'workflow_dispatch' || inputs.enforce }}",
+            text,
+        )
+
+        # Only event-triggered runs may report the required check name; a
+        # report-only manual dispatch must not be able to satisfy it.
+        self.assertIn(
+            "name: ${{ github.event_name == 'workflow_dispatch' && "
+            "format('mutation dispatch ({0})', inputs.target) || 'mutation (all)' }}",
+            text,
+        )
+
+        # Every push to main keeps its own run instead of being displaced
+        # from the single pending slot of a shared concurrency group.
+        self.assertIn(
+            "group: mutation-${{ github.event_name == 'pull_request' && github.ref || github.sha }}",
+            text,
+        )
+
+        # Least privilege and no persisted credentials.
+        self.assertIn("permissions: {}", text)
+        self.assertIn("contents: read", text)
+        self.assertIn("persist-credentials: false", text)
+
+        # Actions pinned to full commit SHAs.
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("uses:"):
+                ref = line.split("@", 1)[1].split()[0]
+                self.assertRegex(ref, r"^[0-9a-f]{40}$", f"Action must be SHA-pinned: {line}")
 
     def test_publish_workflow_structure(self):
         self.assertTrue(PUBLISH_WORKFLOW.exists(), "publish.yml workflow must exist")
