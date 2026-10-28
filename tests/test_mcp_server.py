@@ -953,6 +953,27 @@ class TestExportDataDirectoryPinning(unittest.TestCase):
             self.assertEqual(existing.stat().st_mode & 0o777, 0o600)
             self.assertIn("accounts", json.loads(existing.read_text(encoding="utf-8")))
 
+    def test_new_export_files_created_owner_only_despite_permissive_umask(self) -> None:
+        # Exports hold financial data: a new file is 0600 regardless of umask.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir).resolve()
+            previous = os.umask(0o022)
+            try:
+                with patch.dict(os.environ, {"EMPOWER_EXPORT_ROOT": str(dest)}):
+                    with patch("empower_personal_dashboard.mcp_server.FastMCP", FastMCP or _FakeFastMCP):
+                        server = create_mcp_server(client=EmpowerDashboardClient(mock_mode=True))
+                        payload = self._run_export(
+                            server, {"destination_dir": str(dest), "scope": "balances", "export_csv": True}
+                        )
+            finally:
+                os.umask(previous)
+            self.assertEqual(payload["status"], "success", payload)
+            written = sorted(p for p in dest.iterdir() if p.is_file())
+            self.assertTrue(written)
+            for path in written:
+                with self.subTest(file=path.name):
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
 
 if __name__ == "__main__":
     unittest.main()

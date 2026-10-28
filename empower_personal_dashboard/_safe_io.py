@@ -139,10 +139,9 @@ class PinnedDir:
         """Write ``name`` via an exclusive sibling temp file and an atomic replace.
 
         ``mode`` forces the final permission bits (e.g. ``0o600``) and is set
-        before any content is written. With ``mode=None`` a new file gets the
-        umask default and an existing regular file keeps its permission bits,
-        matching an in-place ``open(path, "w")``. A symlink planted at ``name``
-        is replaced, never followed.
+        before any content is written. With ``mode=None`` a new file is created
+        owner-only (``0o600``) and an existing regular file keeps its permission
+        bits. A symlink planted at ``name`` is replaced, never followed.
         """
         _check_name(name)
         kw = self._dir_kw()
@@ -156,7 +155,7 @@ class PinnedDir:
                 pass
         tmp_name = f".{name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC | _O_BINARY
-        fd = os.open(self._target(tmp_name), flags, 0o600 if mode is not None else 0o666, **kw)
+        fd = os.open(self._target(tmp_name), flags, 0o600, **kw)
         replaced = False
         try:
             if final_mode is not None and hasattr(os, "fchmod"):
