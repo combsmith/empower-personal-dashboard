@@ -71,11 +71,14 @@ build = [
 # releases change which mutants are generated and how they are numbered
 # (3.8.1 dropped an escape-sequence mutant and renumbered sanitizers), so a
 # floating range moves scores and invalidates the equivalent-mutant IDs in
-# docs/mutation-triage.md without any code change. Bump it in its own PR and
-# re-baseline there. 3.8.1 also fixed the pytest 9.2 stats crash.
+# docs/mutation-triage.md without any code change. Bump it by hand in its own
+# PR and re-baseline there (Dependabot pip is security-only in this repo).
+# 3.8.1 also fixed the pytest 9.2 stats crash. pytest is capped below the
+# next major because mutmut's harness hooks pytest internals; a new major can
+# break the required check with no code change.
 mutation = [
     "mutmut==3.8.1",
-    "pytest>=8.0",
+    "pytest>=8.0,<10",
 ]
 dev = [
     "beancount>=3.0.0",

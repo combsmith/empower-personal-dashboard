@@ -118,10 +118,13 @@ The `beancount` and `models` mutant sets and statuses were unchanged.
 ## Tooling and mutant IDs
 
 Mutant IDs (`__mutmut_N`) and counts depend on the mutmut version, so
-`mutmut` is pinned exactly in the `mutation` extra in `pyproject.toml`.
-Upgrade it in a dedicated PR. Its `mutation (all)` run shows any score
-movement. Re-run the triage, then update the baselines and the equivalent
-table above in that same PR.
+`mutmut` is pinned exactly in the `mutation` extra in `pyproject.toml`, and
+pytest is capped below its next major (mutmut's harness hooks pytest
+internals). Dependabot's pip config here is security-only
+(`open-pull-requests-limit: 0`), so no version-bump PRs arrive. Upgrades
+are manual: check the mutmut changelog, bump the pin in a dedicated PR, let
+its `mutation (all)` run show any score movement, then re-run the triage and
+update the baselines and the equivalent table above in that same PR.
 
 ## Triage workflow for new survivors
 
