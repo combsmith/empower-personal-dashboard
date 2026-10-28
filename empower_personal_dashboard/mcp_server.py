@@ -103,6 +103,12 @@ class _DataCache:
     """
 
     def __init__(self, ttl_seconds: int = 300, max_transaction_entries: int = _TRANSACTION_CACHE_MAX_ENTRIES) -> None:
+        """Initialize the cache with TTL and max transaction entry bounds.
+
+        Args:
+            ttl_seconds: Time-to-live for cached entries in seconds.
+            max_transaction_entries: Maximum number of transaction cache windows to retain.
+        """
         self.ttl = ttl_seconds
         self.max_transaction_entries = max(1, int(max_transaction_entries))
         self.balances: Optional[tuple[float, DashboardBalances]] = None
@@ -134,6 +140,14 @@ class _DataCache:
         self.holdings = (time.time(), data)
 
     def get_transactions(self, key: _TransactionCacheKey) -> Optional[DashboardTransactions]:
+        """Retrieve cached transactions and update recency; delete expired entries.
+
+        Args:
+            key: Canonical (start_date, end_date, limit) tuple.
+
+        Returns:
+            DashboardTransactions if cached and not expired, None otherwise.
+        """
         with self._transactions_lock:
             entry = self.transactions.get(key)
             if entry is None:
@@ -146,6 +160,14 @@ class _DataCache:
             return None
 
     def set_transactions(self, key: _TransactionCacheKey, data: DashboardTransactions) -> None:
+        """Store transactions under canonical key, removing expired and LRU entries.
+
+        Scans and removes all expired entries, then evicts oldest entry if at capacity.
+
+        Args:
+            key: Canonical (start_date, end_date, limit) tuple.
+            data: DashboardTransactions to cache.
+        """
         with self._transactions_lock:
             now = time.time()
             for stale_key in [k for k, (ts, _) in self.transactions.items() if now - ts >= self.ttl]:
@@ -156,6 +178,7 @@ class _DataCache:
                 self.transactions.popitem(last=False)
 
     def clear_transactions(self) -> None:
+        """Remove all cached transaction windows."""
         with self._transactions_lock:
             self.transactions.clear()
 
