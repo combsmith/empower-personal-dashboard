@@ -67,9 +67,11 @@ The `beancount` score covers only the pilot helper subset (`_safe_float`,
 | `sanitizers` | 100.0% | 20 | 0 | 90 |
 | `beancount` (helpers) | 98.1% | 310 | 6 | 91 |
 
-Gates are baseline minus ~5 points. `sanitizers` stays at 90 after its
-re-baseline: with only 20 mutants, each survivor costs 5 points, so a 95 gate
-would fail on the second new survivor without leaving room to triage it. They are enforced on every pull request
+Gate values are module-specific: `models` is 5 points below baseline,
+`beancount` is 7.1 points below baseline, and `sanitizers` stays at 90 after
+its re-baseline (10 points below). With only 20 mutants, each survivor costs
+5 points, so a 95 gate would fail on the second new survivor without leaving
+room to triage it. They are enforced on every pull request
 and push to `main`, and on manual dispatches unless `enforce: false`, via:
 
 ```bash
