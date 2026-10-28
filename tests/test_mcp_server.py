@@ -505,6 +505,26 @@ class TestMCPServer(unittest.TestCase):
             cache.set_transactions(("2025-03-01", "2025-03-31", None), MagicMock())
         self.assertEqual(list(cache.transactions), [("2025-03-01", "2025-03-31", None)])
 
+    def test_transaction_cache_operations_hold_the_lock(self) -> None:
+        """get/set/clear on the transaction cache are serialized by one lock."""
+        cache = _DataCache(ttl_seconds=60)
+        key = ("2025-01-01", "2025-01-31", None)
+        held = []
+
+        class _SpyLock:
+            def __enter__(self_inner):
+                held.append(True)
+
+            def __exit__(self_inner, *exc):
+                return False
+
+        cache._transactions_lock = _SpyLock()
+        cache.set_transactions(key, MagicMock())
+        cache.get_transactions(key)
+        cache.clear_transactions()
+        self.assertEqual(len(held), 3)
+        self.assertEqual(len(cache.transactions), 0)
+
     def test_transaction_cache_key_canonicalises_unlimited_limits(self) -> None:
         """None, zero, and negative limits all mean an untruncated fetch and share one key."""
         unlimited = {_DataCache.transactions_key("2025-01-01", "2025-01-31", lim) for lim in (None, 0, -1, -999)}

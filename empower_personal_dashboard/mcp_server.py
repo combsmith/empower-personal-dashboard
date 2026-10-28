@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import sys
+import threading
 import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
@@ -106,6 +107,7 @@ class _DataCache:
         self.max_transaction_entries = max(1, int(max_transaction_entries))
         self.balances: Optional[tuple[float, DashboardBalances]] = None
         self.holdings: Optional[tuple[float, DashboardHoldings]] = None
+        self._transactions_lock = threading.Lock()
         self.transactions: OrderedDict[_TransactionCacheKey, tuple[float, DashboardTransactions]] = OrderedDict()
 
     @staticmethod
@@ -132,24 +134,30 @@ class _DataCache:
         self.holdings = (time.time(), data)
 
     def get_transactions(self, key: _TransactionCacheKey) -> Optional[DashboardTransactions]:
-        entry = self.transactions.get(key)
-        if entry is None:
+        with self._transactions_lock:
+            entry = self.transactions.get(key)
+            if entry is None:
+                return None
+            ts, data = entry
+            if time.time() - ts < self.ttl:
+                self.transactions.move_to_end(key)
+                return data
+            del self.transactions[key]
             return None
-        ts, data = entry
-        if time.time() - ts < self.ttl:
-            self.transactions.move_to_end(key)
-            return data
-        del self.transactions[key]
-        return None
 
     def set_transactions(self, key: _TransactionCacheKey, data: DashboardTransactions) -> None:
-        now = time.time()
-        for stale_key in [k for k, (ts, _) in self.transactions.items() if now - ts >= self.ttl]:
-            del self.transactions[stale_key]
-        self.transactions[key] = (now, data)
-        self.transactions.move_to_end(key)
-        while len(self.transactions) > self.max_transaction_entries:
-            self.transactions.popitem(last=False)
+        with self._transactions_lock:
+            now = time.time()
+            for stale_key in [k for k, (ts, _) in self.transactions.items() if now - ts >= self.ttl]:
+                del self.transactions[stale_key]
+            self.transactions[key] = (now, data)
+            self.transactions.move_to_end(key)
+            while len(self.transactions) > self.max_transaction_entries:
+                self.transactions.popitem(last=False)
+
+    def clear_transactions(self) -> None:
+        with self._transactions_lock:
+            self.transactions.clear()
 
 
 def create_mcp_server(
@@ -221,7 +229,7 @@ def create_mcp_server(
                     # Invalidate in-memory caches since session re-authenticated
                     cache.balances = None
                     cache.holdings = None
-                    cache.transactions.clear()
+                    cache.clear_transactions()
             except Exception as e:
                 logger.warning(f"Failed to refresh session from {session_file}: {e}")
 
@@ -287,7 +295,7 @@ def create_mcp_server(
             if isinstance(exc, FileNotFoundError) and not _is_missing_session_error(exc):
                 raise
             _ensure_session_fresh()
-            cache.transactions.clear()
+            cache.clear_transactions()
             if isinstance(exc, FileNotFoundError):
                 raise SessionExpiredError(str(exc)) from exc
             raise
