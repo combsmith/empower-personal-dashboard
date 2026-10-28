@@ -246,6 +246,8 @@ class TestPackaging(unittest.TestCase):
         triggers = triggers.get("on", triggers.get(True))
         for event in ("pull_request", "push"):
             self.assertEqual(triggers[event], {"branches": ["main"]}, event)
+        # A required check must also report inside a merge queue.
+        self.assertIn("merge_group", triggers)
 
         # A gate breach must fail the job.
         self.assertNotIn("continue-on-error", text)
@@ -279,7 +281,11 @@ class TestPackaging(unittest.TestCase):
         for line in text.splitlines():
             line = line.strip()
             if line.startswith("uses:"):
-                ref = line.split("@", 1)[1].split()[0]
+                target = line[len("uses:"):].strip()
+                if target.startswith(("./", "docker://")):
+                    continue  # Local and container actions are not ref-pinned.
+                self.assertIn("@", target, f"Action must be SHA-pinned: {line}")
+                ref = target.split("@", 1)[1].split()[0]
                 self.assertRegex(ref, r"^[0-9a-f]{40}$", f"Action must be SHA-pinned: {line}")
 
     def test_publish_workflow_structure(self):

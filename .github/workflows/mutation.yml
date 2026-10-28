@@ -18,6 +18,8 @@ on:
     branches: [main]
   push:
     branches: [main]
+  # Required checks must also report for merge-queue commits.
+  merge_group:
   workflow_dispatch:
     inputs:
       target:
