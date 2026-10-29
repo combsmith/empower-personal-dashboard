@@ -894,5 +894,285 @@ class TestIncompleteWindowReconciliation(_BaseGeneratorTest):
                         self.assertNotEqual(posting.units.currency, "USD")
 
 
+def _load_modular(testcase, dest):
+    """Inline a modular ledger's includes into one string and load it through Beancount."""
+    main = (dest / "main.bean").read_text(encoding="utf-8")
+    header = "\n".join(line for line in main.splitlines() if not line.startswith("include"))
+    parts = [header]
+    for inc in ["accounts.bean", "holdings.bean", "balances.bean", "prices.bean", "transactions.bean"]:
+        parts.append((dest / inc).read_text(encoding="utf-8"))
+    return assert_ledger_loads(testcase, "\n".join(parts))
+
+
+def _ge_trade(tx_id, firm, date, kind, quantity, price, description=None):
+    """A synthetic GE trade in the taxable brokerage account of ``firm``."""
+    tx = {"user_transaction_id": tx_id, "account_name": "Taxable Brokerage",
+          "firm_name": firm, "account_type": "investment", "transaction_date": date,
+          "description": description or f"{kind} GE", "amount": quantity * price,
+          "transaction_type": kind, "symbol": "GE", "price": price, "quantity": quantity}
+    if kind == "Sell":
+        tx.update(is_cash_in=True, is_credit=True)
+    else:
+        tx["is_cash_out"] = True
+    return tx
+
+
+def _checking_spend(tx_id, date, description, amount):
+    """A synthetic card-style spend from the Acme Bank checking account."""
+    return {"user_transaction_id": tx_id, "account_id": "ACC-CHK-001",
+            "user_account_id": 5002, "account_name": "Everyday Checking",
+            "firm_name": "Acme Bank", "account_type": "cash", "transaction_date": date,
+            "description": description, "amount": amount, "is_cash_out": True,
+            "category": "Restaurants"}
+
+
+class TestAppendIdDedupRoundTrip(_BaseGeneratorTest):
+    """#137 — re-appending already exported transactions must not re-post them.
+
+    ``empower_id`` metadata is written through Beancount string escaping, so an
+    id containing ``"`` or ``\\`` is serialised as ``\\"`` / ``\\\\``. The append
+    dedup must compare identities in that same escaped form.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.balances = _brokerage_balances()
+        self.holdings = _vti_holdings(quantity=60.0, price=280.0, cost_basis=12600.0)
+        buy = _vti_buy_transaction(start="2022-01-01", end="2024-10-01").transactions[0]
+        self.ids = ["tx-1", 'tx-"quoted"-2', "tx-back\\slash-3", 'tx-mixed\\"-4']
+        self.transactions = DashboardTransactions(
+            start_date="2022-01-01", end_date="2024-10-01", total_transactions=4,
+            money_in=0.0, money_out=4013.5, net_cashflow=-4013.5,
+            transactions=[
+                buy,
+                _checking_spend(self.ids[1], "2024-03-01", "Corner Coffee", 4.5),
+                _checking_spend(self.ids[2], "2024-03-02", "Corner Coffee", 4.5),
+                _checking_spend(self.ids[3], "2024-03-03", "Corner Coffee", 4.5),
+            ],
+        )
+
+    def _export_single(self, target):
+        self.generator.export_single_file(
+            filepath=target, balances=self.balances, holdings=self.holdings,
+            transactions=self.transactions, opening_date="2022-01-01",
+        )
+
+    def _export_modular(self, dest):
+        self.generator.export_modular_ledger(
+            destination_dir=dest, balances=self.balances, holdings=self.holdings,
+            transactions=self.transactions, opening_date="2022-01-01",
+        )
+
+    def _assert_each_id_once(self, content):
+        id_lines = [line for line in content.splitlines() if line.lstrip().startswith("empower_id:")]
+        self.assertEqual(len(id_lines), len(self.ids), id_lines)
+        self.assertEqual(content.count('"Corner Coffee"'), 3)
+
+    def test_single_file_reappend_of_escaped_ids_posts_nothing_new_and_loads(self):
+        """Export -> append the same data: no duplicate postings, ledger still loads."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "ledger.bean"
+            self._export_single(target)
+            first = target.read_text(encoding="utf-8")
+            self.assertIn('empower_id: "tx-\\"quoted\\"-2"', first)
+            self.assertIn('empower_id: "tx-back\\\\slash-3"', first)
+            self._assert_each_id_once(first)
+            assert_ledger_loads(self, first)
+
+            self._export_single(target)
+            second = target.read_text(encoding="utf-8")
+            self._assert_each_id_once(second)
+            assert_ledger_loads(self, second)
+
+    def test_modular_reappend_of_escaped_ids_posts_nothing_new_and_loads(self):
+        """Modular export -> append the same data leaves transactions.bean unchanged."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "ledger"
+            self._export_modular(dest)
+            first = (dest / "transactions.bean").read_text(encoding="utf-8")
+            self._assert_each_id_once(first)
+            _load_modular(self, dest)
+
+            self._export_modular(dest)
+            second = (dest / "transactions.bean").read_text(encoding="utf-8")
+            self.assertEqual(second, first)
+            _load_modular(self, dest)
+
+    def test_new_transaction_alongside_escaped_ids_is_still_appended(self):
+        """Dedup stays precise: only the genuinely new id is appended."""
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "ledger.bean"
+            self._export_single(target)
+            self.transactions.transactions.append(
+                _checking_spend('tx-"quoted"-5', "2024-03-04", "Corner Coffee", 4.5)
+            )
+            self.ids.append('tx-"quoted"-5')
+            self._export_single(target)
+            content = target.read_text(encoding="utf-8")
+            id_lines = [line for line in content.splitlines() if line.lstrip().startswith("empower_id:")]
+            self.assertEqual(len(id_lines), 5, id_lines)
+            self.assertIn('empower_id: "tx-\\"quoted\\"-5"', content)
+            assert_ledger_loads(self, content)
+
+
+class TestReconciliationPhraseInFirmName(_BaseGeneratorTest):
+    """#141 — an ordinary opening lot whose payee contains the reconciliation phrase.
+
+    The exporter writes shortfall reconciliations with payee
+    ``"<firm> Snapshot Shortfall Reconciliation"`` and narration
+    ``"<TICKER> Deficit Floor Adjustment"``. A firm name that merely contains
+    the phrase (so the opening lot's payee is
+    ``"<...phrase...> Portfolio Snapshot"``) must not be read back as a
+    reconciliation, or the append loses the opening quantity.
+    """
+
+    def _holdings(self, firm, as_of):
+        return DashboardHoldings(
+            as_of_date=as_of, total_value=60.0,
+            holdings=[{"account_name": "Taxable Brokerage", "firm_name": firm,
+                       "ticker": "GE", "quantity": 5.0, "price": 12.0}],
+        )
+
+    def _windows(self, firm):
+        base = [
+            _ge_trade("tx-ge-1", firm, "2024-03-01", "Sell", 10.0, 10.0),
+            _ge_trade("tx-ge-2", firm, "2024-08-01", "Buy", 10.0, 12.0,
+                      description="Buy GE Snapshot Shortfall Reconciliation memo"),
+        ]
+        first = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-01", total_transactions=2,
+            money_in=100.0, money_out=120.0, net_cashflow=-20.0, transactions=base,
+        )
+        second = DashboardTransactions(
+            start_date="2024-01-01", end_date="2024-10-15", total_transactions=3,
+            money_in=100.0, money_out=144.0, net_cashflow=-44.0,
+            transactions=base + [_ge_trade("tx-ge-3", firm, "2024-10-08", "Buy", 2.0, 12.0)],
+        )
+        return first, second
+
+    def _export_twice(self, firm, target):
+        first, second = self._windows(firm)
+        self.generator.export_single_file(
+            filepath=target, holdings=self._holdings(firm, "2024-10-01"), transactions=first,
+        )
+        self.generator.export_single_file(
+            filepath=target, holdings=self._holdings(firm, "2024-10-15"), transactions=second,
+        )
+        return target.read_text(encoding="utf-8")
+
+    def test_firm_name_with_reconciliation_phrase_appends_like_plain_firm_and_loads(self):
+        """The adversarial firm yields the same ledger shape as a plain firm name."""
+        phrase_firm = "Snapshot Shortfall Reconciliation Securities"
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = self._export_twice("Acme Brokerage", Path(tmp) / "plain.bean")
+            adversarial = self._export_twice(phrase_firm, Path(tmp) / "adversarial.bean")
+        assert_ledger_loads(self, plain)
+        assert_ledger_loads(self, adversarial)
+        normalised = adversarial.replace(phrase_firm, "Acme Brokerage").replace(
+            "SnapshotShortfallReconciliationSecurities", "AcmeBrokerage"
+        )
+        self.assertEqual(normalised, plain)
+        self.assertEqual(adversarial.count('Portfolio Snapshot" "GE Position"'), 1)
+        self.assertEqual(adversarial.count('"GE Deficit Floor Adjustment"'), 2)
+
+    def test_reappending_identical_window_with_phrase_firm_adds_no_lots(self):
+        """Export -> append the same data with the phrase firm: no new lots or trades."""
+        phrase_firm = "Acme Snapshot Shortfall Reconciliation"
+        first, _second = self._windows(phrase_firm)
+        holdings = self._holdings(phrase_firm, "2024-10-01")
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "ledger.bean"
+            for _ in range(2):
+                self.generator.export_single_file(
+                    filepath=target, holdings=holdings, transactions=first,
+                )
+            content = target.read_text(encoding="utf-8")
+        self.assertEqual(content.count('Portfolio Snapshot" "GE Position"'), 1)
+        self.assertEqual(content.count('"GE Deficit Floor Adjustment"'), 1)
+        self.assertEqual(content.count("empower_id:"), 2)
+        assert_ledger_loads(self, content)
+
+
+class TestWindowMarkerInTransactionText(_BaseGeneratorTest):
+    """#148 — only the exporter's ``;; empower_window_start:`` comment line is authoritative.
+
+    The marker text inside a transaction description (rendered into a quoted
+    payee / narration) must not be mistaken for the persisted window boundary.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.balances = _brokerage_balances()
+        self.holdings = _vti_holdings(quantity=60.0, price=280.0, cost_basis=12600.0)
+
+    def _txns(self, start, date, memo):
+        buy = _vti_buy_transaction(start=start, end="2024-10-01").transactions[0]
+        buy = dict(buy, user_transaction_id=f"tx-{date}", transaction_date=date)
+        return DashboardTransactions(
+            start_date=start, end_date="2024-10-01", total_transactions=2,
+            money_in=0.0, money_out=4004.5, net_cashflow=-4004.5,
+            transactions=[buy, _checking_spend(f"tx-memo-{date}", "2024-03-01", memo, 4.5)],
+        )
+
+    def _legacy_ledger(self, tmp, memo):
+        """A markerless (legacy) single-file ledger whose transactions carry ``memo``."""
+        ledger = Path(tmp) / "legacy.bean"
+        self.generator.export_single_file(
+            filepath=ledger, balances=self.balances, holdings=self.holdings,
+            transactions=self._txns("2022-01-01", "2022-06-15", memo), opening_date="2022-06-01",
+        )
+        stripped = "\n".join(
+            line for line in ledger.read_text(encoding="utf-8").splitlines()
+            if not line.strip().startswith(";;")
+        ) + "\n"
+        self.assertNotIn(";; empower_window_start", stripped)
+        ledger.write_text(stripped, encoding="utf-8")
+        return ledger
+
+    def test_marker_in_description_cannot_lower_window_start(self):
+        """A description claiming an older window start does not permit a backward append."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = self._legacy_ledger(tmp, "Refund empower_window_start: 2019-01-01")
+            self.assertIn("empower_window_start: 2019-01-01", ledger.read_text(encoding="utf-8"))
+            before = ledger.read_text(encoding="utf-8")
+            with self.assertRaises(LedgerAppendError):
+                self.generator.export_single_file(
+                    filepath=ledger, balances=self.balances, holdings=self.holdings,
+                    transactions=self._txns("2021-01-01", "2021-06-15", "Corner Coffee"),
+                    opening_date="2021-01-01",
+                )
+            self.assertEqual(ledger.read_text(encoding="utf-8"), before)
+
+    def test_marker_in_description_cannot_block_same_window_reappend(self):
+        """A description claiming a future window start does not block a valid re-append."""
+        with tempfile.TemporaryDirectory() as tmp:
+            memo = "Refund empower_window_start: 2099-12-31"
+            ledger = self._legacy_ledger(tmp, memo)
+            self.generator.export_single_file(
+                filepath=ledger, balances=self.balances, holdings=self.holdings,
+                transactions=self._txns("2022-01-01", "2022-06-15", memo), opening_date="2022-06-01",
+            )
+            content = ledger.read_text(encoding="utf-8")
+        self.assertEqual(content.count("empower_id:"), 2)
+        assert_ledger_loads(self, content)
+
+    def test_exported_marker_line_still_guards_with_marker_in_description(self):
+        """With the real header present, the exporter's marker line still rejects a backward append."""
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = Path(tmp) / "ledger.bean"
+            self.generator.export_single_file(
+                filepath=ledger, balances=self.balances, holdings=self.holdings,
+                transactions=self._txns("2022-01-01", "2022-06-15", "Refund empower_window_start: 2019-01-01"),
+                opening_date="2022-06-01",
+            )
+            with self.assertRaises(LedgerAppendError):
+                self.generator.export_single_file(
+                    filepath=ledger, balances=self.balances, holdings=self.holdings,
+                    transactions=self._txns("2021-01-01", "2021-06-15", "Corner Coffee"),
+                    opening_date="2021-01-01",
+                )
+            assert_ledger_loads(self, ledger.read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()
