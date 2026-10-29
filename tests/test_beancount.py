@@ -595,6 +595,54 @@ class TestBeancountGenerator(unittest.TestCase):
         self.assertEqual(mapper3.categories, {})
         self.assertEqual(mapper3.regex_rules, [])
 
+    def test_mapping_rejects_alias_expanded_collections_without_stringifying(self):
+        """Non-scalar values (e.g. YAML alias 'billion laughs' graphs) are dropped, never str()-expanded."""
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("PyYAML not installed; fallback parser has no aliases")
+        lines = ['l0: &l0 ["lol", "lol", "lol", "lol", "lol", "lol", "lol", "lol", "lol"]']
+        for i in range(1, 4):
+            lines.append(f"l{i}: &l{i} [" + ", ".join([f"*l{i - 1}"] * 9) + "]")
+        lines += [
+            "accounts:",
+            '  "Synthetic Checking": "Assets:Synthetic:Checking"',
+            '  "Synthetic Bomb": *l3',
+            "categories:",
+            '  "Groceries": "Expenses:Food:Groceries"',
+            '  "Bomb": {nested: *l3}',
+            "regex_rules:",
+            '  - pattern: "(?i)synthetic grocer"',
+            '    account: "Expenses:Food:Groceries"',
+            "  - pattern: *l3",
+            '    account: "Expenses:Bomb"',
+            "transaction_overrides:",
+            '  "tx-1": "Expenses:Override"',
+            '  "tx-2": *l3',
+            "core_sweep_tickers:",
+            '  - "SWPX1"',
+            "  - *l3",
+        ]
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            map_path = Path(tmp_dir) / "beancount_map.yaml"
+            map_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            with self.assertLogs("empower_personal_dashboard.beancount", level="WARNING") as logs:
+                mapper = BeancountMapper(mapping_path=map_path)
+
+        self.assertEqual(mapper.accounts, {"Synthetic Checking": "Assets:Synthetic:Checking"})
+        self.assertEqual(mapper.categories, {"Groceries": "Expenses:Food:Groceries"})
+        self.assertEqual(mapper.transaction_overrides, {"tx-1": "Expenses:Override"})
+        self.assertEqual(mapper.core_sweep_tickers, {"SWPX1"})
+        self.assertEqual(
+            mapper.regex_rules,
+            [{"pattern": "(?i)synthetic grocer", "account": "Expenses:Food:Groceries"},
+             {"account": "Expenses:Bomb"}],
+        )
+        joined = "\n".join(logs.output)
+        for section in ("accounts", "categories", "regex_rules", "transaction_overrides", "core_sweep_tickers"):
+            self.assertIn(section, joined)
+        self.assertNotIn("lol", joined)
+
     def test_holdings_resolved_from_balances(self):
         # Holdings without firm_name should resolve from balances lookup
         holdings_data = DashboardHoldings(
@@ -2119,6 +2167,48 @@ class TestBeancountInvestmentGrowthReconstruction(unittest.TestCase):
                 )
             content = ledger.read_text(encoding="utf-8")
         self.assertEqual(content.count("Snapshot Shortfall Reconciliation"), 1)
+
+    def test_append_planning_classifies_transactions_linearly(self):
+        """Appending over existing positions classifies each trade a bounded number of times, not once per position."""
+        def dataset(n):
+            holdings = DashboardHoldings(
+                as_of_date="2024-10-01", total_value=60.0 * n,
+                holdings=[{"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                           "ticker": f"SYN{i:03d}", "quantity": 5.0, "price": 12.0} for i in range(n)],
+            )
+            txns = DashboardTransactions(
+                start_date="2024-01-01", end_date="2024-10-01", total_transactions=n,
+                money_in=0.0, money_out=24.0 * n, net_cashflow=-24.0 * n,
+                transactions=[
+                    {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                     "account_type": "investment", "transaction_date": "2024-08-01",
+                     "description": f"Buy SYN{i:03d}", "amount": 24.0, "is_cash_out": True,
+                     "transaction_type": "Buy", "symbol": f"SYN{i:03d}",
+                     "price": 12.0, "quantity": 2.0}
+                    for i in range(n)
+                ],
+            )
+            return holdings, txns
+
+        original = BeancountGenerator._classify_trade
+        call_counts = {}
+        for n in (10, 40):
+            holdings, txns = dataset(n)
+            first = self.generator.generate_holdings_bean(holdings=holdings, transactions=txns)
+            calls = [0]
+
+            def counting(gen, tx, lookup, _calls=calls):
+                _calls[0] += 1
+                return original(gen, tx, lookup)
+
+            with patch.object(BeancountGenerator, "_classify_trade", counting):
+                self.generator.generate_holdings_bean(
+                    holdings=holdings, transactions=txns, existing_content=first,
+                )
+            call_counts[n] = calls[0]
+        # Quadruple the positions and trades: linear work grows ~4x, quadratic ~16x.
+        self.assertLessEqual(call_counts[40], 5 * call_counts[10])
+        self.assertLessEqual(call_counts[40], 4 * 40)
 
     def test_later_snapshot_does_not_reapply_shortfall_reconciliation(self):
         """A later snapshot over the same window must not deduct the surplus twice."""
