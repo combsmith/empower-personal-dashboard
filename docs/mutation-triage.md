@@ -53,7 +53,8 @@ Suspicious, segfault, skipped, and not-checked mutants are reported in the
 
 ## Pilot baselines and gates
 
-Measured on branch `feat/mutation-testing-pilot` after test strengthening.
+Measured on branch `feat/mutation-testing-pilot` after test strengthening;
+`sanitizers` re-baselined for mutmut 3.8.1 (see below).
 The `beancount` score covers only the pilot helper subset (`_safe_float`,
 `_safe_positive_float`, `_is_negative_number`, `_clean_tx_description`,
 `_has_core_sweep_evidence`, `_is_dividend_signal`, `_classify_buy_sell`,
@@ -63,10 +64,14 @@ The `beancount` score covers only the pilot helper subset (`_safe_float`,
 | Module | Baseline | Killed | Survived | Gate |
 |---|---|---|---|---|
 | `models` | 100.0% | 548 | 0 | 95 |
-| `sanitizers` | 95.2% | 20 | 1 | 90 |
+| `sanitizers` | 100.0% | 20 | 0 | 90 |
 | `beancount` (helpers) | 98.1% | 310 | 6 | 91 |
 
-Gates are baseline minus ~5 points. They are enforced on every pull request
+Gate values are module-specific: `models` is 5 points below baseline,
+`beancount` is 7.1 points below baseline, and `sanitizers` stays at 90 after
+its re-baseline (10 points below). With only 20 mutants, each survivor costs
+5 points, so a 95 gate would fail on the second new survivor without leaving
+room to triage it. They are enforced on every pull request
 and push to `main`, and on manual dispatches unless `enforce: false`, via:
 
 ```bash
@@ -87,7 +92,6 @@ Re-check this list whenever a listed function changes.
 
 | Mutant | Verdict | Rationale |
 |---|---|---|
-| `empower_personal_dashboard.sanitizers.x_clean_api_text__mutmut_11` | equivalent | `"\ufffd"` → `"\uFFFD"` is the same code point; escape-spelling only |
 | `empower_personal_dashboard.beancount.x__classify_buy_sell__mutmut_2` | equivalent | Default `desc_clean` `""` → `"XXXX"` matches no buy/sell phrase, like `""` |
 | `empower_personal_dashboard.beancount.x__classify_buy_sell__mutmut_3` | equivalent | Default `cat_clean` `""` → `"XXXX"` contains no `dividend`, like `""` |
 | `empower_personal_dashboard.beancount.x__is_commodity_trade_tx__mutmut_47` | equivalent | Missing category fallback `"XXXX"` contains no `dividend`, like `""` |
@@ -103,6 +107,24 @@ category-only dividend handling. They are killed by
 `test_category_dividend_without_any_type_is_not_investment` and
 `test_category_dividend_without_type_does_not_block_phrase_trade` in
 `tests/test_beancount_helpers.py` (PR #124 review).
+
+mutmut 3.8.1 no longer generates case mutants inside string escape
+sequences (boxed/mutmut#609), so the former `sanitizers` equivalent
+(`"\ufffd"` → `"\uFFFD"`) is gone and the remaining `x_clean_api_text`
+mutants were renumbered. That moved `sanitizers` from 95.2% (20/1) to
+100.0% (20/0) with no code change: drift runs on `main` at `a7490f5`, #126.
+The `beancount` and `models` mutant sets and statuses were unchanged.
+
+## Tooling and mutant IDs
+
+Mutant IDs (`__mutmut_N`) and counts depend on the mutmut version, so
+`mutmut` is pinned exactly in the `mutation` extra in `pyproject.toml`, and
+pytest is capped below its next major (mutmut's harness hooks pytest
+internals). Dependabot's pip config here is security-only
+(`open-pull-requests-limit: 0`), so no version-bump PRs arrive. Upgrades
+are manual: check the mutmut changelog, bump the pin in a dedicated PR, let
+its `mutation (all)` run show any score movement, then re-run the triage and
+update the baselines and the equivalent table above in that same PR.
 
 ## Triage workflow for new survivors
 
