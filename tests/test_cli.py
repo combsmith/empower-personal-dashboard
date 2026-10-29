@@ -204,7 +204,7 @@ class TestCLI(unittest.TestCase):
                 "accounts": [
                     {"account_id": "ACC1", "firm_name": "Test Firm", "account_name": "Checking", "account_type": "bank", "balance": 25000.0, "is_asset": True}
                 ],
-                "mode": "historical"
+                "mode": "live"
             }), encoding="utf-8")
 
             holdings_file.write_text(json.dumps({
@@ -213,7 +213,7 @@ class TestCLI(unittest.TestCase):
                 "holdings": [
                     {"user_account_id": 1, "account_name": "Checking", "ticker": "VTI", "quantity": 100.0, "price": 250.0, "value": 25000.0, "cost_basis": 200.0}
                 ],
-                "mode": "historical"
+                "mode": "live"
             }), encoding="utf-8")
 
             txs_file.write_text(json.dumps({
