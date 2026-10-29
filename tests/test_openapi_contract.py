@@ -435,6 +435,9 @@ class TestOpenApiContract(unittest.TestCase):
             )
             parsed = _parse_transactions_jsonl(jsonl_path)
         self.assertEqual(parsed.total_transactions, len(tx_dicts))
+        # Pin the default itself: "sandbox_mock" would also satisfy the enum but
+        # would mislabel real archived data as mock data.
+        self.assertEqual(parsed.mode, "live")
         self._validate_schema(parsed.to_dict(), "DashboardTransactions")
 
     def test_contract_domain_transaction(self):
