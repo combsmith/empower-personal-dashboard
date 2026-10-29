@@ -2791,6 +2791,163 @@ class TestWindowStartGuardFallback(unittest.TestCase):
         BeancountGenerator._guard_window_not_broadened(markerless, "2022-06-15")
         BeancountGenerator._guard_window_not_broadened(markerless, "2023-01-01")
 
+    _OPENING_LOT = (
+        '2022-06-15 * "Acme Brokerage Portfolio Snapshot" "VTI Position"\n'
+        '  empower_holding: "Assets:AcmeBrokerage:Taxable:VTI"\n'
+        "  Assets:AcmeBrokerage:Taxable  20.000000 VTI @ 200.0000 USD\n"
+        "  Equity:Opening-Balances\n\n"
+    )
+
+    def test_marker_text_in_narration_is_not_authoritative(self):
+        """#148: the marker inside a quoted narration must not select the window boundary."""
+        from empower_personal_dashboard.exceptions import LedgerAppendError
+        for claimed in ("2019-01-01", "2099-12-31"):
+            content = self._OPENING_LOT + (
+                f'2023-03-01 * "Acme Bank" "Refund empower_window_start: {claimed}"\n'
+                '  Assets:AcmeBank:Checking  4.50 USD\n'
+                "  Expenses:Refunds\n\n"
+            )
+            with self.subTest(claimed=claimed):
+                # Falls back to the earliest opening lot (2022-06-15), not the claimed date.
+                with self.assertRaises(LedgerAppendError):
+                    BeancountGenerator._guard_window_not_broadened(content, "2020-01-01")
+                BeancountGenerator._guard_window_not_broadened(content, "2022-06-15")
+
+    def test_marker_text_in_payee_is_not_authoritative(self):
+        """#148: a payee that embeds the marker is also ignored."""
+        from empower_personal_dashboard.exceptions import LedgerAppendError
+        content = (
+            ";; Cash & Liability Balances (as of 2024-10-01)\n\n"
+            '2022-06-15 * "empower_window_start: 2019-01-01 Portfolio Snapshot" "VTI Position"\n'
+            '  empower_holding: "Assets:AcmeBrokerage:Taxable:VTI"\n'
+            "  Assets:AcmeBrokerage:Taxable  20.000000 VTI @ 200.0000 USD\n"
+            "  Equity:Opening-Balances\n\n"
+        )
+        with self.assertRaises(LedgerAppendError):
+            BeancountGenerator._guard_window_not_broadened(content, "2020-01-01")
+
+    def test_exported_marker_comment_line_is_honoured(self):
+        """The exporter's own ``;; empower_window_start: <date>`` header line still governs."""
+        from empower_personal_dashboard.exceptions import LedgerAppendError
+        content = (
+            ";; ==============================================================================\n"
+            ";; Empower Personal Dashboard - Portfolio Holdings & Lots\n"
+            ";; empower_window_start: 2022-06-01\n"
+            ";; ==============================================================================\n\n"
+        ) + self._OPENING_LOT
+        with self.assertRaises(LedgerAppendError):
+            BeancountGenerator._guard_window_not_broadened(content, "2022-05-31")
+        # The marker (2022-06-01), not the later opening lot (2022-06-15), is the boundary.
+        BeancountGenerator._guard_window_not_broadened(content, "2022-06-01")
+
+    def test_fallback_counts_opening_lot_whose_payee_contains_reconciliation_phrase(self):
+        """#141: an opening lot for a firm named like the reconciliation phrase still bounds the window."""
+        from empower_personal_dashboard.exceptions import LedgerAppendError
+        content = self._OPENING_LOT.replace(
+            "Acme Brokerage Portfolio Snapshot",
+            "Snapshot Shortfall Reconciliation Securities Portfolio Snapshot",
+        )
+        with self.assertRaises(LedgerAppendError):
+            BeancountGenerator._guard_window_not_broadened(content, "2020-01-01")
+
+
+class TestExistingHoldingsStateParsing(unittest.TestCase):
+    """#141: reconciliation blocks are identified structurally, not by a substring."""
+
+    _TAG = "Assets:SnapshotShortfallReconciliationSecurities:TaxableBrokerage:GE"
+
+    def _opening_lot(self, payee):
+        return (
+            f'2020-01-01 * "{payee}" "GE Position"\n'
+            f'  empower_holding: "{self._TAG}"\n'
+            "  Assets:SnapshotShortfallReconciliationSecurities:TaxableBrokerage  10.000000 GE {12.000000 USD}\n"
+            "  Equity:Opening-Balances\n\n"
+        )
+
+    _RECONCILIATION = (
+        '2024-10-02 * "Snapshot Shortfall Reconciliation Securities Snapshot Shortfall Reconciliation" '
+        '"GE Deficit Floor Adjustment"\n'
+        f'  empower_holding: "{_TAG}"\n'
+        "  Assets:SnapshotShortfallReconciliationSecurities:TaxableBrokerage -5.000000 GE {} @ 12.0000 USD\n"
+        "  Equity:Opening-Balances\n\n"
+    )
+
+    def test_opening_lot_with_phrase_in_payee_counts_as_opening_quantity(self):
+        content = self._opening_lot("Snapshot Shortfall Reconciliation Securities Portfolio Snapshot")
+        keys, opening, recons, _dates = BeancountGenerator._parse_existing_holdings_state(content)
+        self.assertEqual(keys, {self._TAG})
+        self.assertEqual(opening, {self._TAG: 10.0})
+        self.assertEqual(recons, {})
+
+    def test_genuine_reconciliation_is_still_recognised(self):
+        content = (
+            self._opening_lot("Snapshot Shortfall Reconciliation Securities Portfolio Snapshot")
+            + self._RECONCILIATION
+        )
+        _keys, opening, recons, _dates = BeancountGenerator._parse_existing_holdings_state(content)
+        self.assertEqual(opening, {self._TAG: 10.0})
+        self.assertEqual(recons, {self._TAG: [("2024-10-02", 5.0, 0.0)]})
+
+    def test_phrase_in_narration_of_opening_lot_is_not_a_reconciliation(self):
+        content = self._opening_lot("Acme Brokerage Portfolio Snapshot").replace(
+            '"GE Position"', '"GE Position Snapshot Shortfall Reconciliation"'
+        )
+        _keys, opening, recons, _dates = BeancountGenerator._parse_existing_holdings_state(content)
+        self.assertEqual(opening, {self._TAG: 10.0})
+        self.assertEqual(recons, {})
+
+
+class TestExistingEmpowerIds(unittest.TestCase):
+    """#137: append dedup compares ids in the escaped form the exporter writes."""
+
+    def test_delta_excludes_ids_that_needed_escaping(self):
+        from empower_personal_dashboard.beancount import (
+            _build_delta_transactions,
+            _existing_empower_ids,
+        )
+        ids = ["tx-plain", 'tx-"q"', "tx-back\\slash", 'tx-both\\"', "tx-tab\there"]
+        generator = BeancountGenerator()
+        txns = DashboardTransactions(
+            start_date="2024-03-01", end_date="2024-03-31", total_transactions=len(ids),
+            money_in=0.0, money_out=0.0, net_cashflow=0.0,
+            transactions=[
+                {"user_transaction_id": tid, "account_name": "Everyday Checking",
+                 "firm_name": "Acme Bank", "account_type": "cash",
+                 "transaction_date": "2024-03-01", "description": "Corner Coffee",
+                 "amount": 4.5, "is_cash_out": True}
+                for tid in ids
+            ],
+        )
+        rendered = generator.generate_transactions_bean(txns)
+        existing = _existing_empower_ids(rendered)
+        self.assertEqual(len(existing), len(ids))
+        self.assertIsNone(_build_delta_transactions(txns, existing))
+
+        fresh = 'tx-"new"'
+        txns.transactions.append(dict(txns.transactions[0], user_transaction_id=fresh))
+        delta = _build_delta_transactions(txns, existing)
+        self.assertEqual([t["user_transaction_id"] for t in delta.transactions], [fresh])
+
+    def test_only_metadata_lines_are_read(self):
+        from empower_personal_dashboard.beancount import _existing_empower_ids
+        content = (
+            '2024-03-01 * "Acme Bank" "note empower_id: \\"tx-victim\\""\n'
+            '  empower_id: "tx-\\"real\\""\n'
+            "  Assets:AcmeBank:Checking  -4.50 USD\n"
+            "  Expenses:Restaurants\n"
+        )
+        self.assertEqual(_existing_empower_ids(content), {'tx-\\"real\\"'})
+
+    def test_transactions_without_ids_are_never_deduplicated(self):
+        from empower_personal_dashboard.beancount import _build_delta_transactions
+        txns = DashboardTransactions(
+            start_date="2024-03-01", end_date="2024-03-31", total_transactions=2,
+            money_in=0.0, money_out=0.0, net_cashflow=0.0,
+            transactions=[{"description": "No id"}, {"user_transaction_id": "  ", "description": "Blank"}],
+        )
+        delta = _build_delta_transactions(txns, {""})
+        self.assertEqual(len(delta.transactions), 2)
+
 
 class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
     """Tests for Issue #113: Core money market sweep buy and redemption transactions."""
