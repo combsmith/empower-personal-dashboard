@@ -7,7 +7,9 @@ real mutmut exit-code mapping (1=killed, 0=survived, 5=no tests, 36=timeout,
 None=not checked); no real mutmut run is needed.
 """
 
+import contextlib
 import importlib.util
+import io
 import json
 import sys
 import tempfile
@@ -259,6 +261,47 @@ class TestCheckMutationThresholds(unittest.TestCase):
     def test_resolve_thresholds_keeps_unknown_name_for_no_data_report(self):
         resolved = self.mod.resolve_thresholds({"beancount": 80.0}, ["pkg/models"])
         self.assertEqual(resolved, {"beancount": 80.0})
+
+    def test_parse_thresholds_rejects_repeated_name(self):
+        # A repeated name used to overwrite the first gate silently, so the
+        # duplicate check in resolve_thresholds never saw it.
+        with self.assertRaises(ValueError) as ctx:
+            self.mod._parse_thresholds(["models=95", "models=50"])
+        self.assertIn("duplicate", str(ctx.exception))
+
+    def test_main_errors_on_repeated_threshold_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_meta(tmp, "pkg/models.py.meta", {"pkg.models.x_f__mutmut_1": 1})
+            code = self.mod.main(["--mutants-dir", tmp,
+                                  "--threshold", "models=95", "--threshold", "models=50"])
+        self.assertEqual(code, 2)
+
+    def test_help_says_partial_paths_are_not_accepted(self):
+        parser_help = io.StringIO()
+        with contextlib.redirect_stdout(parser_help), self.assertRaises(SystemExit):
+            self.mod.main(["--help"])
+        self.assertIn("partial paths", parser_help.getvalue())
+
+    def test_load_statuses_keys_mirror_mutmut_source_layout(self):
+        # mutmut writes mutants/<source path>.meta, so the key for
+        # empower_personal_dashboard/models.py is "empower_personal_dashboard/models".
+        # The CI gates use these full keys: a layout change (e.g. a src/ prefix)
+        # must surface as NO DATA (exit 2), never as a silently ungated module.
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_meta(tmp, "src/empower_personal_dashboard/models.py.meta",
+                        {"empower_personal_dashboard.models.x_f__mutmut_1": 1})
+            code = self.mod.main(["--mutants-dir", tmp, "--threshold",
+                                  "empower_personal_dashboard/models=95"])
+        self.assertEqual(code, 2)
+
+    def test_mutation_workflow_gates_use_full_path_keys(self):
+        # Short names resolve by file name, so a new same-named file could move
+        # a gate silently; the required check pins every pilot module by its key.
+        workflow = (Path(__file__).resolve().parent.parent
+                    / ".github" / "workflows" / "mutation.yml").read_text(encoding="utf-8")
+        for key, gate in (("models", 95), ("sanitizers", 90), ("beancount", 91)):
+            self.assertIn(f"--threshold empower_personal_dashboard/{key}={gate}", workflow)
+        self.assertNotRegex(workflow, r"--threshold (models|sanitizers|beancount)=")
 
 
 if __name__ == "__main__":

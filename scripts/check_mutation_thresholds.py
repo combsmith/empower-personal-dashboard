@@ -110,7 +110,10 @@ def _parse_thresholds(raw) -> Dict[str, float]:
         if "=" not in item:
             raise ValueError(f"threshold must be MODULE=SCORE, got: {item!r}")
         name, _, value = item.partition("=")
-        thresholds[name.strip()] = float(value)
+        name = name.strip()
+        if name in thresholds:
+            raise ValueError(f"duplicate threshold for module {name!r}")
+        thresholds[name] = float(value)
     return thresholds
 
 
@@ -150,9 +153,10 @@ def main(argv=None) -> int:
                         help="mutmut output directory (default: mutants)")
     parser.add_argument("--threshold", action="append", default=[],
                         metavar="MODULE=SCORE",
-                        help="per-module minimum score; MODULE is a path key "
-                             "(pkg/models) or an unambiguous short name "
-                             "(models); repeatable")
+                        help="per-module minimum score; MODULE is a full path "
+                             "key (pkg/models) or an unambiguous short name "
+                             "(models); partial paths (a/models) are not "
+                             "accepted; repeatable, one gate per module")
     parser.add_argument("--report-only", action="store_true",
                         help="print scores but never fail on a breach")
     args = parser.parse_args(argv)
