@@ -902,6 +902,7 @@ class _RecordingApp:
         self.calls = []
 
     async def __call__(self, scope, receive, send):
+        """Record the scope type and send 200 OK for HTTP requests."""
         self.calls.append(scope["type"])
         if scope["type"] == "http":
             await send({"type": "http.response.start", "status": 200, "headers": []})
