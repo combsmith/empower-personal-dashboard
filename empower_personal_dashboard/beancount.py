@@ -1051,15 +1051,75 @@ def _strip_bean_header(text: str) -> str:
     return text[body_start + 2:] if body_start != -1 else text
 
 
+# Body of a Beancount double-quoted string on one line, honouring ``\\`` and
+# ``\"`` escapes so an escaped quote never ends the match early.
+_BEAN_STRING_BODY = r'(?:[^"\\\n]|\\.)'
+
+# ``empower_id`` metadata as ``_emit_tx_header`` writes it: an indented
+# metadata line under a transaction. The captured value is still escaped.
+_EMPOWER_ID_META_RE = re.compile(
+    r'^[ \t]+empower_id:[ \t]*"(' + _BEAN_STRING_BODY + r'+)"', re.MULTILINE
+)
+
+# The persisted window boundary exactly as ``generate_holdings_bean`` writes it:
+# a whole comment line ``;; empower_window_start: <date>``. Payees and
+# narrations are single-line quoted strings, so text inside a transaction can
+# never form this line.
+_WINDOW_START_LINE_RE = re.compile(
+    r"^[ \t]*;+[ \t]*" + re.escape(_WINDOW_START_MARKER) + r":[ \t]*(\S+)[ \t\r]*$",
+    re.MULTILINE,
+)
+
+# Header of a transaction directive: date, ``*`` flag, quoted payee and narration.
+_TXN_HEADER_RE = re.compile(
+    r'^[ \t]*(\d{4}-\d{2}-\d{2})[ \t]+\*[ \t]+"(' + _BEAN_STRING_BODY + r'*)"'
+    r'[ \t]+"(' + _BEAN_STRING_BODY + r'*)"',
+    re.MULTILINE,
+)
+
+# ``_append_shortfall_reconciliation`` writes payee ``"<firm> Snapshot Shortfall
+# Reconciliation"`` and narration ``"<TICKER> Deficit Floor Adjustment"``.
+_RECONCILIATION_PAYEE_SUFFIX = "Snapshot Shortfall Reconciliation"
+_RECONCILIATION_NARRATION_SUFFIX = " Deficit Floor Adjustment"
+
+
+def _existing_empower_ids(text: str) -> Set[str]:
+    """Return the ``empower_id`` metadata values in ``text``, in their escaped on-disk form."""
+    return set(_EMPOWER_ID_META_RE.findall(text))
+
+
+def _is_shortfall_reconciliation_block(block: str) -> bool:
+    """Whether ``block``'s transaction header is one the exporter wrote as a shortfall reconciliation.
+
+    Only the header's payee suffix and narration suffix identify it, so an
+    institution name or narration that merely contains the phrase (for example
+    an opening lot ``"<phrase> Securities Portfolio Snapshot"``) does not.
+    """
+    header = _TXN_HEADER_RE.search(block)
+    if not header:
+        return False
+    payee, narration = header.group(2), header.group(3)
+    return payee.endswith(_RECONCILIATION_PAYEE_SUFFIX) and narration.endswith(
+        _RECONCILIATION_NARRATION_SUFFIX
+    )
+
+
 def _build_delta_transactions(
     transactions: DashboardTransactions,
     existing_ids: Set[str],
 ) -> Optional[DashboardTransactions]:
-    """Build a container of transactions whose ids are not already present, or None if none are new."""
-    new_txs = [
-        t for t in transactions.transactions
-        if str(t.get("user_transaction_id") or "") not in existing_ids
-    ]
+    """Build a container of transactions whose ids are not already present, or None if none are new.
+
+    ``existing_ids`` holds ids as read back from the ledger, i.e. in the escaped
+    form ``_emit_tx_header`` writes (see :func:`_existing_empower_ids`), so each
+    incoming id is escaped the same way before comparing. A transaction whose
+    id escapes to an empty string is never treated as a duplicate.
+    """
+    new_txs = []
+    for t in transactions.transactions:
+        escaped_id = _escape_beancount_string(str(t.get("user_transaction_id") or ""))
+        if not escaped_id or escaped_id not in existing_ids:
+            new_txs.append(t)
     if not new_txs:
         return None
     return DashboardTransactions(
@@ -1537,7 +1597,9 @@ class BeancountGenerator:
         a ``;; empower_window_start: <date>`` marker. When appending, a new opening
         lot dated before that boundary would broaden the window into the past, but
         the already-exported opening lot is never revised — so the historical
-        inventory would be inconsistent. Such an append is rejected.
+        inventory would be inconsistent. Such an append is rejected. Only that
+        whole comment line counts: the same text inside a payee or narration is
+        ignored, so transaction descriptions cannot move the boundary.
 
         The marker lives in the header, which ``_strip_bean_header`` removes from
         every appended body, so a ``holdings.bean`` first written by an older
@@ -1548,8 +1610,7 @@ class BeancountGenerator:
         """
         if not existing_content:
             return
-        pattern = re.escape(_WINDOW_START_MARKER) + r":\s*(\S+)"
-        m = re.search(pattern, existing_content)
+        m = _WINDOW_START_LINE_RE.search(existing_content)
         if m:
             prior_start = m.group(1).strip()
         else:
@@ -1565,7 +1626,7 @@ class BeancountGenerator:
                 if (
                     ACCT_OPENING_BALANCES in block
                     and "empower_holding:" in block
-                    and "Snapshot Shortfall Reconciliation" not in block
+                    and not _is_shortfall_reconciliation_block(block)
                 )
                 for block_match in [re.search(r"^\s*(\d{4}-\d{2}-\d{2})\s+\*", block, re.MULTILINE)]
                 if block_match
@@ -1637,7 +1698,7 @@ class BeancountGenerator:
             if not date_match:
                 continue
             posting_date = date_match.group(1)
-            if "Snapshot Shortfall Reconciliation" in block:
+            if _is_shortfall_reconciliation_block(block):
                 long_disposed, short_adj = BeancountGenerator._parse_reconciliation_postings(block)
                 if round(long_disposed, 6) > 0 or round(abs(short_adj), 6) > 0:
                     existing_reconciliations.setdefault(tag, []).append(
@@ -3051,9 +3112,7 @@ class BeancountGenerator:
         _verify_not_symlink(tx_path)
         if transactions and transactions.transactions:
             if tx_path.exists() and append:
-                existing_ids = set(
-                    re.findall(r'empower_id:\s*"([^"]+)"', tx_path.read_text(encoding="utf-8"))
-                )
+                existing_ids = _existing_empower_ids(tx_path.read_text(encoding="utf-8"))
                 delta_container = _build_delta_transactions(transactions, existing_ids)
                 if delta_container:
                     delta_text = self.generate_transactions_bean(delta_container, balances=balances)
@@ -3106,7 +3165,7 @@ class BeancountGenerator:
     ) -> None:
         """Append new assertions, lots, prices, and non-duplicate transactions to an existing ledger."""
         existing_content = target.read_text(encoding="utf-8")
-        existing_ids = set(re.findall(r'empower_id:\s*"([^"]+)"', existing_content))
+        existing_ids = _existing_empower_ids(existing_content)
 
         # Validate that the append won't broaden the transaction window into the
         # past before writing any patches to the file. The guard must run with
