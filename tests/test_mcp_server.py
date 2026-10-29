@@ -479,6 +479,89 @@ class TestMCPServer(unittest.TestCase):
 
         asyncio.run(run_check())
 
+    def test_transaction_cache_evicts_least_recently_used_beyond_capacity(self) -> None:
+        """The transaction cache holds at most max_transaction_entries windows (LRU eviction)."""
+        cache = _DataCache(ttl_seconds=60, max_transaction_entries=2)
+        snapshots = [MagicMock(name=f"tx{i}") for i in range(3)]
+        cache.set_transactions(("2025-01-01", "2025-01-31", None), snapshots[0])
+        cache.set_transactions(("2025-02-01", "2025-02-28", None), snapshots[1])
+        # Touch the oldest entry so the February window becomes least recently used.
+        self.assertIs(cache.get_transactions(("2025-01-01", "2025-01-31", None)), snapshots[0])
+        cache.set_transactions(("2025-03-01", "2025-03-31", None), snapshots[2])
+        self.assertEqual(len(cache.transactions), 2)
+        self.assertIsNone(cache.get_transactions(("2025-02-01", "2025-02-28", None)))
+        self.assertIs(cache.get_transactions(("2025-01-01", "2025-01-31", None)), snapshots[0])
+        self.assertIs(cache.get_transactions(("2025-03-01", "2025-03-31", None)), snapshots[2])
+
+    def test_transaction_cache_drops_expired_entries(self) -> None:
+        """Expired transaction windows are removed, not retained until process exit."""
+        cache = _DataCache(ttl_seconds=60)
+        with patch("empower_personal_dashboard.mcp_server.time.time", return_value=1000.0):
+            cache.set_transactions(("2025-01-01", "2025-01-31", None), MagicMock())
+            cache.set_transactions(("2025-02-01", "2025-02-28", None), MagicMock())
+        with patch("empower_personal_dashboard.mcp_server.time.time", return_value=1100.0):
+            self.assertIsNone(cache.get_transactions(("2025-01-01", "2025-01-31", None)))
+            self.assertNotIn(("2025-01-01", "2025-01-31", None), cache.transactions)
+            cache.set_transactions(("2025-03-01", "2025-03-31", None), MagicMock())
+        self.assertEqual(list(cache.transactions), [("2025-03-01", "2025-03-31", None)])
+
+    def test_transaction_cache_operations_hold_the_lock(self) -> None:
+        """get/set/clear on the transaction cache are serialized by one lock."""
+        cache = _DataCache(ttl_seconds=60)
+        key = ("2025-01-01", "2025-01-31", None)
+        held = []
+
+        class _SpyLock:
+            def __enter__(self_inner):
+                held.append(True)
+
+            def __exit__(self_inner, *exc):
+                return False
+
+        cache._transactions_lock = _SpyLock()
+        cache.set_transactions(key, MagicMock())
+        cache.get_transactions(key)
+        cache.clear_transactions()
+        self.assertEqual(len(held), 3)
+        self.assertEqual(len(cache.transactions), 0)
+
+    def test_transaction_cache_key_canonicalises_unlimited_limits(self) -> None:
+        """None, zero, and negative limits all mean an untruncated fetch and share one key."""
+        unlimited = {_DataCache.transactions_key("2025-01-01", "2025-01-31", lim) for lim in (None, 0, -1, -999)}
+        self.assertEqual(unlimited, {("2025-01-01", "2025-01-31", None)})
+        self.assertNotEqual(
+            _DataCache.transactions_key("2025-01-01", "2025-01-31", 50),
+            _DataCache.transactions_key("2025-01-01", "2025-01-31", None),
+        )
+
+    @requires_fastmcp
+    def test_export_unlimited_limits_reuse_one_cached_snapshot(self) -> None:
+        """export_data limits that all request an untruncated fetch hit the upstream once."""
+        async def run_check() -> None:
+            mock_client = MagicMock()
+            mock_client.mock_mode = True
+            mock_client.fetch_transactions.return_value = self.client.fetch_transactions(
+                start_date="2025-01-01", end_date="2025-01-31",
+            )
+            cached_server = create_mcp_server(client=mock_client, cache_ttl_seconds=60)
+            with tempfile.TemporaryDirectory() as tmpdir:
+                with patch.dict(os.environ, {"EMPOWER_EXPORT_ROOT": tmpdir}):
+                    for lim in (None, 0, -1, -2, -999):
+                        args = {
+                            "destination_dir": tmpdir,
+                            "scope": "transactions",
+                            "export_csv": False,
+                            "start_date": "2025-01-01",
+                            "end_date": "2025-01-31",
+                        }
+                        if lim is not None:
+                            args["limit"] = lim
+                        res = await cached_server.call_tool("export_data", args)
+                        self.assertEqual(json.loads(res.content[0].text)["status"], "success")
+            self.assertEqual(mock_client.fetch_transactions.call_count, 1)
+
+        asyncio.run(run_check())
+
     @requires_fastmcp
     def test_tool_get_export_options(self) -> None:
         async def run_check() -> None:
