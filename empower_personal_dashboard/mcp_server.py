@@ -1300,12 +1300,14 @@ class BearerTokenAuthMiddleware:
     """
 
     def __init__(self, app: Any, token: str) -> None:
+        """Initialize the middleware with an ASGI app and a bearer token to enforce."""
         if not token:
             raise ValueError("BearerTokenAuthMiddleware requires a non-empty token")
         self.app = app
         self._expected = token.encode("utf-8")
 
     def _is_authorized(self, headers: Any) -> bool:
+        """Check if the request headers contain a valid bearer token (constant-time comparison)."""
         values = [value for key, value in headers if key.lower() == b"authorization"]
         if len(values) != 1:
             return False
@@ -1315,6 +1317,7 @@ class BearerTokenAuthMiddleware:
         return hmac.compare_digest(credentials.strip(), self._expected)
 
     async def __call__(self, scope: Dict[str, Any], receive: Callable[..., Any], send: Callable[..., Any]) -> None:
+        """Enforce bearer token on HTTP and WebSocket, pass through lifespan and authorized requests."""
         scope_type = scope.get("type")
         if scope_type not in ("http", "websocket") or self._is_authorized(scope.get("headers") or []):
             await self.app(scope, receive, send)
@@ -1362,7 +1365,7 @@ def build_sse_app(server: Any, *, host: str = "127.0.0.1", auth_token: Optional[
         app = sse_app(host=host)
     else:
         settings = getattr(server, "settings", None)
-        if not _is_loopback_host(host) and getattr(settings, "transport_security", None) is not None:
+        if (auth_token or not _is_loopback_host(host)) and getattr(settings, "transport_security", None) is not None:
             settings.transport_security = None
         app = sse_app()
     return BearerTokenAuthMiddleware(app, auth_token) if auth_token else app
@@ -1489,6 +1492,12 @@ Examples:
     elif args.transport == "sse":
         if http_auth_token:
             logger.info(f"SSE transport: bearer token authentication enabled ({MCP_AUTH_TOKEN_ENV}).")
+            if not _is_loopback_host(args.host):
+                logger.warning(
+                    "SSE transport on %s serves plain HTTP: the bearer token is sent unencrypted. "
+                    "Terminate TLS at a reverse proxy or tunnel.",
+                    args.host,
+                )
         else:
             logger.warning(
                 f"SSE transport on loopback {args.host}:{args.port} without client authentication; "

@@ -851,9 +851,9 @@ _TEST_TOKEN = "synthetic-test-token-" + "a" * 32
 _WRONG_TOKEN = "synthetic-test-token-" + "b" * 32
 
 
-async def _drive_asgi(app, *, scope_type="http", method="GET", path="/sse", headers=None):
+async def _drive_asgi(app, *, scope_type="http", method="GET", path="/sse", headers=None, host_header=b"127.0.0.1:8000"):
     """Drive an ASGI app in-process (no sockets) and return the messages it sent."""
-    raw_headers = [(b"host", b"127.0.0.1:8000")]
+    raw_headers = [(b"host", host_header)]
     for key, value in (headers or {}).items():
         raw_headers.append((key.lower().encode("latin-1"), value.encode("latin-1")))
     scope = {
@@ -1082,7 +1082,20 @@ class TestMCPHttpTransportAuth(unittest.TestCase):
                 headers={"Authorization": f"Bearer {_TEST_TOKEN}", "Content-Type": "application/json"},
             )
         )
-        self.assertNotIn(_response_status(authed), (None, 401))
+        self.assertEqual(_response_status(authed), 400)
+
+        # Non-loopback with token: Host/Origin checks disabled, allowing non-local host headers
+        app_nonloop = build_sse_app(server, host="0.0.0.0", auth_token=_TEST_TOKEN)
+        authed_nonloop = asyncio.run(
+            _drive_asgi(
+                app_nonloop,
+                method="POST",
+                path="/messages/",
+                headers={"Authorization": f"Bearer {_TEST_TOKEN}", "Content-Type": "application/json"},
+                host_header=b"example.com:8000",
+            )
+        )
+        self.assertEqual(_response_status(authed_nonloop), 400)
 
     def _run_main(self, argv, env=None, build_error=None):
         """Run mcp_server.main() with the server, app builder, and socket runner stubbed."""
