@@ -439,6 +439,37 @@ def _consume_section_line(
     return current_rule
 
 
+# Scalar types a parsed mapping entry may hold. Collections are rejected before ``str()``
+# because YAML aliases can share one sub-collection many times, so a tiny file can describe
+# a graph whose string form grows exponentially with nesting depth ("billion laughs").
+_MAPPING_SCALAR_TYPES = (str, int, float, bool, type(None), datetime.date)
+
+
+def _is_mapping_scalar(value: Any) -> bool:
+    """Return True when a parsed mapping key or value is a scalar safe to stringify."""
+    return isinstance(value, _MAPPING_SCALAR_TYPES)
+
+
+def _warn_non_scalar_mapping_entry(section: str, value: Any) -> None:
+    """Log that a mapping entry was ignored because it is not a scalar (never logs the value)."""
+    logger.warning(
+        "Ignoring Beancount mapping entry in '%s': expected a scalar value, got %s.",
+        section,
+        type(value).__name__,
+    )
+
+
+def _scalar_mapping_items(raw: Dict[Any, Any], section: str) -> Dict[str, str]:
+    """Stringify a mapping section, skipping entries whose key or value is not a scalar."""
+    items: Dict[str, str] = {}
+    for k, v in raw.items():
+        if not (_is_mapping_scalar(k) and _is_mapping_scalar(v)):
+            _warn_non_scalar_mapping_entry(section, v if _is_mapping_scalar(k) else k)
+            continue
+        items[str(k)] = str(v)
+    return items
+
+
 def _parse_simple_yaml(content: str) -> Dict[str, Any]:
     """Lightweight fallback parser for basic YAML mapping files when PyYAML is not installed."""
     result: Dict[str, Any] = {
@@ -825,20 +856,20 @@ class BeancountMapper:
 
         raw_accounts = parsed.get("accounts")
         if isinstance(raw_accounts, dict):
-            self.accounts = {str(k): str(v) for k, v in raw_accounts.items()}
+            self.accounts = _scalar_mapping_items(raw_accounts, "accounts")
         else:
             self.accounts = {}
 
         raw_categories = parsed.get("categories")
         if isinstance(raw_categories, dict):
-            self.categories = {str(k): str(v) for k, v in raw_categories.items()}
+            self.categories = _scalar_mapping_items(raw_categories, "categories")
         else:
             self.categories = {}
 
         raw_rules = parsed.get("regex_rules")
         if isinstance(raw_rules, list):
             self.regex_rules = [
-                {str(k): str(v) for k, v in r.items()}
+                _scalar_mapping_items(r, "regex_rules")
                 for r in raw_rules
                 if isinstance(r, dict)
             ]
@@ -847,14 +878,18 @@ class BeancountMapper:
 
         raw_tx_overrides = parsed.get("transaction_overrides")
         if isinstance(raw_tx_overrides, dict):
-            self.transaction_overrides = {str(k): str(v) for k, v in raw_tx_overrides.items()}
+            self.transaction_overrides = _scalar_mapping_items(raw_tx_overrides, "transaction_overrides")
         else:
             self.transaction_overrides = {}
 
         raw_sweep_tickers = parsed.get("core_sweep_tickers")
         if isinstance(raw_sweep_tickers, list):
+            for t in raw_sweep_tickers:
+                if not _is_mapping_scalar(t):
+                    _warn_non_scalar_mapping_entry("core_sweep_tickers", t)
             self.core_sweep_tickers = {
-                _clean_ticker(str(t)) for t in raw_sweep_tickers if _clean_ticker(str(t))
+                _clean_ticker(str(t)) for t in raw_sweep_tickers
+                if _is_mapping_scalar(t) and _clean_ticker(str(t))
             }
         else:
             self.core_sweep_tickers = set()
@@ -1530,6 +1565,7 @@ class BeancountGenerator:
         net_buys, net_buy_meta = self._compute_net_buys(transactions, acct_lookup)
         aggregated = self._aggregate_snapshot_holdings(holdings, acct_lookup)
         lot_date = self._resolve_lot_date(holdings, None, transactions, None)
+        trade_events = self._index_trade_events(transactions, acct_lookup)
         for key, pos in aggregated.items():
             plan = self._plan_holding_action(
                 pos,
@@ -1540,6 +1576,7 @@ class BeancountGenerator:
                 lot_date,
                 holdings.as_of_date,
                 acct_lookup,
+                trade_events=trade_events,
             )
             if plan and plan["has_reconciliation_on_d_plus_1"]:
                 reconciled.add(key)
@@ -2042,22 +2079,39 @@ class BeancountGenerator:
             return max(snapshot_qty - net_buys.get(key, 0.0), max_deficit, 0.0)
         return max(max_deficit, 0.0)
 
+    def _index_trade_events(
+        self,
+        transactions: Optional[DashboardTransactions],
+        acct_lookup: Dict[str, Dict[str, Any]],
+    ) -> Dict[Tuple[str, str], List[Tuple[str, int, float]]]:
+        """Classify every trade once and group its signed quantity event by (account, ticker).
+
+        Per-position append planning reads from this index so a ledger with P positions
+        and T trades costs O(P + T) classifications instead of O(P * T).
+        """
+        index: Dict[Tuple[str, str], List[Tuple[str, int, float]]] = {}
+        if transactions and transactions.transactions:
+            for tx in transactions.transactions:
+                classified = self._classify_trade(tx, acct_lookup)
+                if classified is not None:
+                    tx_key, tx_qty, is_tx_buy, _is_sell, _firm, _price = classified
+                    tx_date = str(tx.get("transaction_date") or tx.get("date") or "")
+                    index.setdefault(tx_key, []).append((tx_date, 0, tx_qty if is_tx_buy else -tx_qty))
+        return index
+
     def _collect_holding_events(
         self,
         key: Tuple[str, str],
         recons: List[Tuple[str, float, float]],
         transactions: Optional[DashboardTransactions],
         acct_lookup: Dict[str, Dict[str, Any]],
+        *,
+        trade_events: Optional[Dict[Tuple[str, str], List[Tuple[str, int, float]]]] = None,
     ) -> List[Tuple[str, int, float]]:
         """Collect chronological trade and long-reconciliation delta events for a holding."""
-        events: List[Tuple[str, int, float]] = []
-        if transactions and transactions.transactions:
-            for tx in transactions.transactions:
-                classified = self._classify_trade(tx, acct_lookup)
-                if classified is not None and classified[0] == key:
-                    _, tx_qty, is_tx_buy, _is_sell, _firm, _price = classified
-                    tx_date = str(tx.get("transaction_date") or tx.get("date") or "")
-                    events.append((tx_date, 0, tx_qty if is_tx_buy else -tx_qty))
+        if trade_events is None:
+            trade_events = self._index_trade_events(transactions, acct_lookup)
+        events: List[Tuple[str, int, float]] = list(trade_events.get(key, ()))
         for r_date, r_long, _r_short in recons:
             if round(r_long, 6) > 0:
                 events.append((r_date, 1, -r_long))
@@ -2075,6 +2129,8 @@ class BeancountGenerator:
         net_buys: Dict[Tuple[str, str], float],
         transactions: Optional[DashboardTransactions],
         acct_lookup: Dict[str, Dict[str, Any]],
+        *,
+        trade_events: Optional[Dict[Tuple[str, str], List[Tuple[str, int, float]]]] = None,
     ) -> Tuple[float, str]:
         """Compute any post-cutoff opening-lot top-up needed for an existing holding.
 
@@ -2082,7 +2138,9 @@ class BeancountGenerator:
         an inventory deficit before the already-exported snapshot cutoff, since
         backdating a lot before an existing balance assertion would invalidate it.
         """
-        events = self._collect_holding_events(key, recons, transactions, acct_lookup)
+        events = self._collect_holding_events(
+            key, recons, transactions, acct_lookup, trade_events=trade_events,
+        )
         last_recon_plus_one = _offset_date(max(r[0] for r in recons), days=1) if recons else ""
         cutoff_date = max(latest_balance_date, last_recon_plus_one)
 
@@ -2127,6 +2185,8 @@ class BeancountGenerator:
         lot_date: str,
         snapshot_date: Optional[str],
         acct_lookup: Dict[str, Dict[str, Any]],
+        *,
+        trade_events: Optional[Dict[Tuple[str, str], List[Tuple[str, int, float]]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """Plan opening lot, top-up lot, and shortfall reconciliation for a single holding."""
         has_tx = transactions is not None and bool(transactions.transactions)
@@ -2165,7 +2225,7 @@ class BeancountGenerator:
                 topup_qty, topup_date = self._compute_existing_holding_topup(
                     key, snapshot_qty, curr_opening_qty, recons,
                     latest_balance_dates.get(holding_tag, ""), lot_date,
-                    net_buys, transactions, acct_lookup,
+                    net_buys, transactions, acct_lookup, trade_events=trade_events,
                 )
                 curr_opening_qty += max(topup_qty, 0.0)
             total_opening_qty = curr_opening_qty
@@ -2254,6 +2314,7 @@ class BeancountGenerator:
             latest_balance_dates or {},
         )
         lookup = acct_lookup or {}
+        trade_events = self._index_trade_events(transactions, lookup)
 
         for pos in sorted(
             aggregated_holdings.values(),
@@ -2268,6 +2329,7 @@ class BeancountGenerator:
                 lot_date,
                 snapshot_date,
                 lookup,
+                trade_events=trade_events,
             )
             if plan is None:
                 continue
