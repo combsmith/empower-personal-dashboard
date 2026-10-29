@@ -1351,6 +1351,11 @@ def build_sse_app(server: Any, *, host: str = "127.0.0.1", auth_token: Optional[
     Host/Origin (DNS-rebinding) checks for loopback hosts; for other hosts that check
     only allows localhost names, so it is turned off there, matching mcp 2.x behaviour.
     """
+    if not auth_token and not _is_loopback_host(host):
+        raise MCPTransportSecurityError(
+            f"Refusing to build an unauthenticated SSE app for non-loopback host '{host}'. "
+            f"Provide a bearer token (see {MCP_AUTH_TOKEN_ENV})."
+        )
     sse_app = getattr(server, "sse_app", None)
     if not callable(sse_app):
         raise MCPTransportSecurityError(
@@ -1371,7 +1376,7 @@ def build_sse_app(server: Any, *, host: str = "127.0.0.1", auth_token: Optional[
     return BearerTokenAuthMiddleware(app, auth_token) if auth_token else app
 
 
-def _serve_http_app(app: Any, *, host: str, port: int, log_level: str = "info") -> None:  # pragma: no cover
+def _serve_http_app(app: Any, *, host: str, port: int, log_level: str = "info") -> None:
     """Serve an ASGI app with uvicorn (a dependency of the mcp SDK). Binds a real socket."""
     import uvicorn
 
@@ -1503,12 +1508,16 @@ Examples:
                 f"SSE transport on loopback {args.host}:{args.port} without client authentication; "
                 f"any local process can use this Empower session. Set {MCP_AUTH_TOKEN_ENV} to require a token."
             )
+        # uvicorn resolves the host via getaddrinfo, which rejects bracketed IPv6 like "[::1]".
+        bind_host = args.host.strip()
+        if bind_host.startswith("[") and bind_host.endswith("]"):
+            bind_host = bind_host[1:-1]
         try:
-            app = build_sse_app(server, host=args.host, auth_token=http_auth_token)
+            app = build_sse_app(server, host=bind_host, auth_token=http_auth_token)
         except MCPTransportSecurityError as exc:
             sys.stderr.write(f"Error: {exc}\n")
             sys.exit(2)
-        _serve_http_app(app, host=args.host, port=args.port, log_level="debug" if args.debug else "info")
+        _serve_http_app(app, host=bind_host, port=args.port, log_level="debug" if args.debug else "info")
 
 
 if __name__ == "__main__":

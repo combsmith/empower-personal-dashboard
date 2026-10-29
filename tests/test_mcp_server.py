@@ -1060,6 +1060,38 @@ class TestMCPHttpTransportAuth(unittest.TestCase):
         with self.assertRaises(MCPTransportSecurityError):
             build_sse_app(object(), host="127.0.0.1")
 
+    def test_build_sse_app_refuses_non_loopback_without_token(self) -> None:
+        from empower_personal_dashboard.mcp_server import (
+            MCPTransportSecurityError,
+            build_sse_app,
+        )
+
+        class _Server:
+            def sse_app(self, *, host="127.0.0.1"):
+                raise AssertionError("SDK app must not be built when refusing")
+
+        for host in ("0.0.0.0", "::", "192.168.0.10"):
+            with self.assertRaises(MCPTransportSecurityError):
+                build_sse_app(_Server(), host=host)
+
+    def test_serve_http_app_delegates_to_uvicorn(self) -> None:
+        from empower_personal_dashboard.mcp_server import _serve_http_app
+
+        fake_uvicorn = MagicMock()
+        app = object()
+        with patch.dict("sys.modules", {"uvicorn": fake_uvicorn}):
+            _serve_http_app(app, host="127.0.0.1", port=8123, log_level="info")
+        fake_uvicorn.run.assert_called_once_with(app, host="127.0.0.1", port=8123, log_level="info")
+
+    def test_main_strips_brackets_from_ipv6_bind_host(self) -> None:
+        result = self._run_main(["--transport", "sse", "--host", "[::1]"])
+        self.assertIsNone(result.exit_code)
+        result.build.assert_called_once_with(result.server, host="::1", auth_token=None)
+        self.assertEqual(result.serve.call_args[1]["host"], "::1")
+
+    # Dependency-gated skip is an explicit exception to the unconditional-test rule:
+    # the real-SDK check needs the optional 'mcp' extra (unavailable on Python 3.9);
+    # CI installs it on 3.10+, and the stubbed-SDK tests above cover the same logic everywhere.
     @unittest.skipIf(FastMCP is None, "requires the optional 'mcp' package")
     def test_real_sdk_sse_app_is_gated_by_bearer_token(self) -> None:
         from empower_personal_dashboard.mcp_server import build_sse_app
