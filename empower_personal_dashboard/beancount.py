@@ -241,6 +241,103 @@ def _escape_beancount_string(val: Any) -> str:
     return text
 
 
+# ---------------------------------------------------------------------------
+# Syntax-token validators (directive-injection guards, issues #139/#142/#143/#147).
+#
+# Dates, account names, and currencies are emitted *unquoted* as Beancount
+# tokens, so a value carrying a line break or stray text could smuggle extra
+# directives into the ledger (CWE-74). Each validator returns the value
+# unchanged when it already matches Beancount's grammar and otherwise raises
+# ``ValueError`` (Fail Loud) — it never rewrites a value into something that
+# merely looks valid. Messages use a truncated ``repr`` so no raw line break is
+# ever echoed (MCP resources render errors as ``;; ERROR`` comment lines).
+# ---------------------------------------------------------------------------
+
+# Canonical ISO date with ASCII digits only (``\d`` would admit non-ASCII digits).
+_ISO_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+# Commodity grammar accepted by both Beancount 2.x and 3.x: an uppercase letter,
+# up to 22 of ``[A-Z0-9'._-]``, and a final uppercase letter or digit.
+_BEANCOUNT_CURRENCY_RE = re.compile(r"[A-Z][A-Z0-9'._\-]{0,22}[A-Z0-9]")
+
+
+def _validate_iso_date(value: Any, field: str) -> str:
+    """Return ``value`` if it is a canonical ``YYYY-MM-DD`` calendar date, else raise ValueError."""
+    if isinstance(value, str) and _ISO_DATE_RE.fullmatch(value):
+        try:
+            datetime.date.fromisoformat(value)
+            return value
+        except ValueError:
+            pass
+    raise ValueError(f"Invalid {field}: {value!r:.80} is not a canonical YYYY-MM-DD date.")
+
+
+def _validate_account_name(value: Any, source: str) -> str:
+    """Return ``value`` if it is a complete Beancount account name, else raise ValueError.
+
+    Uses :data:`BEANCOUNT_ACCOUNT_REGEX` with ``fullmatch`` — its ``$`` anchor
+    alone would also accept a trailing newline.
+    """
+    if isinstance(value, str) and BEANCOUNT_ACCOUNT_REGEX.fullmatch(value):
+        return value
+    raise ValueError(
+        f"Invalid Beancount account {value!r:.80} in {source}: expected "
+        "Assets|Liabilities|Equity|Income|Expenses followed by one or more "
+        "':'-separated segments of [A-Za-z0-9-] starting with an uppercase letter or digit."
+    )
+
+
+def _validate_currency(value: Any, source: str) -> str:
+    """Return ``value`` if it is a valid Beancount commodity symbol, else raise ValueError."""
+    if isinstance(value, str) and _BEANCOUNT_CURRENCY_RE.fullmatch(value):
+        return value
+    raise ValueError(
+        f"Invalid currency {value!r:.80} in {source}: expected a Beancount commodity "
+        "symbol such as 'USD' (uppercase, 2-24 characters of A-Z 0-9 ' . _ -)."
+    )
+
+
+def _quote_beancount_string(value: Any, field: str) -> str:
+    """Serialize ``value`` as an exact double-quoted Beancount string (e.g. an include path).
+
+    Unlike :func:`_escape_beancount_string`, which normalizes free text for
+    payees and narrations, this preserves the value byte-for-byte so a filename
+    still names the same file: backslashes and double quotes are escaped, and a
+    line break or NUL — which cannot belong to a usable filename and could
+    otherwise end the directive — is rejected with ``ValueError``.
+    """
+    text = str(value)
+    if "\n" in text or "\r" in text or "\x00" in text:
+        raise ValueError(f"Invalid {field}: {text!r:.80} contains a line break or NUL byte.")
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _validate_ledger_dates(
+    balances: Optional[DashboardBalances] = None,
+    holdings: Optional[DashboardHoldings] = None,
+    transactions: Optional[DashboardTransactions] = None,
+    opening_date: Optional[str] = None,
+) -> None:
+    """Validate every date a generator may emit as a directive date.
+
+    Empty values keep their existing handling (e.g. an undated transaction still
+    falls back to ``2000-01-01``); any present value must be canonical ISO.
+    """
+    if opening_date:
+        _validate_iso_date(opening_date, "opening_date")
+    if balances is not None and balances.as_of_date:
+        _validate_iso_date(balances.as_of_date, "balances as_of_date")
+    if holdings is not None and holdings.as_of_date:
+        _validate_iso_date(holdings.as_of_date, "holdings as_of_date")
+    if transactions is not None and transactions.transactions:
+        for tx in transactions.transactions:
+            # ``transaction_date`` is emitted directly; ``date`` is the fallback
+            # the opening-lot inference reads when it is absent.
+            tx_date = tx.get("transaction_date") or tx.get("date")
+            if tx_date:
+                tx_id = tx.get("user_transaction_id")
+                _validate_iso_date(tx_date, f"transaction_date of transaction {tx_id!r:.40}")
+
+
 def _clean_ticker(ticker: Optional[str]) -> str:
     """Clean and sanitize ticker to a strictly valid Beancount commodity symbol.
 
@@ -699,6 +796,26 @@ class BeancountMapper:
 
         if mapping_path:
             self.load_mapping(mapping_path)
+            self.validate_targets()
+
+    def validate_targets(self) -> None:
+        """Raise ``ValueError`` if any configured mapping target is not a valid Beancount account.
+
+        Targets are emitted verbatim in ``open`` directives and postings, so an
+        invalid one (e.g. containing a line break) is rejected loudly rather than
+        written into the ledger. Called on load and before every generator run,
+        which also covers targets assigned directly to the public attributes.
+        """
+        for key, target in self.accounts.items():
+            _validate_account_name(target, f"mapping accounts[{key!r:.60}]")
+        for key, target in self.categories.items():
+            _validate_account_name(target, f"mapping categories[{key!r:.60}]")
+        for index, rule in enumerate(self.regex_rules):
+            # Rules without an account are ignored by resolve_category_or_payee.
+            if rule.get("account"):
+                _validate_account_name(rule["account"], f"mapping regex_rules[{index}].account")
+        for key, target in self.transaction_overrides.items():
+            _validate_account_name(target, f"mapping transaction_overrides[{key!r:.60}]")
 
     def load_mapping(self, mapping_path: Union[str, Path]) -> None:
         """Load mapping rules from a YAML or JSON configuration file.
@@ -1161,6 +1278,17 @@ class BeancountGenerator:
     def __init__(self, mapper: Optional[BeancountMapper] = None):
         self.mapper = mapper or BeancountMapper()
 
+    def _validate_inputs(
+        self,
+        balances: Optional[DashboardBalances] = None,
+        holdings: Optional[DashboardHoldings] = None,
+        transactions: Optional[DashboardTransactions] = None,
+        opening_date: Optional[str] = None,
+    ) -> None:
+        """Fail closed on mapping targets or dates that would be emitted as unsafe ledger syntax."""
+        self.mapper.validate_targets()
+        _validate_ledger_dates(balances, holdings, transactions, opening_date)
+
     def generate_main_bean(self, additional_includes: Optional[List[str]] = None) -> str:
         """Generate the root main.bean linking modular components."""
         lines = [
@@ -1183,7 +1311,7 @@ class BeancountGenerator:
         ]
         if additional_includes:
             for inc in sorted(set(additional_includes)):
-                lines.append(f'include "{inc}"\n')
+                lines.append(f"include {_quote_beancount_string(inc, 'include filename')}\n")
         return "".join(lines)
 
     def generate_accounts_bean(
@@ -1194,6 +1322,7 @@ class BeancountGenerator:
         include_pads: bool = True,
     ) -> str:
         """Generate account open and pad directives across all provided datasets."""
+        self._validate_inputs(balances, holdings, transactions)
         lines = [
             ";; ==============================================================================\n"
             ";; Empower Personal Dashboard - Account Declarations\n"
@@ -1276,6 +1405,7 @@ class BeancountGenerator:
             if b_account in commodity_accounts or _is_investment_account_type(acct_type):
                 lines.append(f"2000-01-01 open {b_account}\n")
             else:
+                _validate_currency(curr, f"balances account {acct_id!r:.40}")
                 lines.append(f"2000-01-01 open {b_account} {curr}\n")
             if abs(raw_bal) > 0.001 and include_pads:
                 lines.append(f"2000-01-01 pad {b_account} {ACCT_OPENING_BALANCES}\n")
@@ -1405,6 +1535,7 @@ class BeancountGenerator:
         existing_content: Optional[str] = None,
     ) -> str:
         """Generate balance assertions for cash, liabilities, and investment commodities."""
+        self._validate_inputs(balances, holdings, transactions)
         lines = [
             ";; ==============================================================================\n"
             ";; Empower Personal Dashboard - Balance Assertions\n"
@@ -1464,6 +1595,7 @@ class BeancountGenerator:
             bal_amt = raw_bal if is_asset else -abs(raw_bal)
             accumulated = tx_totals.get(b_account, 0.0) if transactions else 0.0
             diff = bal_amt - accumulated
+            _validate_currency(curr, f"balances account {acct_id!r:.40}")
             if abs(diff) > 0.005:
                 lines.append(f"2020-01-01 pad {b_account} {ACCT_OPENING_BALANCES}\n")
             lines.append(f"{as_of} balance {b_account} {bal_amt:.2f} {curr}\n")
@@ -1571,6 +1703,7 @@ class BeancountGenerator:
         holdings: Optional[DashboardHoldings] = None,
     ) -> str:
         """Generate price directives for investment commodities."""
+        _validate_ledger_dates(holdings=holdings)
         lines = [
             ";; ==============================================================================\n"
             ";; Empower Personal Dashboard - Commodity Price Points\n"
@@ -1736,6 +1869,7 @@ class BeancountGenerator:
         # Must reconstruct opening lots for fully-sold positions even if the holdings
         # snapshot is empty, or sells will reduce an empty inventory and the ledger
         # will fail to load. The emit helpers therefore run regardless of holdings.
+        self._validate_inputs(balances, holdings, transactions, opening_date)
         lot_date = self._resolve_lot_date(holdings, opening_date, transactions, balances)
 
         self._guard_window_not_broadened(existing_content, lot_date)
@@ -2485,6 +2619,7 @@ class BeancountGenerator:
         balances: Optional[DashboardBalances] = None,
     ) -> str:
         """Generate balanced double-entry transaction directives."""
+        self._validate_inputs(balances, None, transactions)
         lines = [
             ";; ==============================================================================\n"
             ";; Empower Personal Dashboard - Double-Entry Transactions\n"
@@ -3045,8 +3180,9 @@ class BeancountGenerator:
         if f'include "{BEAN_HOLDINGS}"' not in updated_main:
             updated_main += f'\ninclude "{BEAN_HOLDINGS}"\n'
         for b in sorted(set(extra_beans)):
-            if f'include "{b}"' not in updated_main:
-                updated_main += f'include "{b}"\n'
+            include_line = f"include {_quote_beancount_string(b, 'include filename')}"
+            if include_line not in updated_main:
+                updated_main += include_line + "\n"
         # Ensure a FIFO booking method is declared so appended sale transactions
         # resolve against the oldest lot even when the ledger was created by an
         # earlier release that omitted the option.
