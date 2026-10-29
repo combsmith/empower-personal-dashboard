@@ -1273,7 +1273,7 @@ def _load_transactions_from_file(args, in_transactions_file, progress_file):
         transactions_res.end_date = ed
 
     if not args.quiet:
-        print(f"[+] Loaded {transactions_res.total_transactions} transactions ({terminal_safe_text(transactions_res.start_date)} to {terminal_safe_text(transactions_res.end_date)}) from: {in_t}", file=progress_file)
+        print(f"[+] Loaded {transactions_res.total_transactions} transactions ({terminal_safe_text(transactions_res.start_date)} to {terminal_safe_text(transactions_res.end_date)}) from: {terminal_safe_text(in_t)}", file=progress_file)
     return transactions_res
 
 

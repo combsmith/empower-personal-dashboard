@@ -96,6 +96,10 @@ class TestCsvSafeCell(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertEqual(csv_safe_cell(value), "'" + value)
 
+    def test_leading_line_feed_formula_is_quoted(self):
+        value = "\n=HYPERLINK(\"http://example.invalid\")"
+        self.assertEqual(csv_safe_cell(value), "'" + value)
+
     def test_safe_strings_unchanged(self):
         for value in ("", "Synthetic Grocery", "1=1", " =1", "'already"):
             with self.subTest(value=value):

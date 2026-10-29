@@ -62,15 +62,15 @@ def terminal_safe_text(val: Any) -> str:
 
 # Leading characters that make spreadsheet applications evaluate a CSV cell as a
 # formula (OWASP "CSV Injection" guidance).
-_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
 
 
 def csv_safe_cell(val: Any) -> Any:
     """
     Neutralise a CSV cell value against formula (CSV) injection.
 
-    A string that starts with ``=``, ``+``, ``-``, ``@``, tab or carriage return
-    is prefixed with a single quote so spreadsheets treat it as literal text.
+    A string that starts with ``=``, ``+``, ``-``, ``@``, tab, carriage return or
+    line feed is prefixed with a single quote so spreadsheets treat it as literal text.
     Non-string values (numbers, booleans, None) are returned unchanged, so
     numeric columns such as a negative amount stay numeric.
     """
