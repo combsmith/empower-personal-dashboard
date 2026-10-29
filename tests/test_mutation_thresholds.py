@@ -258,6 +258,14 @@ class TestCheckMutationThresholds(unittest.TestCase):
             )
         self.assertIn("duplicate", str(ctx.exception))
 
+    def test_resolve_thresholds_rejects_duplicate_exact_key_first(self):
+        # Same collision as above with the exact key given before the alias.
+        with self.assertRaises(ValueError) as ctx:
+            self.mod.resolve_thresholds(
+                {"pkg/models": 50.0, "models": 95.0}, ["pkg/models"]
+            )
+        self.assertIn("duplicate", str(ctx.exception))
+
     def test_resolve_thresholds_keeps_unknown_name_for_no_data_report(self):
         resolved = self.mod.resolve_thresholds({"beancount": 80.0}, ["pkg/models"])
         self.assertEqual(resolved, {"beancount": 80.0})
