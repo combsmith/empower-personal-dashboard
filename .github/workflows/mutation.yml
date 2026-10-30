@@ -118,13 +118,13 @@ jobs:
           if [ "$ENFORCE" = "true" ]; then
             args=()
             case "$TARGET" in
-              models|all) args+=(--threshold models=95) ;;
+              models|all) args+=(--threshold empower_personal_dashboard/models=95) ;;
             esac
             case "$TARGET" in
-              sanitizers|all) args+=(--threshold sanitizers=90) ;;
+              sanitizers|all) args+=(--threshold empower_personal_dashboard/sanitizers=90) ;;
             esac
             case "$TARGET" in
-              beancount-helpers|all) args+=(--threshold beancount=91) ;;
+              beancount-helpers|all) args+=(--threshold empower_personal_dashboard/beancount=91) ;;
             esac
             python scripts/check_mutation_thresholds.py --mutants-dir mutants "${args[@]}"
           else
