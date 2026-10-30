@@ -1,0 +1,6 @@
+{
+  "version": 1,
+  "required_status_checks": [
+    {"context": "mutation (all)", "integration_id": 15368}
+  ]
+}
