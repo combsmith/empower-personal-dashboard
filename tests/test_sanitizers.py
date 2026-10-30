@@ -100,8 +100,20 @@ class TestCsvSafeCell(unittest.TestCase):
         value = "\n=HYPERLINK(\"http://example.invalid\")"
         self.assertEqual(csv_safe_cell(value), "'" + value)
 
+    def test_tab_or_cr_prefix_is_quoted_even_without_formula(self):
+        for value in ("\tSynthetic", "\rSynthetic", "\nSynthetic"):
+            with self.subTest(value=value):
+                self.assertEqual(csv_safe_cell(value), "'" + value)
+
+    def test_whitespace_padded_formula_is_quoted(self):
+        # Importers that trim leading whitespace (and users who re-save after
+        # trimming) would otherwise see a live formula.
+        for value in (" =1+1", "   @SUM(A1)", " +1", " \t-1+1", "\r\n=HYPERLINK(\"x\")"):
+            with self.subTest(value=value):
+                self.assertEqual(csv_safe_cell(value), "'" + value)
+
     def test_safe_strings_unchanged(self):
-        for value in ("", "Synthetic Grocery", "1=1", " =1", "'already"):
+        for value in ("", "   ", "Synthetic Grocery", "1=1", " a=1", "'already"):
             with self.subTest(value=value):
                 self.assertEqual(csv_safe_cell(value), value)
 

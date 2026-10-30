@@ -535,6 +535,21 @@ class TestTerminalOutputEscaping(unittest.TestCase):
             self.assertIn("transactions (2026-01-01 to 2026-01-31)", out)
             self.assertFalse(_has_terminal_controls(out), repr(out))
 
+    def test_cli_loaded_transactions_progress_line_strips_controls_from_path(self):
+        # The input filename itself is attacker-influenced (e.g. an archive
+        # received from someone else) and is echoed in the progress line.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            in_path = Path(tmpdir) / ("tx" + _HOSTILE_CSI + ".json")
+            in_path.write_text(json.dumps({"transactions": []}), encoding="utf-8")
+            argv = ["empower", "--transactions", "--input-transactions", str(in_path), "--format", "table"]
+            buf = io.StringIO()
+            with patch.object(sys, "argv", argv), contextlib.redirect_stdout(buf):
+                self.assertEqual(cli_main(), 0)
+            out = buf.getvalue()
+            self.assertIn("[+] Loaded 0 transactions", out)
+            self.assertIn("tx.json", out)
+            self.assertFalse(_has_terminal_controls(out), repr(out))
+
 
 class TestCsvFormulaNeutralisation(unittest.TestCase):
     """CSV exports must keep formula-leading text cells literal (#135)."""
@@ -634,6 +649,42 @@ class TestCsvFormulaNeutralisation(unittest.TestCase):
         self.assertEqual(row["one_day_percent_change"], "-0.4")
         self.assertEqual(row["one_day_value_change"], "-1.2")
         self.assertEqual(row["quantity"], "3.0")
+
+    def test_export_transactions_csv_neutralises_line_feed_and_padded_formulas(self):
+        from empower_personal_dashboard.cli import export_transactions_csv
+        from empower_personal_dashboard.models import DashboardTransactions
+
+        txs = DashboardTransactions.from_dict({"transactions": [{
+            "transaction_date": "2026-01-02",
+            "account_name": "  =SUM(A1:A9)",
+            "description": '\n=HYPERLINK("https://example.invalid","x")',
+            "amount": -12.5,
+        }]})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "t.csv"
+            export_transactions_csv(txs, path)
+            row = self._read_rows(path)[0]
+        self.assertEqual(row["description"], '\'\n=HYPERLINK("https://example.invalid","x")')
+        self.assertEqual(row["account_name"], "'  =SUM(A1:A9)")
+        self.assertEqual(row["amount"], "-12.5")
+
+    def test_string_typed_number_in_numeric_column_is_quoted(self):
+        # Documented trade-off: neutralisation is by type, not by column. Imported
+        # snapshot dicts are not coerced, so a string "-12.5" is treated as text
+        # (it could equally be "-1+cmd"). Real numbers stay unquoted.
+        from empower_personal_dashboard.cli import export_balances_csv
+        from empower_personal_dashboard.models import DashboardBalances
+
+        balances = DashboardBalances.from_dict({"accounts": [
+            {"firm_name": "Synthetic Bank", "balance": "-12.5"},
+            {"firm_name": "Synthetic Bank", "balance": -12.5},
+        ]})
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "b.csv"
+            export_balances_csv(balances, path)
+            rows = self._read_rows(path)
+        self.assertEqual(rows[0]["balance"], "'-12.5")
+        self.assertEqual(rows[1]["balance"], "-12.5")
 
     @patch("empower_personal_dashboard.cli.EmpowerDashboardClient.fetch_transactions")
     def test_merged_archive_csv_is_neutralised_and_jsonl_untouched(self, mock_txs):

@@ -71,9 +71,14 @@ def csv_safe_cell(val: Any) -> Any:
 
     A string that starts with ``=``, ``+``, ``-``, ``@``, tab, carriage return or
     line feed is prefixed with a single quote so spreadsheets treat it as literal text.
+    So is a string whose first non-whitespace character is one of those formula
+    triggers (e.g. ``"  =1+1"``): some importers trim leading whitespace before
+    evaluating a cell.
     Non-string values (numbers, booleans, None) are returned unchanged, so
     numeric columns such as a negative amount stay numeric.
     """
-    if isinstance(val, str) and val.startswith(_CSV_FORMULA_PREFIXES):
+    if isinstance(val, str) and (
+        val.startswith(_CSV_FORMULA_PREFIXES) or val.lstrip().startswith(_CSV_FORMULA_PREFIXES)
+    ):
         return "'" + val
     return val
