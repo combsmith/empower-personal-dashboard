@@ -420,6 +420,26 @@ class TestOpenApiContract(unittest.TestCase):
         transactions = client.fetch_transactions()
         self._validate_schema(transactions.to_dict(), "DashboardTransactions")
 
+    def test_contract_cli_parsed_transactions_jsonl(self):
+        """Validate the CLI JSONL parse path summary against DashboardTransactions schema (#127)."""
+        import tempfile
+
+        from empower_personal_dashboard.cli import _parse_transactions_jsonl
+
+        client = EmpowerDashboardClient(mock_mode=True)
+        tx_dicts = client.fetch_transactions().to_dict()["transactions"]
+        with tempfile.TemporaryDirectory() as tmp:
+            jsonl_path = Path(tmp) / "transactions.jsonl"
+            jsonl_path.write_text(
+                "".join(json.dumps(tx) + "\n" for tx in tx_dicts), encoding="utf-8"
+            )
+            parsed = _parse_transactions_jsonl(jsonl_path)
+        self.assertEqual(parsed.total_transactions, len(tx_dicts))
+        # Pin the default itself: "sandbox_mock" would also satisfy the enum but
+        # would mislabel real archived data as mock data.
+        self.assertEqual(parsed.mode, "live")
+        self._validate_schema(parsed.to_dict(), "DashboardTransactions")
+
     def test_contract_domain_transaction(self):
         """Validate Transaction dataclass serialization against Transaction schema."""
         tx = Transaction(

@@ -1021,8 +1021,15 @@ def _load_holdings(args, client, in_holdings_file, progress_file):
     return holdings_res
 
 
-def _summarize_transactions(tx_list, mode="historical"):
-    """Build a DashboardTransactions summary (date span + cashflow) over a list of records."""
+def _summarize_transactions(tx_list, mode="live"):
+    """Build a DashboardTransactions summary (date span + cashflow) over a list of records.
+
+    ``mode`` defaults to ``"live"`` because JSONL archives do not record the mode
+    they were fetched in, and the schema allows only ``live``/``sandbox_mock``. For
+    a parsed archive it is a label, not a claim about where the data came from:
+    pruning in ``_merge_into_archive`` keys off the freshly fetched result's mode,
+    never off a parsed archive's.
+    """
     dates = [t.get("transaction_date") for t in tx_list if t.get("transaction_date")]
     s_date = min(dates) if dates else "2026-01-01"
     e_date = max(dates) if dates else "2026-12-31"
