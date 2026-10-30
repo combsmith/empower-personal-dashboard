@@ -164,6 +164,13 @@ Criteria (all met 2026-10-27, tracked in #126):
 - Full `all` runtime under 30 minutes: about 2.5 minutes per run.
 - This file current: baselines, gates, and equivalents all recorded.
 
+**How it is required.** `mutation (all)` (GitHub Actions, `integration_id`
+15368) is declared in `.github/required-checks.json`. The org's
+`apply-rulesets.sh` merges declared checks into the `code-quality` ruleset, so
+the weekly settings self-heal keeps the check required
+(combsmith/.github#1410, ADR-0015). The interim `mutation-testing` ruleset
+created at promotion is deleted once `code-quality` carries the check.
+
 To widen the mutation scope later, first key modules by path (#125), then
 record the new module's baseline and gate here and add it to the
 workflow's pattern list.
