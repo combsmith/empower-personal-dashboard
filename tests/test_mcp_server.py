@@ -1057,6 +1057,45 @@ class TestExportDataDirectoryPinning(unittest.TestCase):
                 with self.subTest(file=path.name):
                     self.assertEqual(path.stat().st_mode & 0o777, 0o600)
 
+    def test_export_failure_mid_write_keeps_previous_file_and_closes_pinned_dir(self) -> None:
+        # A serialization failure part-way through a CSV must leave the previous
+        # export intact, leave no temp file, report EXPORT_ERROR and release the
+        # pinned directory fd.
+        from empower_personal_dashboard._safe_io import PinnedDir
+
+        closed = []
+
+        class _TrackingPinnedDir(PinnedDir):
+            def close(self) -> None:
+                closed.append(self.path)
+                super().close()
+
+        def explode(balances, f) -> None:
+            f.write("institution,account_name\n")
+            raise RuntimeError("synthetic serialization failure")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir).resolve()
+            previous_csv = dest / "empower_balances.csv"
+            previous_csv.write_text("PREVIOUS-EXPORT", encoding="utf-8")
+            with patch.dict(os.environ, {"EMPOWER_EXPORT_ROOT": str(dest)}):
+                with patch("empower_personal_dashboard.mcp_server.FastMCP", FastMCP or _FakeFastMCP):
+                    server = create_mcp_server(client=EmpowerDashboardClient(mock_mode=True))
+                    with (
+                        patch("empower_personal_dashboard.mcp_server.PinnedDir", _TrackingPinnedDir),
+                        patch("empower_personal_dashboard.mcp_server.write_balances_csv", side_effect=explode),
+                    ):
+                        payload = self._run_export(
+                            server, {"destination_dir": str(dest), "scope": "balances", "export_csv": True}
+                        )
+            self.assertEqual(payload["status"], "error", payload)
+            self.assertEqual(payload["error_code"], "EXPORT_ERROR")
+            self.assertEqual(previous_csv.read_text(encoding="utf-8"), "PREVIOUS-EXPORT")
+            self.assertEqual(
+                sorted(p.name for p in dest.iterdir()), ["empower_balances.csv", "empower_balances.json"]
+            )
+            self.assertEqual(closed, [dest])
+
 
 if __name__ == "__main__":
     unittest.main()

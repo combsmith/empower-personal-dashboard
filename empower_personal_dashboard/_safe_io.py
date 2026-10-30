@@ -26,6 +26,8 @@ _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 _O_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
 # Windows: keep the fd binary so the text layer alone handles newlines.
 _O_BINARY = getattr(os, "O_BINARY", 0)
+# Open reads non-blocking so a FIFO planted at the path cannot hang the reader.
+_O_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
 # Open directories for search only (Linux O_PATH, macOS/BSD O_SEARCH) so an
 # ancestor that grants execute but not read permission can still be traversed,
 # as it can with a plain pathname; O_RDONLY (0) otherwise.
@@ -118,15 +120,24 @@ class PinnedDir:
         return {"dir_fd": self.fd} if self.fd is not None else {}
 
     def open_text(self, name: str, encoding: str = "utf-8") -> IO[str]:
-        """Open ``name`` for reading, refusing a symlinked file."""
+        """Open ``name`` for reading, refusing a symlinked or non-regular file."""
         _check_name(name)
+        flags = os.O_RDONLY | _O_NOFOLLOW | _O_CLOEXEC | _O_BINARY | _O_NONBLOCK
         try:
-            fd = os.open(self._target(name), os.O_RDONLY | _O_NOFOLLOW | _O_CLOEXEC | _O_BINARY, **self._dir_kw())
+            fd = os.open(self._target(name), flags, **self._dir_kw())
         except OSError as e:
             if e.errno in (errno.ELOOP, errno.EMLINK):
                 raise ValueError(f"Refusing to read symlinked file: {self.path / name}") from e
             raise
-        return os.fdopen(fd, "r", encoding=encoding)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError(f"Refusing to read non-regular file: {self.path / name}")
+            if _O_NONBLOCK:
+                os.set_blocking(fd, True)
+            return os.fdopen(fd, "r", encoding=encoding)
+        except BaseException:
+            os.close(fd)
+            raise
 
     def write_atomic(
         self,
@@ -150,7 +161,8 @@ class PinnedDir:
             try:
                 st = os.stat(self._target(name), follow_symlinks=False, **kw)
                 if stat.S_ISREG(st.st_mode):
-                    final_mode = stat.S_IMODE(st.st_mode)
+                    # Permission bits only: never carry setuid/setgid/sticky over.
+                    final_mode = stat.S_IMODE(st.st_mode) & 0o777
             except FileNotFoundError:
                 pass
         tmp_name = f".{name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"

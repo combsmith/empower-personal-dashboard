@@ -239,19 +239,26 @@ class EmpowerDashboardClient:
             if self.log_file:
                 log_path = _safe_fs_path(self.log_file, description="log file path")
 
-            self.logger.setLevel(logging.DEBUG if self.debug else logging.INFO)
             formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+            # Open the log file before attaching anything: the O_NOFOLLOW open
+            # can still fail (e.g. a symlink planted after the check above), and
+            # that must leave the logger untouched for the same reason.
+            file_handler = None
+            if log_path is not None:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                file_handler = _PrivateFileHandler(log_path, mode="a", encoding="utf-8")
+                file_handler.setLevel(logging.DEBUG)
+                file_handler.setFormatter(formatter)
+
+            self.logger.setLevel(logging.DEBUG if self.debug else logging.INFO)
 
             console_handler = logging.StreamHandler(sys.stderr)
             console_handler.setLevel(logging.DEBUG if self.debug else logging.WARNING)
             console_handler.setFormatter(formatter)
             self.logger.addHandler(console_handler)
 
-            if log_path is not None:
-                log_path.parent.mkdir(parents=True, exist_ok=True)
-                file_handler = _PrivateFileHandler(log_path, mode="a", encoding="utf-8")
-                file_handler.setLevel(logging.DEBUG)
-                file_handler.setFormatter(formatter)
+            if file_handler is not None:
                 self.logger.addHandler(file_handler)
 
     def _log_debug(self, msg: str) -> None:

@@ -1599,7 +1599,12 @@ class TestReviewFixesIdentifyAndMockModes(unittest.TestCase):
 
 class TestClientReauthenticateAndAutoRefresh(unittest.TestCase):
     def setUp(self):
-        self.client = EmpowerDashboardClient(session_file=Path("/tmp/dummy_sess.json"), mock_mode=False)
+        # Some reauthenticate paths really call save_session; keep that write in
+        # a private temp dir rather than the shared (and, on macOS, symlinked) /tmp.
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        session_file = Path(tmp.name).resolve() / "dummy_sess.json"
+        self.client = EmpowerDashboardClient(session_file=session_file, mock_mode=False)
         self.client.username = "user@example.com"
         self.client.csrf = "csrf-token-123"
 
@@ -2152,6 +2157,79 @@ class TestLocalFileHandlingHardening(unittest.TestCase):
                 self.assertEqual(reloaded.csrf, "synthetic-csrf")
             finally:
                 os.chmod(gate, 0o700)
+
+    def test_load_session_keeps_custom_configured_host(self):
+        # A custom --api-host stays the configured origin: a session file
+        # carrying the same host is fine, but one naming any other unknown host
+        # cannot override it.
+        custom = "https://custom-host.example.test"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_file = Path(tmpdir).resolve() / "session.json"
+            for stored in (custom, "https://attacker.example"):
+                with self.subTest(stored=stored):
+                    session_file.write_text(
+                        json.dumps({"version": 2, "base_url": stored, "csrf": "synthetic-csrf", "cookies": []}),
+                        encoding="utf-8",
+                    )
+                    client = EmpowerDashboardClient(
+                        session_file=Path(tmpdir) / "other.json", base_url=custom, mock_mode=False
+                    )
+                    self.assertTrue(client.load_session(session_file))
+                    self.assertEqual(client.base_url, custom)
+                    self.assertEqual(client.api_endpoint, f"{custom}/api")
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires mkfifo")
+    def test_load_session_does_not_block_on_fifo(self):
+        import threading
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            fifo = Path(tmpdir).resolve() / "session.json"
+            os.mkfifo(fifo)
+            client = EmpowerDashboardClient(session_file=Path(tmpdir) / "other.json", mock_mode=False)
+            outcome = {}
+            worker = threading.Thread(target=lambda: outcome.update(loaded=client.load_session(fifo)), daemon=True)
+            worker.start()
+            worker.join(5)
+            if worker.is_alive():
+                os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+                self.fail("load_session blocked on a FIFO session file")
+            self.assertIs(outcome.get("loaded"), False)
+
+    @unittest.skipUnless(hasattr(os, "symlink") and hasattr(os, "O_NOFOLLOW"), "requires O_NOFOLLOW")
+    def test_private_file_handler_refuses_symlinked_log(self):
+        # O_NOFOLLOW closes the window after the _safe_fs_path symlink check.
+        from empower_personal_dashboard.client import _PrivateFileHandler
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            target = root / "elsewhere.log"
+            target.write_text("UNTOUCHED", encoding="utf-8")
+            link = root / "debug.log"
+            link.symlink_to(target)
+            with self.assertRaises(OSError):
+                _PrivateFileHandler(link, mode="a", encoding="utf-8")
+            self.assertEqual(target.read_text(encoding="utf-8"), "UNTOUCHED")
+
+    def test_log_file_open_failure_leaves_logger_unconfigured(self):
+        # If the log file cannot be opened (e.g. a symlink planted after the
+        # path check), no handler may stay attached, so a later client can
+        # still configure logging.
+        import errno as _errno
+
+        from empower_personal_dashboard.client import _PrivateFileHandler
+
+        logger, restore = self._isolated_logger()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                log_path = Path(tmpdir).resolve() / "debug.log"
+                with patch.object(
+                    _PrivateFileHandler, "_open", side_effect=OSError(_errno.ELOOP, "Too many levels of symbolic links")
+                ):
+                    with self.assertRaises(OSError):
+                        EmpowerDashboardClient(log_file=log_path, mock_mode=True)
+                self.assertEqual(logger.handlers, [])
+        finally:
+            restore()
 
     def test_save_session_uses_path_fallback_without_dir_fd_support(self):
         # Platforms without dir_fd/O_NOFOLLOW (e.g. Windows) fall back to the
