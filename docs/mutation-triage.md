@@ -76,8 +76,23 @@ and push to `main`, and on manual dispatches unless `enforce: false`, via:
 
 ```bash
 python scripts/check_mutation_thresholds.py --mutants-dir mutants \
-  --threshold models=95 --threshold sanitizers=90 --threshold beancount=91
+  --threshold empower_personal_dashboard/models=95 \
+  --threshold empower_personal_dashboard/sanitizers=90 \
+  --threshold empower_personal_dashboard/beancount=91
 ```
+
+The checker keys each module by its path under `mutants/` minus `.py.meta`
+(e.g. `empower_personal_dashboard/models`), so same-named files in different
+subpackages get separate scores and gates. `--threshold` accepts that full
+key, or a short name such as `models` when exactly one module has that file
+name. An ambiguous short name exits 2 and lists the candidates. Partial paths
+(`a/models`) are not accepted and report NO DATA, and naming the same module twice
+exits 2 instead of silently keeping one gate.
+
+The required CI check gates every pilot module by its **full path key**, so a new
+same-named file cannot move a gate, and a change to mutmut's `mutants/` layout
+(for example a `src/` prefix) fails as NO DATA instead of leaving a module
+ungated. `tests/test_mutation_thresholds.py` pins both.
 
 Before strengthening, the baselines were: `models` 33.8%, `sanitizers`
 95.2%, `beancount` helpers 71.8%. Tests added: exact-dict and full-field
