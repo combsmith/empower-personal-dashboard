@@ -24,10 +24,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from empower_personal_dashboard._safe_io import PinnedDir
 from empower_personal_dashboard.cli import (
-    export_balances_csv,
-    export_holdings_csv,
-    export_transactions_csv,
     format_currency,
     render_balances_markdown,
     render_balances_table,
@@ -35,6 +33,9 @@ from empower_personal_dashboard.cli import (
     render_holdings_table,
     render_transactions_markdown,
     render_transactions_table,
+    write_balances_csv,
+    write_holdings_csv,
+    write_transactions_csv,
 )
 from empower_personal_dashboard.client import EmpowerDashboardClient
 from empower_personal_dashboard.credentials import resolve_password
@@ -885,6 +886,7 @@ def create_mcp_server(
         Returns:
             Dict containing export status, destination path, list of files created with record counts, and summary.
         """
+        dest_dir: Optional[PinnedDir] = None
         try:
             VALID_SCOPES = ("all", "balances", "holdings", "transactions")
             scope_clean = scope.strip().lower()
@@ -924,7 +926,13 @@ def create_mcp_server(
                     "message": f"destination_dir '{destination_dir}' cannot be a symlink.",
                 }
 
-            dest_path.mkdir(parents=True, exist_ok=True)
+            # Pin the authorized directory by fd before the (slow) fetches: every
+            # export write below is made relative to it, so renaming or swapping
+            # a path component afterwards cannot redirect the output (#133).
+            try:
+                dest_dir = PinnedDir(dest_path, create=True)
+            except ValueError as e:
+                return {"status": "error", "error_code": "ACCESS_DENIED", "message": str(e)}
             files_created: List[Dict[str, Any]] = []
 
             def _check_symlink(target_file: Path) -> Optional[Dict[str, Any]]:
@@ -952,8 +960,9 @@ def create_mcp_server(
                 sym_err = _check_symlink(b_json_path)
                 if sym_err:
                     return sym_err
-                with open(b_json_path, "w", encoding="utf-8") as f:
-                    json.dump(balances.to_dict(), f, indent=2, ensure_ascii=False)
+                dest_dir.write_atomic(
+                    b_json_path.name, lambda f: json.dump(balances.to_dict(), f, indent=2, ensure_ascii=False)
+                )
                 files_created.append({"file": str(b_json_path), "format": "json", "records": len(balances.accounts)})
 
                 if export_csv:
@@ -961,7 +970,7 @@ def create_mcp_server(
                     sym_err = _check_symlink(b_csv_path)
                     if sym_err:
                         return sym_err
-                    export_balances_csv(balances, b_csv_path)
+                    dest_dir.write_atomic(b_csv_path.name, lambda f: write_balances_csv(balances, f), newline="")
                     files_created.append({"file": str(b_csv_path), "format": "csv", "records": len(balances.accounts)})
 
             if do_holdings:
@@ -970,8 +979,9 @@ def create_mcp_server(
                 sym_err = _check_symlink(h_json_path)
                 if sym_err:
                     return sym_err
-                with open(h_json_path, "w", encoding="utf-8") as f:
-                    json.dump(holdings.to_dict(), f, indent=2, ensure_ascii=False)
+                dest_dir.write_atomic(
+                    h_json_path.name, lambda f: json.dump(holdings.to_dict(), f, indent=2, ensure_ascii=False)
+                )
                 files_created.append({"file": str(h_json_path), "format": "json", "records": len(holdings.holdings)})
 
                 if export_csv:
@@ -979,7 +989,7 @@ def create_mcp_server(
                     sym_err = _check_symlink(h_csv_path)
                     if sym_err:
                         return sym_err
-                    export_holdings_csv(holdings, h_csv_path)
+                    dest_dir.write_atomic(h_csv_path.name, lambda f: write_holdings_csv(holdings, f), newline="")
                     files_created.append({"file": str(h_csv_path), "format": "csv", "records": len(holdings.holdings)})
 
             if do_transactions:
@@ -991,9 +1001,12 @@ def create_mcp_server(
                 sym_err = _check_symlink(t_jsonl_path)
                 if sym_err:
                     return sym_err
-                with open(t_jsonl_path, "w", encoding="utf-8") as f:
+
+                def _write_jsonl(f: Any) -> None:
                     for t in tx_data.transactions:
                         f.write(json.dumps(t, ensure_ascii=False) + "\n")
+
+                dest_dir.write_atomic(t_jsonl_path.name, _write_jsonl)
                 files_created.append({"file": str(t_jsonl_path), "format": "jsonl", "records": len(tx_data.transactions)})
 
                 if export_csv:
@@ -1001,7 +1014,7 @@ def create_mcp_server(
                     sym_err = _check_symlink(t_csv_path)
                     if sym_err:
                         return sym_err
-                    export_transactions_csv(tx_data, t_csv_path)
+                    dest_dir.write_atomic(t_csv_path.name, lambda f: write_transactions_csv(tx_data, f), newline="")
                     files_created.append({"file": str(t_csv_path), "format": "csv", "records": len(tx_data.transactions)})
 
             beancount_warnings: List[str] = []
@@ -1088,6 +1101,9 @@ def create_mcp_server(
         except Exception as e:
             logger.exception("Unexpected error in export_data")
             return {"status": "error", "error_code": "EXPORT_ERROR", "message": str(e)}
+        finally:
+            if dest_dir is not None:
+                dest_dir.close()
 
     @server.tool()
     def get_export_options() -> Dict[str, Any]:

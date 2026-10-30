@@ -10,7 +10,6 @@ import logging
 import os
 import re
 import sys
-import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -19,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import requests
 
+from ._safe_io import PinnedDir
 from .exceptions import (
     EmpowerError,
     LoginFailedException,
@@ -36,6 +36,11 @@ from .sanitizers import clean_api_text
 
 DEFAULT_BASE_URL = "https://home.personalcapital.com"
 MIGRATED_BASE_URL = "https://pc-api.empower-retirement.com"
+# Origins a saved session file may restore. The session file is less trusted
+# than the CLI/constructor configuration, so it may only select one of the known
+# Empower hosts (legacy, or the Code 920 migration target) and can never point
+# the password POST at an arbitrary origin (#138).
+_SESSION_RESTORABLE_BASE_URLS = frozenset({DEFAULT_BASE_URL, MIGRATED_BASE_URL})
 DEFAULT_SESSION_FILE = Path.home() / ".empower_personal_dashboard_session.json"
 CSRF_REGEX = re.compile(r"window\.csrf\s*=\s*['\"]([^'\"]+)['\"]")
 
@@ -71,8 +76,8 @@ def _env_flag(value: Optional[str]) -> bool:
     return value.strip().lower() not in _FALSY_ENV_VALUES
 
 
-def _safe_fs_path(filepath: Union[str, Path], *, description: str) -> Path:
-    """Resolve and validate a user-supplied filesystem path before any write.
+def _safe_fs_path(filepath: Union[str, Path], *, description: str, action: str = "write to") -> Path:
+    """Resolve and validate a user-supplied filesystem path before any read or write.
 
     Guards against path traversal from untrusted (e.g. CLI- or LLM-supplied)
     arguments: rejects embedded NUL bytes and refuses to follow a symlink at the
@@ -88,13 +93,29 @@ def _safe_fs_path(filepath: Union[str, Path], *, description: str) -> Path:
     # Inspect the user-supplied location for a symlink *before* resolving it:
     # ``Path.resolve()`` follows symlinks, so a post-resolve check never sees one.
     if expanded.is_symlink():
-        raise ValueError(f"Refusing to write to symlinked {description}: {expanded}")
+        raise ValueError(f"Refusing to {action} symlinked {description}: {expanded}")
     # A symlink anywhere in the parent chain can redirect the write just as a
     # symlinked leaf can; reject every symlinked parent before resolving.
     for parent in expanded.parents:
         if parent.is_symlink():
-            raise ValueError(f"Refusing to write to {description} inside symlinked directory: {expanded}")
+            raise ValueError(f"Refusing to {action} {description} inside symlinked directory: {expanded}")
     return expanded.resolve()
+
+
+class _PrivateFileHandler(logging.FileHandler):
+    """``FileHandler`` that creates its log owner-only (0600) and never follows a symlink.
+
+    The detailed log receives (sanitized) API response bodies, so it must not be
+    created group/world-readable under a permissive umask (#134). The mode only
+    applies on creation; an existing file keeps its permissions.
+    """
+
+    def _open(self):  # type: ignore[override]
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        for optional in ("O_NOFOLLOW", "O_CLOEXEC", "O_BINARY"):
+            flags |= getattr(os, optional, 0)
+        fd = os.open(self.baseFilename, flags, 0o600)
+        return os.fdopen(fd, self.mode, encoding=self.encoding, errors=self.errors)
 
 
 def _clean_history_balances(raw_balances: Any) -> Dict[str, float]:
@@ -218,19 +239,26 @@ class EmpowerDashboardClient:
             if self.log_file:
                 log_path = _safe_fs_path(self.log_file, description="log file path")
 
-            self.logger.setLevel(logging.DEBUG if self.debug else logging.INFO)
             formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+
+            # Open the log file before attaching anything: the O_NOFOLLOW open
+            # can still fail (e.g. a symlink planted after the check above), and
+            # that must leave the logger untouched for the same reason.
+            file_handler = None
+            if log_path is not None:
+                log_path.parent.mkdir(parents=True, exist_ok=True)
+                file_handler = _PrivateFileHandler(log_path, mode="a", encoding="utf-8")
+                file_handler.setLevel(logging.DEBUG)
+                file_handler.setFormatter(formatter)
+
+            self.logger.setLevel(logging.DEBUG if self.debug else logging.INFO)
 
             console_handler = logging.StreamHandler(sys.stderr)
             console_handler.setLevel(logging.DEBUG if self.debug else logging.WARNING)
             console_handler.setFormatter(formatter)
             self.logger.addHandler(console_handler)
 
-            if log_path is not None:
-                log_path.parent.mkdir(parents=True, exist_ok=True)
-                file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
-                file_handler.setLevel(logging.DEBUG)
-                file_handler.setFormatter(formatter)
+            if file_handler is not None:
                 self.logger.addHandler(file_handler)
 
     def _log_debug(self, msg: str) -> None:
@@ -715,7 +743,6 @@ class EmpowerDashboardClient:
         # Validate the (possibly CLI/LLM-supplied) session path before creating
         # directories or writing the file, to prevent path traversal.
         target_path = _safe_fs_path(filepath or self.session_file, description="session file path")
-        target_path.parent.mkdir(parents=True, exist_ok=True)
 
         session_data: Dict[str, Any] = {
             "version": 2,
@@ -727,17 +754,13 @@ class EmpowerDashboardClient:
         if self.username:
             session_data["username"] = self.username
 
-        fd, tmp_file = tempfile.mkstemp(dir=target_path.parent, prefix=".session_", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                os.chmod(tmp_file, 0o600)
-                json.dump(session_data, f, indent=2)
-            os.replace(tmp_file, target_path)
-            os.chmod(target_path, 0o600)
-        except Exception:
-            if os.path.exists(tmp_file):
-                os.remove(tmp_file)
-            raise
+        # Pin the validated directory by fd (refusing symlinks in every
+        # component) so a later ancestor rename cannot redirect the temp file or
+        # the replace (#132). The temp file is 0600 before any data is written.
+        with PinnedDir(target_path.parent, create=True) as session_dir:
+            session_dir.write_atomic(
+                target_path.name, lambda f: json.dump(session_data, f, indent=2), mode=0o600
+            )
 
         self._log_debug(f"Saved session to {target_path} (base_url: {self.base_url}, csrf: {self.csrf[:8]}...)")
         return target_path
@@ -836,21 +859,37 @@ class EmpowerDashboardClient:
 
     def load_session(self, filepath: Optional[Union[str, Path]] = None) -> bool:
         """Load session cookies and CSRF token from saved file."""
-        target_path = Path(filepath or self.session_file)
+        # The session file selects cookies and the auth origin, so refuse a
+        # symlinked file or parent exactly as save_session does, and open it
+        # with O_NOFOLLOW relative to the pinned directory (#138).
+        try:
+            target_path = _safe_fs_path(filepath or self.session_file, description="session file path", action="read")
+        except ValueError as e:
+            self.logger.warning("Ignoring session file: %s", e)
+            return False
         if not target_path.exists():
             return False
 
         try:
-            with open(target_path, "r", encoding="utf-8") as f:
+            with PinnedDir(target_path.parent) as session_dir, session_dir.open_text(target_path.name) as f:
                 data = json.load(f)
 
             self.csrf = data.get("csrf", "") if isinstance(data.get("csrf"), str) else ""
             raw_username = data.get("username")
             if isinstance(raw_username, str) and not self.username:
                 self.username = clean_api_text(raw_username)
-            if data.get("base_url") and isinstance(data.get("base_url"), str):
-                self.base_url = data["base_url"].rstrip("/")
-                self.api_endpoint = f"{self.base_url}/api"
+            stored_base_url = data.get("base_url")
+            if stored_base_url and isinstance(stored_base_url, str):
+                stored_base_url = stored_base_url.rstrip("/")
+                if stored_base_url in _SESSION_RESTORABLE_BASE_URLS:
+                    self.base_url = stored_base_url
+                    self.api_endpoint = f"{self.base_url}/api"
+                elif stored_base_url != self.base_url:
+                    self.logger.warning(
+                        "Ignoring unrecognized base_url in session file %s; keeping %s",
+                        target_path,
+                        self.base_url,
+                    )
 
             self._load_cookies(data.get("cookies", {}))
             self._log_debug(f"Loaded session from {target_path} (base_url: {self.base_url}, csrf: {self.csrf[:8]}...)")

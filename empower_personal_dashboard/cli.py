@@ -35,7 +35,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, TextIO, Union
 
 from .client import (
     DEFAULT_BASE_URL,
@@ -345,74 +345,89 @@ def format_currency(val: float) -> str:
 
 def export_balances_csv(balances: DashboardBalances, filepath: Path) -> None:
     filepath.parent.mkdir(parents=True, exist_ok=True)
-    fieldnames = ["institution", "account_name", "account_type", "balance", "is_asset", "currency", "last_refreshed"]
     with open(filepath, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for acct in balances.accounts:
-            writer.writerow({
-                "institution": acct.get("firm_name", ""),
-                "account_name": acct.get("account_name", ""),
-                "account_type": acct.get("account_type", ""),
-                "balance": acct.get("balance", 0.0),
-                "is_asset": acct.get("is_asset", True),
-                "currency": acct.get("currency", "USD"),
-                "last_refreshed": acct.get("last_refreshed", ""),
-            })
+        write_balances_csv(balances, f)
+
+
+def write_balances_csv(balances: DashboardBalances, f: TextIO) -> None:
+    """Write balances CSV rows to an open text handle (opened with ``newline=""``)."""
+    fieldnames = ["institution", "account_name", "account_type", "balance", "is_asset", "currency", "last_refreshed"]
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
+    writer.writeheader()
+    for acct in balances.accounts:
+        writer.writerow({
+            "institution": acct.get("firm_name", ""),
+            "account_name": acct.get("account_name", ""),
+            "account_type": acct.get("account_type", ""),
+            "balance": acct.get("balance", 0.0),
+            "is_asset": acct.get("is_asset", True),
+            "currency": acct.get("currency", "USD"),
+            "last_refreshed": acct.get("last_refreshed", ""),
+        })
 
 
 def export_holdings_csv(holdings: DashboardHoldings, filepath: Path) -> None:
     filepath.parent.mkdir(parents=True, exist_ok=True)
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        write_holdings_csv(holdings, f)
+
+
+def write_holdings_csv(holdings: DashboardHoldings, f: TextIO) -> None:
+    """Write holdings CSV rows to an open text handle (opened with ``newline=""``)."""
     fieldnames = [
         "account_name", "ticker", "cusip", "description", "holding_type",
         "quantity", "price", "value", "cost_basis", "holding_percentage",
         "one_day_percent_change", "one_day_value_change"
     ]
-    with open(filepath, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for h in holdings.holdings:
-            writer.writerow({
-                "account_name": h.get("account_name", ""),
-                "ticker": h.get("ticker", ""),
-                "cusip": h.get("cusip", ""),
-                "description": h.get("description", ""),
-                "holding_type": h.get("holding_type", ""),
-                "quantity": h.get("quantity", 0.0),
-                "price": h.get("price", 0.0),
-                "value": h.get("value", 0.0),
-                "cost_basis": h.get("cost_basis") if h.get("cost_basis") is not None else "",
-                "holding_percentage": h.get("holding_percentage") if h.get("holding_percentage") is not None else "",
-                "one_day_percent_change": h.get("one_day_percent_change") if h.get("one_day_percent_change") is not None else "",
-                "one_day_value_change": h.get("one_day_value_change") if h.get("one_day_value_change") is not None else "",
-            })
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
+    writer.writeheader()
+    for h in holdings.holdings:
+        writer.writerow({
+            "account_name": h.get("account_name", ""),
+            "ticker": h.get("ticker", ""),
+            "cusip": h.get("cusip", ""),
+            "description": h.get("description", ""),
+            "holding_type": h.get("holding_type", ""),
+            "quantity": h.get("quantity", 0.0),
+            "price": h.get("price", 0.0),
+            "value": h.get("value", 0.0),
+            "cost_basis": h.get("cost_basis") if h.get("cost_basis") is not None else "",
+            "holding_percentage": h.get("holding_percentage") if h.get("holding_percentage") is not None else "",
+            "one_day_percent_change": h.get("one_day_percent_change") if h.get("one_day_percent_change") is not None else "",
+            "one_day_value_change": h.get("one_day_value_change") if h.get("one_day_value_change") is not None else "",
+        })
 
 
 def export_transactions_csv(transactions: DashboardTransactions, filepath: Path) -> None:
     filepath.parent.mkdir(parents=True, exist_ok=True)
+    with open(filepath, "w", newline="", encoding="utf-8") as f:
+        write_transactions_csv(transactions, f)
+
+
+def write_transactions_csv(transactions: DashboardTransactions, f: TextIO) -> None:
+    """Write transactions CSV rows to an open text handle (opened with ``newline=""``)."""
     fieldnames = [
         "transaction_date", "account_name", "description", "amount",
         "transaction_type", "investment_type", "symbol", "price", "quantity",
         "status", "category_id", "user_transaction_id"
     ]
-    with open(filepath, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for tx in transactions.transactions:
-            writer.writerow({
-                "transaction_date": tx.get("transaction_date", ""),
-                "account_name": tx.get("account_name", ""),
-                "description": tx.get("description", ""),
-                "amount": tx.get("amount", 0.0),
-                "transaction_type": tx.get("transaction_type", ""),
-                "investment_type": tx.get("investment_type") or "",
-                "symbol": tx.get("symbol") or "",
-                "price": tx.get("price") if tx.get("price") is not None else "",
-                "quantity": tx.get("quantity") if tx.get("quantity") is not None else "",
-                "status": tx.get("status", ""),
-                "category_id": tx.get("category_id") if tx.get("category_id") is not None else "",
-                "user_transaction_id": tx.get("user_transaction_id", ""),
-            })
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
+    writer.writeheader()
+    for tx in transactions.transactions:
+        writer.writerow({
+            "transaction_date": tx.get("transaction_date", ""),
+            "account_name": tx.get("account_name", ""),
+            "description": tx.get("description", ""),
+            "amount": tx.get("amount", 0.0),
+            "transaction_type": tx.get("transaction_type", ""),
+            "investment_type": tx.get("investment_type") or "",
+            "symbol": tx.get("symbol") or "",
+            "price": tx.get("price") if tx.get("price") is not None else "",
+            "quantity": tx.get("quantity") if tx.get("quantity") is not None else "",
+            "status": tx.get("status", ""),
+            "category_id": tx.get("category_id") if tx.get("category_id") is not None else "",
+            "user_transaction_id": tx.get("user_transaction_id", ""),
+        })
 
 
 def render_balances_markdown(balances: DashboardBalances) -> str:

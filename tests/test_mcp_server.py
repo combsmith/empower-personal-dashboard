@@ -802,7 +802,7 @@ class TestMCPServer(unittest.TestCase):
             ):
                 # Local file write FileNotFoundError should report EXPORT_ERROR, not AUTH_REQUIRED
                 with patch(
-                    "empower_personal_dashboard.mcp_server.export_balances_csv",
+                    "empower_personal_dashboard.mcp_server.write_balances_csv",
                     side_effect=FileNotFoundError("No such file or directory: empower_balances.csv"),
                 ):
                     res = await self.server.call_tool(
@@ -928,6 +928,173 @@ class TestMCPServer(unittest.TestCase):
                 create_mcp_server()
             self.assertIn("pip install 'empower-personal-dashboard[mcp]'", str(ctx.exception))
 
+
+class TestExportDataDirectoryPinning(unittest.TestCase):
+    """Regression tests for issue #133: export writes stay in the authorized directory."""
+
+    @staticmethod
+    def _swap_dir_for_symlink(victim_dir: Path, attacker_dir: Path) -> Path:
+        """Rename ``victim_dir`` aside and plant a symlink to ``attacker_dir`` in its place."""
+        moved = victim_dir.with_name(victim_dir.name + "_moved")
+        os.rename(victim_dir, moved)
+        victim_dir.symlink_to(attacker_dir, target_is_directory=True)
+        return moved
+
+    def _racing_server(self, victim_dir: Path, attacker_dir: Path, moved: dict):
+        """Build a server whose balances fetch swaps the destination for a symlink mid-export."""
+        racing_client = EmpowerDashboardClient(mock_mode=True)
+        real_fetch = racing_client.fetch_balances
+
+        def fetch_then_swap():
+            moved["dir"] = self._swap_dir_for_symlink(victim_dir, attacker_dir)
+            return real_fetch()
+
+        racing_client.fetch_balances = fetch_then_swap
+        return create_mcp_server(client=racing_client)
+
+    def _run_export(self, server, args):
+        async def call():
+            res = await server.call_tool("export_data", args)
+            return json.loads(res.content[0].text)
+
+        return asyncio.run(call())
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
+    def test_destination_swapped_during_fetch_does_not_redirect_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            export_root = root / "exports"
+            victim_dir = export_root / "run"
+            victim_dir.mkdir(parents=True)
+            attacker_dir = root / "outside"
+            attacker_dir.mkdir()
+            outside_file = attacker_dir / "empower_balances.json"
+            outside_file.write_text("OUTSIDE-EXPORT-ROOT", encoding="utf-8")
+            moved: dict = {}
+
+            with patch.dict(os.environ, {"EMPOWER_EXPORT_ROOT": str(export_root)}):
+                with patch("empower_personal_dashboard.mcp_server.FastMCP", FastMCP or _FakeFastMCP):
+                    server = self._racing_server(victim_dir, attacker_dir, moved)
+                    payload = self._run_export(
+                        server, {"destination_dir": str(victim_dir), "scope": "balances", "export_csv": True}
+                    )
+
+            self.assertEqual(outside_file.read_text(encoding="utf-8"), "OUTSIDE-EXPORT-ROOT")
+            self.assertEqual([p.name for p in attacker_dir.iterdir()], ["empower_balances.json"])
+            self.assertEqual(payload["status"], "success", payload)
+            pinned = moved["dir"]
+            self.assertEqual(
+                sorted(p.name for p in pinned.iterdir()), ["empower_balances.csv", "empower_balances.json"]
+            )
+            self.assertIn("accounts", json.loads((pinned / "empower_balances.json").read_text(encoding="utf-8")))
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
+    def test_beancount_export_refuses_destination_swapped_during_fetch(self) -> None:
+        # The JSON write lands in the pinned directory; the path-based ledger
+        # writer then refuses the now-symlinked destination (beancount.py guard),
+        # so nothing reaches the directory outside the export root.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir).resolve()
+            export_root = root / "exports"
+            victim_dir = export_root / "run"
+            victim_dir.mkdir(parents=True)
+            attacker_dir = root / "outside"
+            attacker_dir.mkdir()
+            moved: dict = {}
+
+            with patch.dict(os.environ, {"EMPOWER_EXPORT_ROOT": str(export_root)}):
+                with patch("empower_personal_dashboard.mcp_server.FastMCP", FastMCP or _FakeFastMCP):
+                    server = self._racing_server(victim_dir, attacker_dir, moved)
+                    payload = self._run_export(
+                        server,
+                        {
+                            "destination_dir": str(victim_dir),
+                            "scope": "balances",
+                            "export_csv": False,
+                            "export_beancount": True,
+                        },
+                    )
+
+            self.assertEqual(payload["status"], "error", payload)
+            self.assertEqual(list(attacker_dir.iterdir()), [])
+            self.assertEqual([p.name for p in moved["dir"].iterdir()], ["empower_balances.json"])
+
+    def test_export_writes_preserve_existing_file_mode(self) -> None:
+        # Atomic replacement must not widen (or reset) an existing export's mode.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir).resolve()
+            existing = dest / "empower_balances.json"
+            existing.write_text("{}", encoding="utf-8")
+            os.chmod(existing, 0o600)
+            with patch.dict(os.environ, {"EMPOWER_EXPORT_ROOT": str(dest)}):
+                with patch("empower_personal_dashboard.mcp_server.FastMCP", FastMCP or _FakeFastMCP):
+                    server = create_mcp_server(client=EmpowerDashboardClient(mock_mode=True))
+                    payload = self._run_export(
+                        server, {"destination_dir": str(dest), "scope": "balances", "export_csv": False}
+                    )
+            self.assertEqual(payload["status"], "success", payload)
+            self.assertEqual(existing.stat().st_mode & 0o777, 0o600)
+            self.assertIn("accounts", json.loads(existing.read_text(encoding="utf-8")))
+
+    def test_new_export_files_created_owner_only_despite_permissive_umask(self) -> None:
+        # Exports hold financial data: a new file is 0600 regardless of umask.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir).resolve()
+            previous = os.umask(0o022)
+            try:
+                with patch.dict(os.environ, {"EMPOWER_EXPORT_ROOT": str(dest)}):
+                    with patch("empower_personal_dashboard.mcp_server.FastMCP", FastMCP or _FakeFastMCP):
+                        server = create_mcp_server(client=EmpowerDashboardClient(mock_mode=True))
+                        payload = self._run_export(
+                            server, {"destination_dir": str(dest), "scope": "balances", "export_csv": True}
+                        )
+            finally:
+                os.umask(previous)
+            self.assertEqual(payload["status"], "success", payload)
+            written = sorted(p for p in dest.iterdir() if p.is_file())
+            self.assertTrue(written)
+            for path in written:
+                with self.subTest(file=path.name):
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_export_failure_mid_write_keeps_previous_file_and_closes_pinned_dir(self) -> None:
+        # A serialization failure part-way through a CSV must leave the previous
+        # export intact, leave no temp file, report EXPORT_ERROR and release the
+        # pinned directory fd.
+        from empower_personal_dashboard._safe_io import PinnedDir
+
+        closed = []
+
+        class _TrackingPinnedDir(PinnedDir):
+            def close(self) -> None:
+                closed.append(self.path)
+                super().close()
+
+        def explode(balances, f) -> None:
+            f.write("institution,account_name\n")
+            raise RuntimeError("synthetic serialization failure")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dest = Path(tmpdir).resolve()
+            previous_csv = dest / "empower_balances.csv"
+            previous_csv.write_text("PREVIOUS-EXPORT", encoding="utf-8")
+            with patch.dict(os.environ, {"EMPOWER_EXPORT_ROOT": str(dest)}):
+                with patch("empower_personal_dashboard.mcp_server.FastMCP", FastMCP or _FakeFastMCP):
+                    server = create_mcp_server(client=EmpowerDashboardClient(mock_mode=True))
+                    with (
+                        patch("empower_personal_dashboard.mcp_server.PinnedDir", _TrackingPinnedDir),
+                        patch("empower_personal_dashboard.mcp_server.write_balances_csv", side_effect=explode),
+                    ):
+                        payload = self._run_export(
+                            server, {"destination_dir": str(dest), "scope": "balances", "export_csv": True}
+                        )
+            self.assertEqual(payload["status"], "error", payload)
+            self.assertEqual(payload["error_code"], "EXPORT_ERROR")
+            self.assertEqual(previous_csv.read_text(encoding="utf-8"), "PREVIOUS-EXPORT")
+            self.assertEqual(
+                sorted(p.name for p in dest.iterdir()), ["empower_balances.csv", "empower_balances.json"]
+            )
+            self.assertEqual(closed, [dest])
 
 
 if __name__ == "__main__":
