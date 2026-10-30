@@ -8,11 +8,19 @@ Security Model:
     in their local terminal. The MCP server runs headlessly using the persisted
     session token (~/.empower_personal_dashboard_session.json, mode 0600).
     Passwords and 2FA SMS/Email codes are NEVER accepted or routed through the LLM context.
+
+    Client authentication (HTTP/SSE): every connected MCP client acts with the owner's
+    Empower session. The SSE transport therefore binds to loopback by default and refuses
+    to start on any other address unless a bearer token is configured via
+    EMPOWER_MCP_AUTH_TOKEN, which is then checked on every HTTP request.
 """
 
 from __future__ import annotations
 
 import argparse
+import hmac
+import inspect
+import ipaddress
 import json
 import logging
 import os
@@ -1269,6 +1277,198 @@ def create_mcp_server(
     return server
 
 
+# --- HTTP (SSE) transport client authentication (issue #136) ---------------------------
+#
+# Every MCP client that reaches the HTTP app acts with the owner's Empower session, so
+# the HTTP transport is only served unauthenticated on loopback. A small pure-ASGI
+# middleware is used instead of the SDK's own auth hooks: FastMCP's ``auth`` /
+# ``token_verifier`` constructor arguments are OAuth resource-server plumbing whose
+# signatures differ between mcp 1.x and 2.x (and are absent in early 1.x), while a
+# wrapper around the returned ASGI app behaves the same on every supported SDK version.
+
+MCP_AUTH_TOKEN_ENV = "EMPOWER_MCP_AUTH_TOKEN"
+_MIN_MCP_AUTH_TOKEN_LENGTH = 32
+_TOKEN_HINT = "python3 -c 'import secrets; print(secrets.token_urlsafe(32))'"
+
+
+class MCPTransportSecurityError(RuntimeError):
+    """Raised when an HTTP MCP transport would be served without adequate authentication."""
+
+
+def _is_loopback_host(host: Optional[str]) -> bool:
+    """Return True only for bind addresses that are reachable from this machine alone."""
+    candidate = (host or "").strip()
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+    if candidate.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        # Wildcards ("", "0.0.0.0", "::" parse but are not loopback) and arbitrary
+        # hostnames are treated as reachable from the network.
+        return False
+
+
+def _resolve_http_auth_token(
+    host: str,
+    require_auth: bool,
+    environ: Optional[Dict[str, str]] = None,
+) -> Optional[str]:
+    """Return the bearer token to enforce, or None when unauthenticated loopback is allowed.
+
+    Raises:
+        MCPTransportSecurityError: if the configuration would expose the owner's session.
+            Messages never include the token value.
+    """
+    env = os.environ if environ is None else environ
+    token = (env.get(MCP_AUTH_TOKEN_ENV) or "").strip()
+    if token:
+        if len(token) < _MIN_MCP_AUTH_TOKEN_LENGTH:
+            raise MCPTransportSecurityError(
+                f"{MCP_AUTH_TOKEN_ENV} is too short; use a random secret of at least "
+                f"{_MIN_MCP_AUTH_TOKEN_LENGTH} characters (for example: {_TOKEN_HINT})."
+            )
+        if not token.isascii() or any(not (33 <= ord(ch) <= 126) for ch in token):
+            raise MCPTransportSecurityError(
+                f"{MCP_AUTH_TOKEN_ENV} must contain only printable ASCII characters without "
+                f"spaces (for example: {_TOKEN_HINT})."
+            )
+        return token
+    if require_auth:
+        raise MCPTransportSecurityError(
+            f"--require-auth was given but {MCP_AUTH_TOKEN_ENV} is not set. Set it to a random "
+            f"secret of at least {_MIN_MCP_AUTH_TOKEN_LENGTH} characters (for example: {_TOKEN_HINT})."
+        )
+    if not _is_loopback_host(host):
+        raise MCPTransportSecurityError(
+            f"Refusing to serve the MCP server over HTTP on non-loopback host '{host}' without "
+            f"client authentication: any client that can reach it would get the owner's Empower "
+            f"data. Either bind to 127.0.0.1 (the default), or set {MCP_AUTH_TOKEN_ENV} to a random "
+            f"secret of at least {_MIN_MCP_AUTH_TOKEN_LENGTH} characters (for example: {_TOKEN_HINT}) "
+            f"and send it from clients as 'Authorization: Bearer <token>'."
+        )
+    return None
+
+
+class BearerTokenAuthMiddleware:
+    """Pure-ASGI middleware requiring ``Authorization: Bearer <token>`` on every request.
+
+    Works with any ASGI app (FastMCP ``sse_app()`` on mcp 1.x and 2.x). The token is
+    compared in constant time and is never logged or echoed back. Lifespan events pass
+    through untouched; unauthenticated HTTP requests get 401 and websockets are closed.
+    """
+
+    def __init__(self, app: Any, token: str) -> None:
+        """Initialize the middleware with an ASGI app and a bearer token to enforce."""
+        if not token:
+            raise ValueError("BearerTokenAuthMiddleware requires a non-empty token")
+        self.app = app
+        self._expected = token.encode("utf-8")
+
+    def _is_authorized(self, headers: Any) -> bool:
+        """Check if the request headers contain a valid bearer token (constant-time comparison)."""
+        values = [value for key, value in headers if key.lower() == b"authorization"]
+        if len(values) != 1:
+            return False
+        scheme, _, credentials = values[0].strip().partition(b" ")
+        if scheme.lower() != b"bearer":
+            return False
+        return hmac.compare_digest(credentials.strip(), self._expected)
+
+    async def __call__(self, scope: Dict[str, Any], receive: Callable[..., Any], send: Callable[..., Any]) -> None:
+        """Enforce bearer token on HTTP and WebSocket, pass through lifespan and authorized requests."""
+        scope_type = scope.get("type")
+        if scope_type not in ("http", "websocket") or self._is_authorized(scope.get("headers") or []):
+            await self.app(scope, receive, send)
+            return
+        logger.warning("Rejected MCP %s request with a missing or invalid bearer token.", scope_type)
+        if scope_type == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        body = json.dumps(
+            {"error": "invalid_token", "error_description": "Missing or invalid bearer token."}
+        ).encode("utf-8")
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(body)).encode("ascii")),
+                    (b"www-authenticate", b'Bearer realm="empower-mcp"'),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+def _host_check_disabled_settings() -> Any:
+    """Return SDK transport-security settings with the Host/Origin check turned off.
+
+    Returns None if the SDK has no ``TransportSecuritySettings``; mcp 2.x then falls back
+    to its own default, which is stricter (not weaker) for loopback binds.
+    """
+    try:
+        from mcp.server.transport_security import TransportSecuritySettings
+    except ImportError:
+        return None
+    return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+
+def build_sse_app(server: Any, *, host: str = "127.0.0.1", auth_token: Optional[str] = None) -> Any:
+    """Build the SSE ASGI app for ``server`` and wrap it with bearer auth when a token is given.
+
+    Portable across mcp 1.x (``sse_app(mount_path=None)``, transport security on
+    ``server.settings``) and mcp 2.x (``sse_app(*, host=..., transport_security=...)``).
+    Both SDKs enable a Host/Origin (DNS-rebinding) check for loopback hosts that only
+    accepts localhost names. It is kept for unauthenticated loopback use. It is turned off
+    when a bearer token is configured (the token is the control, and a tunnel or reverse
+    proxy forwards a public Host header) and on non-loopback hosts, matching mcp 2.x.
+    """
+    if not auth_token and not _is_loopback_host(host):
+        raise MCPTransportSecurityError(
+            f"Refusing to build an unauthenticated SSE app for non-loopback host '{host}'. "
+            f"Provide a bearer token (see {MCP_AUTH_TOKEN_ENV})."
+        )
+    sse_app = getattr(server, "sse_app", None)
+    if not callable(sse_app):
+        raise MCPTransportSecurityError(
+            "The installed 'mcp' package does not provide an SSE app; upgrade it with "
+            "pip install --upgrade 'empower-personal-dashboard[mcp]'."
+        )
+    try:
+        params = inspect.signature(sse_app).parameters
+    except (TypeError, ValueError):
+        params = {}  # type: ignore[assignment]
+    if "host" in params:
+        sdk_kwargs: Dict[str, Any] = {"host": host}
+        if auth_token and "transport_security" in params:
+            sdk_kwargs["transport_security"] = _host_check_disabled_settings()
+        app = sse_app(**sdk_kwargs)
+    else:
+        # mcp 1.x reads settings.transport_security only while building the app, so
+        # override it for this call and restore it: later builds keep the SDK default.
+        settings = getattr(server, "settings", None)
+        saved = getattr(settings, "transport_security", None)
+        override = bool(auth_token or not _is_loopback_host(host)) and saved is not None
+        if override:
+            settings.transport_security = None
+        try:
+            app = sse_app()
+        finally:
+            if override:
+                settings.transport_security = saved
+    return BearerTokenAuthMiddleware(app, auth_token) if auth_token else app
+
+
+def _serve_http_app(app: Any, *, host: str, port: int, log_level: str = "info") -> None:
+    """Serve an ASGI app with uvicorn (a dependency of the mcp SDK). Binds a real socket."""
+    import uvicorn
+
+    uvicorn.run(app, host=host, port=port, log_level=log_level)
+
+
 def main() -> None:
     """CLI entrypoint for running the empower-mcp server."""
     parser = argparse.ArgumentParser(
@@ -1279,7 +1479,11 @@ Examples:
   # Run in standard stdio mode (Claude Desktop, Antigravity CLI, Cursor)
   empower-mcp
 
-  # Run in SSE HTTP mode for networked or containerized deployment
+  # Run in SSE HTTP mode on loopback (default host 127.0.0.1)
+  empower-mcp --transport sse --port 8000
+
+  # Serve SSE on all interfaces: a bearer token is mandatory off loopback
+  export EMPOWER_MCP_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
   empower-mcp --transport sse --port 8000 --host 0.0.0.0
 
   # Run in offline sandbox mode (synthetic mock data, no network required)
@@ -1301,7 +1505,18 @@ Examples:
     parser.add_argument(
         "--host",
         default="127.0.0.1",
-        help="Host address to bind when using SSE transport (default: 127.0.0.1)",
+        help=(
+            "Host address to bind when using SSE transport (default: 127.0.0.1). "
+            f"Non-loopback hosts require {MCP_AUTH_TOKEN_ENV}."
+        ),
+    )
+    parser.add_argument(
+        "--require-auth",
+        action="store_true",
+        help=(
+            f"Require the {MCP_AUTH_TOKEN_ENV} bearer token for SSE even on loopback "
+            "(recommended behind a tunnel or reverse proxy, or on shared machines)"
+        ),
     )
     parser.add_argument(
         "--session-path",
@@ -1334,6 +1549,14 @@ Examples:
         )
         sys.exit(1)
 
+    http_auth_token: Optional[str] = None
+    if args.transport != "stdio":
+        try:
+            http_auth_token = _resolve_http_auth_token(args.host, args.require_auth)
+        except MCPTransportSecurityError as exc:
+            sys.stderr.write(f"Error: {exc}\n")
+            sys.exit(2)
+
     client: Optional[EmpowerDashboardClient] = None
 
     def _mcp_password_provider() -> Optional[str]:
@@ -1358,7 +1581,29 @@ Examples:
     if args.transport == "stdio":
         server.run(transport="stdio")
     elif args.transport == "sse":
-        server.run(transport="sse", host=args.host, port=args.port)
+        if http_auth_token:
+            logger.info(f"SSE transport: bearer token authentication enabled ({MCP_AUTH_TOKEN_ENV}).")
+            if not _is_loopback_host(args.host):
+                logger.warning(
+                    "SSE transport on %s serves plain HTTP: the bearer token is sent unencrypted. "
+                    "Terminate TLS at a reverse proxy or tunnel.",
+                    args.host,
+                )
+        else:
+            logger.warning(
+                f"SSE transport on loopback {args.host}:{args.port} without client authentication; "
+                f"any local process can use this Empower session. Set {MCP_AUTH_TOKEN_ENV} to require a token."
+            )
+        # uvicorn resolves the host via getaddrinfo, which rejects bracketed IPv6 like "[::1]".
+        bind_host = args.host.strip()
+        if bind_host.startswith("[") and bind_host.endswith("]"):
+            bind_host = bind_host[1:-1]
+        try:
+            app = build_sse_app(server, host=bind_host, auth_token=http_auth_token)
+        except MCPTransportSecurityError as exc:
+            sys.stderr.write(f"Error: {exc}\n")
+            sys.exit(2)
+        _serve_http_app(app, host=bind_host, port=args.port, log_level="debug" if args.debug else "info")
 
 
 if __name__ == "__main__":
