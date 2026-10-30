@@ -1403,13 +1403,28 @@ class BearerTokenAuthMiddleware:
         await send({"type": "http.response.body", "body": body})
 
 
+def _host_check_disabled_settings() -> Any:
+    """Return SDK transport-security settings with the Host/Origin check turned off.
+
+    Returns None if the SDK has no ``TransportSecuritySettings``; mcp 2.x then falls back
+    to its own default, which is stricter (not weaker) for loopback binds.
+    """
+    try:
+        from mcp.server.transport_security import TransportSecuritySettings
+    except ImportError:
+        return None
+    return TransportSecuritySettings(enable_dns_rebinding_protection=False)
+
+
 def build_sse_app(server: Any, *, host: str = "127.0.0.1", auth_token: Optional[str] = None) -> Any:
     """Build the SSE ASGI app for ``server`` and wrap it with bearer auth when a token is given.
 
     Portable across mcp 1.x (``sse_app(mount_path=None)``, transport security on
-    ``server.settings``) and mcp 2.x (``sse_app(*, host=...)``). Both SDKs enable
-    Host/Origin (DNS-rebinding) checks for loopback hosts; for other hosts that check
-    only allows localhost names, so it is turned off there, matching mcp 2.x behaviour.
+    ``server.settings``) and mcp 2.x (``sse_app(*, host=..., transport_security=...)``).
+    Both SDKs enable a Host/Origin (DNS-rebinding) check for loopback hosts that only
+    accepts localhost names. It is kept for unauthenticated loopback use. It is turned off
+    when a bearer token is configured (the token is the control, and a tunnel or reverse
+    proxy forwards a public Host header) and on non-loopback hosts, matching mcp 2.x.
     """
     if not auth_token and not _is_loopback_host(host):
         raise MCPTransportSecurityError(
@@ -1427,12 +1442,23 @@ def build_sse_app(server: Any, *, host: str = "127.0.0.1", auth_token: Optional[
     except (TypeError, ValueError):
         params = {}  # type: ignore[assignment]
     if "host" in params:
-        app = sse_app(host=host)
+        sdk_kwargs: Dict[str, Any] = {"host": host}
+        if auth_token and "transport_security" in params:
+            sdk_kwargs["transport_security"] = _host_check_disabled_settings()
+        app = sse_app(**sdk_kwargs)
     else:
+        # mcp 1.x reads settings.transport_security only while building the app, so
+        # override it for this call and restore it: later builds keep the SDK default.
         settings = getattr(server, "settings", None)
-        if (auth_token or not _is_loopback_host(host)) and getattr(settings, "transport_security", None) is not None:
+        saved = getattr(settings, "transport_security", None)
+        override = bool(auth_token or not _is_loopback_host(host)) and saved is not None
+        if override:
             settings.transport_security = None
-        app = sse_app()
+        try:
+            app = sse_app()
+        finally:
+            if override:
+                settings.transport_security = saved
     return BearerTokenAuthMiddleware(app, auth_token) if auth_token else app
 
 

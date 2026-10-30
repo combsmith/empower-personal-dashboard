@@ -934,11 +934,21 @@ _TEST_TOKEN = "synthetic-test-token-" + "a" * 32
 _WRONG_TOKEN = "synthetic-test-token-" + "b" * 32
 
 
-async def _drive_asgi(app, *, scope_type="http", method="GET", path="/sse", headers=None, host_header=b"127.0.0.1:8000"):
+async def _drive_asgi(
+    app,
+    *,
+    scope_type="http",
+    method="GET",
+    path="/sse",
+    headers=None,
+    host_header=b"127.0.0.1:8000",
+    extra_raw_headers=None,
+):
     """Drive an ASGI app in-process (no sockets) and return the messages it sent."""
     raw_headers = [(b"host", host_header)]
     for key, value in (headers or {}).items():
         raw_headers.append((key.lower().encode("latin-1"), value.encode("latin-1")))
+    raw_headers.extend(extra_raw_headers or [])
     scope = {
         "type": scope_type,
         "asgi": {"version": "3.0"},
@@ -1103,22 +1113,27 @@ class TestMCPHttpTransportAuth(unittest.TestCase):
         )
 
         inner = _RecordingApp()
+        sdk_default = object()
 
         class _V1Server:
             def __init__(self) -> None:
-                self.settings = types.SimpleNamespace(transport_security=object())
+                self.settings = types.SimpleNamespace(transport_security=sdk_default)
+                self.seen = []
 
             def sse_app(self, mount_path=None):
+                self.seen.append(self.settings.transport_security)
                 return inner
 
         loopback = _V1Server()
         self.assertIs(build_sse_app(loopback, host="127.0.0.1"), inner)
-        self.assertIsNotNone(loopback.settings.transport_security)
+        self.assertEqual(loopback.seen, [sdk_default])
 
         remote = _V1Server()
         wrapped = build_sse_app(remote, host="0.0.0.0", auth_token=_TEST_TOKEN)
         self.assertIsInstance(wrapped, BearerTokenAuthMiddleware)
-        self.assertIsNone(remote.settings.transport_security)
+        self.assertEqual(remote.seen, [None])
+        # Restored afterwards, so the server object is not left without the check.
+        self.assertIs(remote.settings.transport_security, sdk_default)
 
     def test_build_sse_app_mcp2_style_passes_host(self) -> None:
         from empower_personal_dashboard.mcp_server import build_sse_app
@@ -1213,14 +1228,18 @@ class TestMCPHttpTransportAuth(unittest.TestCase):
         )
         self.assertEqual(_response_status(authed_nonloop), 400)
 
-    def _run_main(self, argv, env=None, build_error=None):
+    def _run_main(self, argv, env=None, build_error=None, real_build=False, server=None):
         """Run mcp_server.main() with the server, app builder, and socket runner stubbed."""
         from empower_personal_dashboard import mcp_server
 
-        fake_server = MagicMock()
+        fake_server = server if server is not None else MagicMock()
         serve = MagicMock()
         built_app = object()
-        build = MagicMock(return_value=built_app, side_effect=build_error)
+        build = (
+            MagicMock(wraps=mcp_server.build_sse_app)
+            if real_build
+            else MagicMock(return_value=built_app, side_effect=build_error)
+        )
         stderr = __import__("io").StringIO()
         environ = {k: v for k, v in os.environ.items() if k != "EMPOWER_MCP_AUTH_TOKEN"}
         environ.update(env or {})
@@ -1248,6 +1267,143 @@ class TestMCPHttpTransportAuth(unittest.TestCase):
             serve=serve,
             app=built_app,
         )
+
+    def test_middleware_rejects_duplicate_authorization_headers(self) -> None:
+        from empower_personal_dashboard.mcp_server import BearerTokenAuthMiddleware
+
+        inner = _RecordingApp()
+        app = BearerTokenAuthMiddleware(inner, _TEST_TOKEN)
+        good = ("Bearer " + _TEST_TOKEN).encode("latin-1")
+        messages = asyncio.run(
+            _drive_asgi(app, extra_raw_headers=[(b"authorization", good), (b"Authorization", good)])
+        )
+        self.assertEqual(_response_status(messages), 401)
+        self.assertEqual(inner.calls, [])
+
+    def test_resolve_token_strips_surrounding_whitespace(self) -> None:
+        from empower_personal_dashboard.mcp_server import _resolve_http_auth_token
+
+        token = _resolve_http_auth_token(
+            "0.0.0.0", require_auth=False, environ={"EMPOWER_MCP_AUTH_TOKEN": f"  {_TEST_TOKEN}\n"}
+        )
+        self.assertEqual(token, _TEST_TOKEN)
+
+    def test_build_sse_app_mcp2_style_disables_host_check_only_when_token_set(self) -> None:
+        """mcp 2.x: with a token, forwarded public Host headers must not be rejected (421)."""
+        from empower_personal_dashboard.mcp_server import (
+            BearerTokenAuthMiddleware,
+            build_sse_app,
+        )
+
+        calls = []
+        inner = _RecordingApp()
+
+        class _V2Server:
+            def sse_app(self, *, host="127.0.0.1", transport_security=None):
+                calls.append({"host": host, "transport_security": transport_security})
+                return inner
+
+        # Hermetic on Python 3.9 (no 'mcp'): provide a stand-in settings class only when
+        # the real SDK module is unavailable.
+        sdk_modules = {}
+        try:
+            import mcp.server.transport_security  # noqa: F401
+        except ImportError:
+            stand_in = types.ModuleType("mcp.server.transport_security")
+            stand_in.TransportSecuritySettings = lambda **kwargs: types.SimpleNamespace(**kwargs)
+            sdk_modules["mcp.server.transport_security"] = stand_in
+
+        # No token on loopback: leave transport_security unset so the SDK auto-enables
+        # its Host/Origin (DNS-rebinding) check.
+        self.assertIs(build_sse_app(_V2Server(), host="127.0.0.1"), inner)
+        self.assertIsNone(calls[-1]["transport_security"])
+
+        # Token on loopback (tunnel / reverse-proxy case): check explicitly disabled.
+        with patch.dict("sys.modules", sdk_modules):
+            wrapped = build_sse_app(_V2Server(), host="127.0.0.1", auth_token=_TEST_TOKEN)
+        self.assertIsInstance(wrapped, BearerTokenAuthMiddleware)
+        settings = calls[-1]["transport_security"]
+        self.assertIsNotNone(settings)
+        self.assertFalse(settings.enable_dns_rebinding_protection)
+
+    def test_build_sse_app_mcp1_style_clears_host_check_when_token_set_on_loopback(self) -> None:
+        from empower_personal_dashboard.mcp_server import build_sse_app
+
+        sdk_default = object()
+
+        class _V1Server:
+            def __init__(self) -> None:
+                self.settings = types.SimpleNamespace(transport_security=sdk_default)
+                self.seen = []
+
+            def sse_app(self, mount_path=None):
+                self.seen.append(self.settings.transport_security)
+                return _RecordingApp()
+
+        server = _V1Server()
+        build_sse_app(server, host="127.0.0.1", auth_token=_TEST_TOKEN)
+        build_sse_app(server, host="127.0.0.1")
+        # Token build saw the check disabled; the later unauthenticated build kept it.
+        self.assertEqual(server.seen, [None, sdk_default])
+        self.assertIs(server.settings.transport_security, sdk_default)
+
+    @unittest.skipIf(FastMCP is None, "requires the optional 'mcp' package")
+    def test_real_sdk_host_check_disabled_only_when_token_configured(self) -> None:
+        """A proxy forwarding a public Host to a loopback bind works only with a token."""
+        from empower_personal_dashboard.mcp_server import build_sse_app
+
+        server = create_mcp_server(client=EmpowerDashboardClient(mock_mode=True))
+        public_host = b"mcp.example.test"
+        authed = asyncio.run(
+            _drive_asgi(
+                build_sse_app(server, host="127.0.0.1", auth_token=_TEST_TOKEN),
+                method="POST",
+                path="/messages/",
+                headers={"Authorization": f"Bearer {_TEST_TOKEN}", "Content-Type": "application/json"},
+                host_header=public_host,
+            )
+        )
+        self.assertEqual(_response_status(authed), 400)  # reached the SDK handler, not 421
+
+        unauth_loopback = asyncio.run(
+            _drive_asgi(
+                build_sse_app(server, host="127.0.0.1"),
+                method="POST",
+                path="/messages/",
+                headers={"Content-Type": "application/json"},
+                host_header=public_host,
+            )
+        )
+        self.assertEqual(_response_status(unauth_loopback), 421)  # DNS-rebinding check kept
+
+    def test_main_warns_plaintext_bearer_token_only_off_loopback(self) -> None:
+        env = {"EMPOWER_MCP_AUTH_TOKEN": _TEST_TOKEN}
+        remote = self._run_main(["--transport", "sse", "--host", "0.0.0.0"], env=env)
+        self.assertIn("unencrypted", remote.logs)
+        self.assertIn("WARNING", remote.logs)
+        local = self._run_main(["--transport", "sse", "--require-auth"], env=env)
+        self.assertNotIn("unencrypted", local.logs)
+
+    def test_main_wires_real_build_sse_app_to_server(self) -> None:
+        from empower_personal_dashboard.mcp_server import BearerTokenAuthMiddleware
+
+        inner = _RecordingApp()
+
+        class _V2Server:
+            def sse_app(self, *, host="127.0.0.1", transport_security=None):
+                return inner
+
+        result = self._run_main(
+            ["--transport", "sse", "--host", "0.0.0.0", "--port", "8124"],
+            env={"EMPOWER_MCP_AUTH_TOKEN": _TEST_TOKEN},
+            real_build=True,
+            server=_V2Server(),
+        )
+        self.assertIsNone(result.exit_code)
+        served = result.serve.call_args[0][0]
+        self.assertIsInstance(served, BearerTokenAuthMiddleware)
+        self.assertIs(served.app, inner)
+        self.assertEqual(result.serve.call_args[1]["port"], 8124)
 
     def test_main_refuses_sse_on_all_interfaces_without_token(self) -> None:
         result = self._run_main(["--transport", "sse", "--host", "0.0.0.0"])
