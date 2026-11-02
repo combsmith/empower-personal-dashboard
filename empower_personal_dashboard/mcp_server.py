@@ -1344,8 +1344,9 @@ def _resolve_http_auth_token(
             Messages never include the token value.
     """
     env = os.environ if environ is None else environ
-    token = (env.get(MCP_AUTH_TOKEN_ENV) or "").strip()
-    if token:
+    raw_token = env.get(MCP_AUTH_TOKEN_ENV) or ""
+    token = raw_token.strip()
+    if raw_token:
         _validate_auth_token(token, MCP_AUTH_TOKEN_ENV)
         return token
     if require_auth:

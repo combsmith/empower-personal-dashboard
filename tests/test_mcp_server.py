@@ -1099,7 +1099,7 @@ class TestMCPHttpTransportAuth(unittest.TestCase):
         from empower_personal_dashboard.mcp_server import _resolve_http_auth_token
 
         self.assertIsNone(_resolve_http_auth_token("127.0.0.1", require_auth=False, environ={}))
-        self.assertIsNone(_resolve_http_auth_token("localhost", require_auth=False, environ={"EMPOWER_MCP_AUTH_TOKEN": "  "}))
+        self.assertIsNone(_resolve_http_auth_token("localhost", require_auth=False, environ={"EMPOWER_MCP_AUTH_TOKEN": ""}))
 
     def test_resolve_token_require_auth_on_loopback(self) -> None:
         from empower_personal_dashboard.mcp_server import (
@@ -1369,6 +1369,19 @@ class TestMCPHttpTransportAuth(unittest.TestCase):
         )
         self.assertEqual(_response_status(messages), 401)
         self.assertEqual(inner.calls, [])
+
+    def test_resolve_token_refuses_whitespace_only_token_on_loopback(self) -> None:
+        """A blank-looking token is a misconfiguration, not a request for no authentication."""
+        from empower_personal_dashboard.mcp_server import (
+            MCP_AUTH_TOKEN_ENV,
+            MCPTransportSecurityError,
+            _resolve_http_auth_token,
+        )
+
+        with self.assertRaises(MCPTransportSecurityError):
+            _resolve_http_auth_token("127.0.0.1", False, environ={MCP_AUTH_TOKEN_ENV: " " * 32})
+        # An empty value stays "unset", the usual meaning in .env files.
+        self.assertIsNone(_resolve_http_auth_token("127.0.0.1", False, environ={MCP_AUTH_TOKEN_ENV: ""}))
 
     def test_resolve_token_strips_surrounding_whitespace(self) -> None:
         from empower_personal_dashboard.mcp_server import _resolve_http_auth_token
