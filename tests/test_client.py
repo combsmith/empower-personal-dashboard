@@ -2212,6 +2212,20 @@ class TestLocalFileHandlingHardening(unittest.TestCase):
                 handler.close()
             self.assertEqual(log_path.read_text(encoding="utf-8"), "EARLIER\n")
 
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits")
+    def test_log_handler_closes_fd_when_tightening_fails(self):
+        # A log that cannot be tightened must fail loudly without leaking the descriptor.
+        from empower_personal_dashboard.client import _PrivateFileHandler
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir).resolve() / "debug.log"
+            with patch("os.fchmod", side_effect=PermissionError("not owner")), patch(
+                "os.close", wraps=os.close
+            ) as close:
+                with self.assertRaises(PermissionError):
+                    _PrivateFileHandler(log_path, mode="a", encoding="utf-8")
+            close.assert_called_once()
+
     def test_private_file_handler_refuses_symlinked_log(self):
         # O_NOFOLLOW closes the window after the _safe_fs_path symlink check.
         from empower_personal_dashboard.client import _PrivateFileHandler

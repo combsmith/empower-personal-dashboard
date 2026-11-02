@@ -115,13 +115,13 @@ class _PrivateFileHandler(logging.FileHandler):
         for optional in ("O_NOFOLLOW", "O_CLOEXEC", "O_BINARY"):
             flags |= getattr(os, optional, 0)
         fd = os.open(self.baseFilename, flags, 0o600)
-        try:
-            if hasattr(os, "fchmod"):
+        if hasattr(os, "fchmod"):
+            try:
                 os.fchmod(fd, os.fstat(fd).st_mode & 0o600)
-            return os.fdopen(fd, self.mode, encoding=self.encoding, errors=self.errors)
-        except BaseException:
-            os.close(fd)
-            raise
+            except OSError:
+                os.close(fd)
+                raise
+        return os.fdopen(fd, self.mode, encoding=self.encoding, errors=self.errors)
 
 
 def _clean_history_balances(raw_balances: Any) -> Dict[str, float]:
