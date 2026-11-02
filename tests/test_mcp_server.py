@@ -1169,11 +1169,14 @@ class TestMCPHttpTransportAuth(unittest.TestCase):
         self.assertEqual(messages, [{"type": "websocket.close", "code": 1008}])
         self.assertEqual(inner.calls, ["lifespan"])
 
-    def test_middleware_requires_non_empty_token(self) -> None:
+    def test_middleware_rejects_weak_or_malformed_token_without_echoing_it(self) -> None:
         from empower_personal_dashboard.mcp_server import BearerTokenAuthMiddleware
 
-        with self.assertRaises(ValueError):
-            BearerTokenAuthMiddleware(_RecordingApp(), "")
+        for bad in ("", "short-synthetic", "synthetic token with spaces " + "c" * 32, "synthetic-é-" + "d" * 32):
+            with self.assertRaises(ValueError) as ctx:
+                BearerTokenAuthMiddleware(_RecordingApp(), bad)
+            if bad:
+                self.assertNotIn(bad, str(ctx.exception))
 
     def test_build_sse_app_mcp1_style_clears_localhost_only_host_check_off_loopback(self) -> None:
         """mcp 1.x: sse_app(mount_path) reads transport_security from server.settings."""
@@ -1252,10 +1255,11 @@ class TestMCPHttpTransportAuth(unittest.TestCase):
             def sse_app(self, *, host="127.0.0.1", transport_security=None):
                 return _RecordingApp()
 
-        for bad in ("short-synthetic", "synthetic token with spaces " + "c" * 32, "synthetic-é-" + "d" * 32):
+        for bad in ("", "short-synthetic", "synthetic token with spaces " + "c" * 32, "synthetic-é-" + "d" * 32):
             with self.assertRaises(MCPTransportSecurityError) as ctx:
                 build_sse_app(_Server(), host="127.0.0.1", auth_token=bad)
-            self.assertNotIn(bad, str(ctx.exception))
+            if bad:
+                self.assertNotIn(bad, str(ctx.exception))
             self.assertIn("auth_token", str(ctx.exception))
 
     def test_serve_http_app_delegates_to_uvicorn(self) -> None:

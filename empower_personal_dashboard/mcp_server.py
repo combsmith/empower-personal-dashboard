@@ -1366,8 +1366,10 @@ class BearerTokenAuthMiddleware:
 
     def __init__(self, app: Any, token: str) -> None:
         """Initialize the middleware with an ASGI app and a bearer token to enforce."""
-        if not token:
-            raise ValueError("BearerTokenAuthMiddleware requires a non-empty token")
+        try:
+            _validate_auth_token(token or "", "token")
+        except MCPTransportSecurityError as exc:
+            raise ValueError(str(exc)) from exc
         self.app = app
         self._expected = token.encode("utf-8")
 
@@ -1431,7 +1433,7 @@ def build_sse_app(server: Any, *, host: str = "127.0.0.1", auth_token: Optional[
     when a bearer token is configured (the token is the control, and a tunnel or reverse
     proxy forwards a public Host header) and on non-loopback hosts, matching mcp 2.x.
     """
-    if auth_token:
+    if auth_token is not None:
         _validate_auth_token(auth_token, "auth_token")
     elif not _is_loopback_host(host):
         raise MCPTransportSecurityError(
@@ -1450,7 +1452,7 @@ def build_sse_app(server: Any, *, host: str = "127.0.0.1", auth_token: Optional[
         params = {}  # type: ignore[assignment]
     if "host" in params:
         sdk_kwargs: Dict[str, Any] = {"host": host}
-        if auth_token and "transport_security" in params:
+        if auth_token is not None and "transport_security" in params:
             sdk_kwargs["transport_security"] = _host_check_disabled_settings()
         app = sse_app(**sdk_kwargs)
     else:
@@ -1458,7 +1460,7 @@ def build_sse_app(server: Any, *, host: str = "127.0.0.1", auth_token: Optional[
         # override it for this call and restore it: later builds keep the SDK default.
         settings = getattr(server, "settings", None)
         saved = getattr(settings, "transport_security", None)
-        override = bool(auth_token or not _is_loopback_host(host)) and saved is not None
+        override = bool(auth_token is not None or not _is_loopback_host(host)) and saved is not None
         if override:
             settings.transport_security = None
         try:
@@ -1466,7 +1468,7 @@ def build_sse_app(server: Any, *, host: str = "127.0.0.1", auth_token: Optional[
         finally:
             if override:
                 settings.transport_security = saved
-    return BearerTokenAuthMiddleware(app, auth_token) if auth_token else app
+    return BearerTokenAuthMiddleware(app, auth_token) if auth_token is not None else app
 
 
 def _serve_http_app(app: Any, *, host: str, port: int, log_level: str = "info") -> None:

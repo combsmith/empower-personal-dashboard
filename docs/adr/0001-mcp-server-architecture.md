@@ -41,7 +41,7 @@ We decided to implement **Option 1: Co-located Native FastMCP Server with Out-of
 **Context.** Every MCP client acts with the owner's Empower session. `stdio` is authenticated by construction (only the parent process holds the pipe). The `sse` HTTP app from the SDK had no client authentication, so binding it to `0.0.0.0`, which the CLI help used to suggest, exposed balances, holdings and transactions to anything that could reach the port (CWE-306).
 
 **Decision.**
-1. `--host` stays `127.0.0.1` by default. Unauthenticated HTTP is allowed **only** on a loopback bind (`localhost`, `127.0.0.0/8`, `::1`).
+1. `--host` stays `127.0.0.1` by default. Unauthenticated HTTP is allowed **only** on a loopback bind (`localhost`, `127.0.0.1`, `::1`; other loopback addresses such as `127.0.0.2` require a token).
 2. A non-loopback bind **refuses to start** (exit code 2, clear message on stderr) unless `EMPOWER_MCP_AUTH_TOKEN` holds a random secret of at least 32 printable ASCII characters. `--require-auth` extends that requirement to loopback for tunnel, reverse-proxy and multi-user setups. Once a token is configured, it is enforced on every HTTP request whatever the bind address.
 3. Enforcement is a small pure-ASGI `BearerTokenAuthMiddleware` around the SDK's `sse_app()`. It uses `hmac.compare_digest`, returns `401` with `WWW-Authenticate: Bearer`, closes websockets with 1008, and passes lifespan events through. The token comes only from the environment (never argv) and is never logged.
 4. `main()` builds the app and runs uvicorn itself instead of calling `server.run(transport="sse", ...)`. mcp 1.x `FastMCP.run()` does not accept `host`/`port`, so the HTTP path is now version-portable too.
