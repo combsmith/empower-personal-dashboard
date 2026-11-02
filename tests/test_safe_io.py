@@ -7,6 +7,7 @@ import stat
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from empower_personal_dashboard import _safe_io
@@ -108,22 +109,27 @@ class TestPinnedDir(unittest.TestCase):
     @unittest.skipUnless(os.name == "posix", "POSIX permission bits")
     def test_write_atomic_does_not_copy_special_mode_bits(self) -> None:
         # Only the rwx permission bits of an existing file carry over; setuid,
-        # setgid and sticky bits are dropped.
-        # (A write already clears setuid on most kernels; the sticky bit is not
-        # cleared that way, so it is the case that really exercises the mask.)
+        # setgid and sticky bits are dropped. The mode handed to fchmod is checked
+        # as well as the result, because a write clears setuid on most kernels
+        # with or without the mask, and some platforms refuse these bits on files.
         target = self.root / "export.json"
+        exercised = []
         for special in (stat.S_ISUID, stat.S_ISVTX):
+            target.write_text("{}", encoding="utf-8")
+            try:
+                os.chmod(target, 0o640 | special)
+            except OSError:
+                continue  # this platform refuses the bit on a regular file
+            if not os.stat(target).st_mode & special:
+                continue  # filesystem silently dropped the bit
+            exercised.append(special)
             with self.subTest(bit=oct(special)):
-                target.write_text("{}", encoding="utf-8")
-                try:
-                    os.chmod(target, 0o640 | special)
-                except OSError:
-                    self.skipTest(f"cannot set {oct(special)} on a regular file here")
-                if not os.stat(target).st_mode & special:
-                    continue  # filesystem silently dropped the bit
-                with PinnedDir(self.root) as d:
-                    d.write_atomic("export.json", lambda f: f.write("NEW"))
+                with patch.object(_safe_io.os, "fchmod", wraps=os.fchmod) as fchmod:
+                    with PinnedDir(self.root) as d:
+                        d.write_atomic("export.json", lambda f: f.write("NEW"))
+                self.assertEqual([call.args[1] for call in fchmod.call_args_list], [0o640])
                 self.assertEqual(stat.S_IMODE(os.stat(target).st_mode), 0o640)
+        self.assertTrue(exercised, "no special mode bit could be set, so the mask was never exercised")
 
     def test_path_fallback_round_trip(self) -> None:
         original = _safe_io.DIR_FD_SUPPORTED
