@@ -106,8 +106,8 @@ class _PrivateFileHandler(logging.FileHandler):
     """``FileHandler`` that creates its log owner-only (0600) and never follows a symlink.
 
     The detailed log receives (sanitized) API response bodies, so it must not be
-    created group/world-readable under a permissive umask (#134). The mode only
-    applies on creation; an existing file keeps its permissions.
+    created group/world-readable under a permissive umask (#134), and a log left
+    readable by an older version is tightened to owner-only when opened.
     """
 
     def _open(self):  # type: ignore[override]
@@ -115,7 +115,13 @@ class _PrivateFileHandler(logging.FileHandler):
         for optional in ("O_NOFOLLOW", "O_CLOEXEC", "O_BINARY"):
             flags |= getattr(os, optional, 0)
         fd = os.open(self.baseFilename, flags, 0o600)
-        return os.fdopen(fd, self.mode, encoding=self.encoding, errors=self.errors)
+        try:
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, os.fstat(fd).st_mode & 0o600)
+            return os.fdopen(fd, self.mode, encoding=self.encoding, errors=self.errors)
+        except BaseException:
+            os.close(fd)
+            raise
 
 
 def _clean_history_balances(raw_balances: Any) -> Dict[str, float]:

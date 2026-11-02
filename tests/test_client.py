@@ -2196,6 +2196,22 @@ class TestLocalFileHandlingHardening(unittest.TestCase):
             self.assertIs(outcome.get("loaded"), False)
 
     @unittest.skipUnless(hasattr(os, "symlink") and hasattr(os, "O_NOFOLLOW"), "requires O_NOFOLLOW")
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits")
+    def test_existing_log_is_tightened_to_owner_only_on_open(self):
+        # #134: a log created at 0644 by an older version must not stay readable.
+        from empower_personal_dashboard.client import _PrivateFileHandler
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            log_path = Path(tmpdir).resolve() / "debug.log"
+            log_path.write_text("EARLIER\n", encoding="utf-8")
+            os.chmod(log_path, 0o644)
+            handler = _PrivateFileHandler(log_path, mode="a", encoding="utf-8")
+            try:
+                self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
+            finally:
+                handler.close()
+            self.assertEqual(log_path.read_text(encoding="utf-8"), "EARLIER\n")
+
     def test_private_file_handler_refuses_symlinked_log(self):
         # O_NOFOLLOW closes the window after the _safe_fs_path symlink check.
         from empower_personal_dashboard.client import _PrivateFileHandler
