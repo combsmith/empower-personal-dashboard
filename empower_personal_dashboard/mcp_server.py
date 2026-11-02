@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import hmac
 import inspect
-import ipaddress
 import json
 import logging
 import os
@@ -1297,18 +1296,32 @@ class MCPTransportSecurityError(RuntimeError):
 
 
 def _is_loopback_host(host: Optional[str]) -> bool:
-    """Return True only for bind addresses that are reachable from this machine alone."""
+    """Return True only for loopback hosts protected by the MCP SDK defaults."""
     candidate = (host or "").strip()
     if candidate.startswith("[") and candidate.endswith("]"):
         candidate = candidate[1:-1]
     if candidate.lower() == "localhost":
         return True
-    try:
-        return ipaddress.ip_address(candidate).is_loopback
-    except ValueError:
-        # Wildcards ("", "0.0.0.0", "::" parse but are not loopback) and arbitrary
-        # hostnames are treated as reachable from the network.
-        return False
+    return candidate in {"127.0.0.1", "::1"}
+
+
+def _validate_auth_token(token: str, source_name: str = "auth_token") -> None:
+    """Validate bearer token length and character set.
+
+    Raises:
+        MCPTransportSecurityError: if the token is too short or contains invalid characters.
+            The exception message never includes the token value.
+    """
+    if len(token) < _MIN_MCP_AUTH_TOKEN_LENGTH:
+        raise MCPTransportSecurityError(
+            f"{source_name} is too short; use a random secret of at least "
+            f"{_MIN_MCP_AUTH_TOKEN_LENGTH} characters (for example: {_TOKEN_HINT})."
+        )
+    if not token.isascii() or any(not (33 <= ord(ch) <= 126) for ch in token):
+        raise MCPTransportSecurityError(
+            f"{source_name} must contain only printable ASCII characters without "
+            f"spaces (for example: {_TOKEN_HINT})."
+        )
 
 
 def _resolve_http_auth_token(
@@ -1325,16 +1338,7 @@ def _resolve_http_auth_token(
     env = os.environ if environ is None else environ
     token = (env.get(MCP_AUTH_TOKEN_ENV) or "").strip()
     if token:
-        if len(token) < _MIN_MCP_AUTH_TOKEN_LENGTH:
-            raise MCPTransportSecurityError(
-                f"{MCP_AUTH_TOKEN_ENV} is too short; use a random secret of at least "
-                f"{_MIN_MCP_AUTH_TOKEN_LENGTH} characters (for example: {_TOKEN_HINT})."
-            )
-        if not token.isascii() or any(not (33 <= ord(ch) <= 126) for ch in token):
-            raise MCPTransportSecurityError(
-                f"{MCP_AUTH_TOKEN_ENV} must contain only printable ASCII characters without "
-                f"spaces (for example: {_TOKEN_HINT})."
-            )
+        _validate_auth_token(token, MCP_AUTH_TOKEN_ENV)
         return token
     if require_auth:
         raise MCPTransportSecurityError(
@@ -1427,7 +1431,9 @@ def build_sse_app(server: Any, *, host: str = "127.0.0.1", auth_token: Optional[
     when a bearer token is configured (the token is the control, and a tunnel or reverse
     proxy forwards a public Host header) and on non-loopback hosts, matching mcp 2.x.
     """
-    if not auth_token and not _is_loopback_host(host):
+    if auth_token:
+        _validate_auth_token(auth_token, "auth_token")
+    elif not _is_loopback_host(host):
         raise MCPTransportSecurityError(
             f"Refusing to build an unauthenticated SSE app for non-loopback host '{host}'. "
             f"Provide a bearer token (see {MCP_AUTH_TOKEN_ENV})."

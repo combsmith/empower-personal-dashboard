@@ -1068,9 +1068,19 @@ class TestMCPHttpTransportAuth(unittest.TestCase):
     def test_is_loopback_host(self) -> None:
         from empower_personal_dashboard.mcp_server import _is_loopback_host
 
-        for host in ("127.0.0.1", "127.0.0.5", "::1", "[::1]", "localhost", "LOCALHOST"):
+        for host in ("127.0.0.1", "::1", "[::1]", "localhost", "LOCALHOST"):
             self.assertTrue(_is_loopback_host(host), host)
-        for host in ("0.0.0.0", "::", "", "192.168.0.10", "10.0.0.1", "example.test", "localhost.example.test"):
+        for host in (
+            "127.0.0.5",
+            "127.1.2.3",
+            "0.0.0.0",
+            "::",
+            "",
+            "192.168.0.10",
+            "10.0.0.1",
+            "example.test",
+            "localhost.example.test",
+        ):
             self.assertFalse(_is_loopback_host(host), host)
 
     def test_resolve_token_refuses_non_loopback_without_token(self) -> None:
@@ -1079,7 +1089,7 @@ class TestMCPHttpTransportAuth(unittest.TestCase):
             _resolve_http_auth_token,
         )
 
-        for host in ("0.0.0.0", "::", "192.168.0.10"):
+        for host in ("0.0.0.0", "::", "192.168.0.10", "127.0.0.5"):
             with self.assertRaises(MCPTransportSecurityError) as ctx:
                 _resolve_http_auth_token(host, require_auth=False, environ={})
             self.assertIn("EMPOWER_MCP_AUTH_TOKEN", str(ctx.exception))
@@ -1228,9 +1238,25 @@ class TestMCPHttpTransportAuth(unittest.TestCase):
             def sse_app(self, *, host="127.0.0.1"):
                 raise AssertionError("SDK app must not be built when refusing")
 
-        for host in ("0.0.0.0", "::", "192.168.0.10"):
+        for host in ("0.0.0.0", "::", "192.168.0.10", "127.0.0.5"):
             with self.assertRaises(MCPTransportSecurityError):
                 build_sse_app(_Server(), host=host)
+
+    def test_build_sse_app_rejects_weak_or_malformed_token_without_echoing_it(self) -> None:
+        from empower_personal_dashboard.mcp_server import (
+            MCPTransportSecurityError,
+            build_sse_app,
+        )
+
+        class _Server:
+            def sse_app(self, *, host="127.0.0.1", transport_security=None):
+                return _RecordingApp()
+
+        for bad in ("short-synthetic", "synthetic token with spaces " + "c" * 32, "synthetic-é-" + "d" * 32):
+            with self.assertRaises(MCPTransportSecurityError) as ctx:
+                build_sse_app(_Server(), host="127.0.0.1", auth_token=bad)
+            self.assertNotIn(bad, str(ctx.exception))
+            self.assertIn("auth_token", str(ctx.exception))
 
     def test_serve_http_app_delegates_to_uvicorn(self) -> None:
         from empower_personal_dashboard.mcp_server import _serve_http_app
