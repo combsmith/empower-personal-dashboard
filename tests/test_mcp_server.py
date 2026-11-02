@@ -1466,6 +1466,91 @@ class TestMCPHttpTransportAuth(unittest.TestCase):
         )
         self.assertEqual(_response_status(unauth_loopback), 421)  # DNS-rebinding check kept
 
+    @unittest.skipIf(FastMCP is None, "requires the optional 'mcp' package")
+    def test_real_sdk_keeps_host_check_for_every_accepted_loopback_spelling(self) -> None:
+        """Each spelling accepted without a token must end up with the SDK's rebinding check."""
+        from empower_personal_dashboard.mcp_server import build_sse_app
+
+        for host in ("127.0.0.1", "localhost", "LOCALHOST", "::1", "[::1]", " localhost "):
+            with self.subTest(host=host):
+                server = create_mcp_server(client=EmpowerDashboardClient(mock_mode=True))
+                response = asyncio.run(
+                    _drive_asgi(
+                        build_sse_app(server, host=host),
+                        method="POST",
+                        path="/messages/",
+                        headers={"Content-Type": "application/json"},
+                        host_header=b"rebinding.example.test",
+                    )
+                )
+                self.assertEqual(_response_status(response), 421)
+
+    def test_normalize_bind_host_returns_sdk_protected_spelling(self) -> None:
+        from empower_personal_dashboard.mcp_server import _normalize_bind_host
+
+        cases = {
+            "127.0.0.1": "127.0.0.1",
+            " 127.0.0.1 ": "127.0.0.1",
+            "localhost": "localhost",
+            "LOCALHOST": "localhost",
+            "::1": "::1",
+            "[::1]": "::1",
+            "0.0.0.0": "0.0.0.0",
+            "[2001:db8::1]": "2001:db8::1",
+            "Example.Test": "Example.Test",
+        }
+        for raw, expected in cases.items():
+            self.assertEqual(_normalize_bind_host(raw), expected, raw)
+
+    def test_build_sse_app_passes_sdk_protected_spelling_to_sdk(self) -> None:
+        from empower_personal_dashboard.mcp_server import build_sse_app
+
+        seen = []
+
+        class _V2Server:
+            def sse_app(self, *, host="127.0.0.1"):
+                seen.append(host)
+                return _RecordingApp()
+
+        for raw, expected in (("LOCALHOST", "localhost"), ("[::1]", "::1"), (" 127.0.0.1 ", "127.0.0.1")):
+            build_sse_app(_V2Server(), host=raw)
+            self.assertEqual(seen[-1], expected, raw)
+
+    def test_main_binds_sdk_protected_spelling(self) -> None:
+        result = self._run_main(["--transport", "sse", "--host", "LOCALHOST"])
+        self.assertIsNone(result.exit_code)
+        result.build.assert_called_once_with(result.server, host="localhost", auth_token=None)
+        self.assertEqual(result.serve.call_args[1]["host"], "localhost")
+
+    def test_build_sse_app_refuses_unauthenticated_loopback_when_sdk_has_no_host_check(self) -> None:
+        """mcp < 1.23 leaves transport_security unset, so a rebinding page could reach the tools."""
+        from empower_personal_dashboard.mcp_server import (
+            MCP_AUTH_TOKEN_ENV,
+            BearerTokenAuthMiddleware,
+            MCPTransportSecurityError,
+            build_sse_app,
+        )
+
+        calls = []
+
+        class _OldV1Server:
+            def __init__(self) -> None:
+                self.settings = types.SimpleNamespace(transport_security=None)
+
+            def sse_app(self, mount_path=None):
+                calls.append(mount_path)
+                return _RecordingApp()
+
+        with self.assertRaises(MCPTransportSecurityError) as ctx:
+            build_sse_app(_OldV1Server(), host="127.0.0.1")
+        self.assertIn(MCP_AUTH_TOKEN_ENV, str(ctx.exception))
+        self.assertIn("1.23", str(ctx.exception))
+        self.assertEqual(calls, [])
+
+        # A token is the control, so the same SDK may still serve authenticated traffic.
+        wrapped = build_sse_app(_OldV1Server(), host="127.0.0.1", auth_token=_TEST_TOKEN)
+        self.assertIsInstance(wrapped, BearerTokenAuthMiddleware)
+
     def test_main_warns_plaintext_bearer_token_only_off_loopback(self) -> None:
         env = {"EMPOWER_MCP_AUTH_TOKEN": _TEST_TOKEN}
         remote = self._run_main(["--transport", "sse", "--host", "0.0.0.0"], env=env)

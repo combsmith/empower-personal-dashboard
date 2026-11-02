@@ -1295,14 +1295,22 @@ class MCPTransportSecurityError(RuntimeError):
     """Raised when an HTTP MCP transport would be served without adequate authentication."""
 
 
-def _is_loopback_host(host: Optional[str]) -> bool:
-    """Return True only for loopback hosts protected by the MCP SDK defaults."""
+def _normalize_bind_host(host: Optional[str]) -> str:
+    """Return the bindable spelling of ``host``: trimmed, unbracketed, lowercase ``localhost``.
+
+    The SDK enables its Host/Origin check only for the exact spellings ``127.0.0.1``,
+    ``localhost`` and ``::1``, and uvicorn cannot resolve bracketed IPv6, so every host
+    must go through here before it reaches either of them.
+    """
     candidate = (host or "").strip()
     if candidate.startswith("[") and candidate.endswith("]"):
         candidate = candidate[1:-1]
-    if candidate.lower() == "localhost":
-        return True
-    return candidate in {"127.0.0.1", "::1"}
+    return "localhost" if candidate.lower() == "localhost" else candidate
+
+
+def _is_loopback_host(host: Optional[str]) -> bool:
+    """Return True only for loopback hosts protected by the MCP SDK defaults."""
+    return _normalize_bind_host(host) in {"127.0.0.1", "localhost", "::1"}
 
 
 def _validate_auth_token(token: str, source_name: str = "auth_token") -> None:
@@ -1433,6 +1441,7 @@ def build_sse_app(server: Any, *, host: str = "127.0.0.1", auth_token: Optional[
     when a bearer token is configured (the token is the control, and a tunnel or reverse
     proxy forwards a public Host header) and on non-loopback hosts, matching mcp 2.x.
     """
+    host = _normalize_bind_host(host)
     if auth_token is not None:
         _validate_auth_token(auth_token, "auth_token")
     elif not _is_loopback_host(host):
@@ -1460,6 +1469,12 @@ def build_sse_app(server: Any, *, host: str = "127.0.0.1", auth_token: Optional[
         # override it for this call and restore it: later builds keep the SDK default.
         settings = getattr(server, "settings", None)
         saved = getattr(settings, "transport_security", None)
+        if auth_token is None and saved is None:
+            raise MCPTransportSecurityError(
+                "The installed 'mcp' package has no default Host/Origin check, so an "
+                "unauthenticated loopback server would be open to DNS rebinding. Upgrade to "
+                f"mcp>=1.23.0, or set {MCP_AUTH_TOKEN_ENV} and send it from clients."
+            )
         override = bool(auth_token is not None or not _is_loopback_host(host)) and saved is not None
         if override:
             settings.transport_security = None
@@ -1603,10 +1618,7 @@ Examples:
                 f"SSE transport on loopback {args.host}:{args.port} without client authentication; "
                 f"any local process can use this Empower session. Set {MCP_AUTH_TOKEN_ENV} to require a token."
             )
-        # uvicorn resolves the host via getaddrinfo, which rejects bracketed IPv6 like "[::1]".
-        bind_host = args.host.strip()
-        if bind_host.startswith("[") and bind_host.endswith("]"):
-            bind_host = bind_host[1:-1]
+        bind_host = _normalize_bind_host(args.host)
         try:
             app = build_sse_app(server, host=bind_host, auth_token=http_auth_token)
         except MCPTransportSecurityError as exc:

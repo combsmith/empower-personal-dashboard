@@ -58,6 +58,14 @@ class TestPackaging(unittest.TestCase):
         self.assertIn("test", opt_deps)
         self.assertIn("beancount", opt_deps)
 
+    def test_mcp_extras_require_sdk_with_default_host_check(self):
+        # mcp < 1.23 ships without the default DNS-rebinding check (CVE-2025-66416), which
+        # unauthenticated loopback SSE relies on (see docs/adr/0001-mcp-server-architecture.md).
+        opt_deps = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))["project"]["optional-dependencies"]
+        for extra in ("mcp", "all"):
+            specs = [dep for dep in opt_deps[extra] if dep.startswith("mcp")]
+            self.assertEqual(specs, ["mcp>=1.23.0; python_version >= '3.10'"], extra)
+
     def test_check_pypi_status_available(self):
         from scripts.pypi_onboard import PACKAGE_NAME, check_pypi_status
 
