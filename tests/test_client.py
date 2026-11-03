@@ -2195,16 +2195,19 @@ class TestLocalFileHandlingHardening(unittest.TestCase):
                 self.fail("load_session blocked on a FIFO session file")
             self.assertIs(outcome.get("loaded"), False)
 
-    @unittest.skipUnless(hasattr(os, "symlink") and hasattr(os, "O_NOFOLLOW"), "requires O_NOFOLLOW")
     @unittest.skipUnless(os.name == "posix", "POSIX permission bits")
     def test_existing_log_is_tightened_to_owner_only_on_open(self):
-        # #134: a log left group-readable by an older version must not stay that way.
+        # #134: a log created world-readable by an older version must not stay that way.
         from empower_personal_dashboard.client import _PrivateFileHandler
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = Path(tmpdir).resolve() / "debug.log"
-            log_path.write_text("EARLIER\n", encoding="utf-8")
-            os.chmod(log_path, 0o640)
+            previous = os.umask(0o022)
+            try:
+                log_path.write_text("EARLIER\n", encoding="utf-8")
+            finally:
+                os.umask(previous)
+            self.assertEqual(log_path.stat().st_mode & 0o777, 0o644)
             handler = _PrivateFileHandler(log_path, mode="a", encoding="utf-8")
             try:
                 self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
@@ -2226,6 +2229,7 @@ class TestLocalFileHandlingHardening(unittest.TestCase):
                     _PrivateFileHandler(log_path, mode="a", encoding="utf-8")
             close.assert_called_once()
 
+    @unittest.skipUnless(hasattr(os, "symlink") and hasattr(os, "O_NOFOLLOW"), "requires O_NOFOLLOW")
     def test_private_file_handler_refuses_symlinked_log(self):
         # O_NOFOLLOW closes the window after the _safe_fs_path symlink check.
         from empower_personal_dashboard.client import _PrivateFileHandler
