@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Session files can no longer select a custom API host; pass `--api-host` explicitly on each run. Only the legacy and migrated Empower hosts are restored from a session file ([#138](https://github.com/combsmith/empower-personal-dashboard/issues/138), [#153](https://github.com/combsmith/empower-personal-dashboard/pull/153)).
+
 ## [0.8.0] - 2026-10-24
 
 ### Added
