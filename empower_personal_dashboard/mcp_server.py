@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import hmac
 import inspect
+import ipaddress
 import json
 import logging
 import os
@@ -1316,11 +1317,16 @@ def _normalize_bind_host(host: Optional[str]) -> str:
 
     The SDK enables its Host/Origin check only for the exact spellings ``127.0.0.1``,
     ``localhost`` and ``::1``, and uvicorn cannot resolve bracketed IPv6, so every host
-    must go through here before it reaches either of them.
+    must go through here before it reaches either of them. Brackets are only removed
+    from an IPv6 literal, so the result is stable: normalizing it again changes nothing.
     """
     candidate = (host or "").strip()
     if candidate.startswith("[") and candidate.endswith("]"):
-        candidate = candidate[1:-1]
+        try:
+            ipaddress.IPv6Address(candidate[1:-1])
+        except ValueError:
+            return candidate
+        return candidate[1:-1]
     return "localhost" if candidate.lower() == "localhost" else candidate
 
 
@@ -1486,13 +1492,13 @@ def build_sse_app(server: Any, *, host: str = "127.0.0.1", auth_token: Optional[
         # override it for this call and restore it: later builds keep the SDK default.
         settings = getattr(server, "settings", None)
         saved = getattr(settings, "transport_security", None)
-        if auth_token is None and saved is None:
+        if auth_token is None and (saved is None or not getattr(saved, "enable_dns_rebinding_protection", True)):
             raise MCPTransportSecurityError(
-                "The installed 'mcp' package has no default Host/Origin check, so an "
-                "unauthenticated loopback server would be open to DNS rebinding. Upgrade to "
-                f"mcp>=1.23.0, or set {MCP_AUTH_TOKEN_ENV} and send it from clients."
+                "This MCP server has no active Host/Origin check, so an unauthenticated "
+                "loopback server would be open to DNS rebinding. Upgrade to mcp>=1.23.0 and "
+                f"leave the check on, or set {MCP_AUTH_TOKEN_ENV} and send it from clients."
             )
-        override = bool(auth_token is not None or not _is_loopback_host(host)) and saved is not None
+        override = auth_token is not None and saved is not None
         if override:
             settings.transport_security = None
         try:

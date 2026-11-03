@@ -1515,6 +1515,75 @@ class TestMCPHttpTransportAuth(unittest.TestCase):
         for raw, expected in cases.items():
             self.assertEqual(_normalize_bind_host(raw), expected, raw)
 
+    def test_normalize_bind_host_is_idempotent(self) -> None:
+        from empower_personal_dashboard.mcp_server import _normalize_bind_host
+
+        for raw in (
+            "127.0.0.1",
+            " LOCALHOST ",
+            "[::1]",
+            "[[::1]]",
+            "[ 127.0.0.1 ]",
+            "[ localhost ]",
+            "[localhost]",
+            "[ ::1 ]",
+            "[2001:db8::1]",
+            "",
+        ):
+            once = _normalize_bind_host(raw)
+            self.assertEqual(_normalize_bind_host(once), once, raw)
+
+    def test_loopback_check_rejects_brackets_around_non_ipv6(self) -> None:
+        from empower_personal_dashboard.mcp_server import _is_loopback_host
+
+        for raw in ("[[::1]]", "[ 127.0.0.1 ]", "[ localhost ]", "[localhost]", "[127.0.0.1]", "[ ::1 ]"):
+            self.assertFalse(_is_loopback_host(raw), raw)
+
+    def test_build_sse_app_refuses_spellings_the_sdk_would_not_protect(self) -> None:
+        """Whatever passes the loopback check must reach the SDK in its exact protected spelling."""
+        from empower_personal_dashboard.mcp_server import MCPTransportSecurityError, build_sse_app
+
+        calls = []
+
+        class _V2Server:
+            def sse_app(self, *, host="127.0.0.1"):
+                calls.append(host)
+                return _RecordingApp()
+
+        for raw in ("[[::1]]", "[ 127.0.0.1 ]", "[ localhost ]"):
+            with self.subTest(host=raw), self.assertRaises(MCPTransportSecurityError):
+                build_sse_app(_V2Server(), host=raw)
+        self.assertEqual(calls, [])
+
+    def test_build_sse_app_refuses_unauthenticated_loopback_when_host_check_disabled(self) -> None:
+        """mcp 1.x: a server built with the check switched off must not serve without a token."""
+        from empower_personal_dashboard.mcp_server import (
+            MCP_AUTH_TOKEN_ENV,
+            BearerTokenAuthMiddleware,
+            MCPTransportSecurityError,
+            build_sse_app,
+        )
+
+        calls = []
+
+        class _V1Server:
+            def __init__(self) -> None:
+                self.settings = types.SimpleNamespace(
+                    transport_security=types.SimpleNamespace(enable_dns_rebinding_protection=False)
+                )
+
+            def sse_app(self, mount_path=None):
+                calls.append(mount_path)
+                return _RecordingApp()
+
+        with self.assertRaises(MCPTransportSecurityError) as ctx:
+            build_sse_app(_V1Server(), host="127.0.0.1")
+        self.assertIn(MCP_AUTH_TOKEN_ENV, str(ctx.exception))
+        self.assertEqual(calls, [])
+
+        wrapped = build_sse_app(_V1Server(), host="127.0.0.1", auth_token=_TEST_TOKEN)
+        self.assertIsInstance(wrapped, BearerTokenAuthMiddleware)
+
     def test_build_sse_app_passes_sdk_protected_spelling_to_sdk(self) -> None:
         from empower_personal_dashboard.mcp_server import build_sse_app
 
