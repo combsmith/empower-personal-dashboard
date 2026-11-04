@@ -69,8 +69,12 @@ concurrency:
 
 jobs:
   pr-auto-review:
-    # Skip on fork-origin pull requests — forks cannot access org secrets required for auth.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.fork == false
+    # Skip on fork-origin and Dependabot-triggered pull requests — neither can access
+    # the org secrets required for auth, so the reusable's checkout fails on an empty
+    # token (#108). Dependabot PRs are still evaluated via workflow_run / check_suite.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.fork == false && github.actor != 'dependabot[bot]')
     permissions:
       pull-requests: read
       checks: read
