@@ -72,9 +72,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -e ".[mcp,test,mutation]"
+          # Hash-locked installs (OpenSSF Scorecard Pinned-Dependencies, #58).
+          # Regenerate requirements/mutation.txt with the command in its header.
+          python -m pip install --require-hashes -r requirements/mutation.txt
+          python -m pip install --no-deps --no-build-isolation -e .
 
       - name: Resolve mutant patterns
         id: patterns
