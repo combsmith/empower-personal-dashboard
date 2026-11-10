@@ -356,6 +356,21 @@ def _format_quantity(qty: float) -> str:
     return f"{qty:.6f}"
 
 
+def _format_balance_quantity(qty: float) -> str:
+    """Format a commodity quantity for a ``balance`` assertion at source precision.
+
+    Beancount infers a balance assertion's tolerance from the digits of the
+    asserted number, so always writing six decimals (``501.540000``) shrinks the
+    tolerance to ~0.000001 and makes the upstream's own 2-dp rounding fail
+    ``bean-check``. The six-decimal form is trimmed of trailing zeros but keeps
+    at least two decimals; a quantity with real 3–6 decimals keeps them, so no
+    assertion is looser than its data.
+    """
+    text = _format_quantity(qty)
+    whole, _, frac = text.partition(".")
+    return f"{whole}.{frac.rstrip('0').ljust(2, '0')}"
+
+
 def _format_cost(cost: float) -> str:
     """Format per-share cost basis or unit price with high precision."""
     return f"{cost:.6f}"
@@ -1696,7 +1711,7 @@ class BeancountGenerator:
             if round(total_qty, 6) == 0:
                 continue
             assert_date = reconciled_day if (b_account, ticker) in reconciled_keys else next_day
-            lines.append(f"{assert_date} balance {b_account} {_format_quantity(total_qty)} {ticker}\n")
+            lines.append(f"{assert_date} balance {b_account} {_format_balance_quantity(total_qty)} {ticker}\n")
 
     def generate_prices_bean(
         self,

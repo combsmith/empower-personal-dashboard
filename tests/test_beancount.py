@@ -368,8 +368,8 @@ class TestBeancountGenerator(unittest.TestCase):
         # so same-day trades are counted. These positions carry no deficit-floor
         # shortfall reconciliation (no transactions here), so they stay at D+1
         # rather than being pushed to D+2.
-        self.assertIn("2026-10-02 balance Assets:Vanguard:Brokerage 40.000000 VTI", output)
-        self.assertIn("2026-10-02 balance Assets:Vanguard:Brokerage 10.000000 BND", output)
+        self.assertIn("2026-10-02 balance Assets:Vanguard:Brokerage 40.00 VTI", output)
+        self.assertIn("2026-10-02 balance Assets:Vanguard:Brokerage 10.00 BND", output)
 
     def test_generate_prices_bean(self):
         output = self.generator.generate_prices_bean(self.synthetic_holdings)
@@ -1433,8 +1433,8 @@ class TestBeancountInvestmentGrowthReconstruction(unittest.TestCase):
             holdings=self.holdings_snapshot,
             transactions=self.transactions_history,
         )
-        self.assertIn("2024-10-02 balance Assets:AcmeBrokerage:TaxableBrokerage 60.000000 VTI", bal_output)
-        self.assertIn("2024-10-02 balance Assets:AcmeBrokerage:TaxableBrokerage 15.000000 AAPL", bal_output)
+        self.assertIn("2024-10-02 balance Assets:AcmeBrokerage:TaxableBrokerage 60.00 VTI", bal_output)
+        self.assertIn("2024-10-02 balance Assets:AcmeBrokerage:TaxableBrokerage 15.00 AAPL", bal_output)
 
     def test_modular_ledger_export_lifecycle_reconciliation(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1457,8 +1457,8 @@ class TestBeancountInvestmentGrowthReconstruction(unittest.TestCase):
             self.assertIn("15.000000 AAPL", tx_bean)
 
             bal_bean = (dest / "balances.bean").read_text(encoding="utf-8")
-            self.assertIn("60.000000 VTI", bal_bean)
-            self.assertIn("15.000000 AAPL", bal_bean)
+            self.assertIn("60.00 VTI", bal_bean)
+            self.assertIn("15.00 AAPL", bal_bean)
 
             accounts_bean = (dest / "accounts.bean").read_text(encoding="utf-8")
             self.assertIn("open Income:CapitalGains", accounts_bean)
@@ -1565,7 +1565,7 @@ class TestBeancountInvestmentGrowthReconstruction(unittest.TestCase):
             )
             content = target.read_text(encoding="utf-8")
             self.assertIn("50.000000 VTI", content)
-            self.assertIn("60.000000 VTI", content)
+            self.assertIn("balance Assets:AcmeBrokerage:TaxableBrokerage 60.00 VTI", content)
             self.assertIn("15.000000 AAPL", content)
             self.assertIn("open Income:CapitalGains", content)
             self.assertIn("open Income:Dividends USD", content)
@@ -1944,6 +1944,41 @@ class TestBeancountInvestmentGrowthReconstruction(unittest.TestCase):
         self.generator._emit_commodity_unit_assertions(holdings, {}, assertion_lines)
         self.assertIn("balance Assets:AcmeBrokerage:TaxableBrokerage 0.000001 MCR", "".join(assertion_lines))
 
+    def test_unit_balance_assertion_uses_source_precision(self):
+        # Issue #176: a 2-dp snapshot quantity must be asserted at 2 dp so that
+        # Beancount's inferred tolerance (~0.01) absorbs upstream rounding,
+        # while a quantity with real 6-dp precision keeps all six digits.
+        holdings = DashboardHoldings(
+            as_of_date="2026-11-06",
+            total_value=5329.56,
+            holdings=[
+                {
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "ticker": "FFFFX",
+                    "quantity": 501.54,
+                    "price": 10.0,
+                    "cost_basis": 5015.40,
+                },
+                {
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "ticker": "VTI",
+                    "quantity": 3.141592,
+                    "price": 100.0,
+                    "cost_basis": 314.16,
+                },
+            ],
+        )
+        lines: list = []
+        self.generator._emit_commodity_unit_assertions(holdings, {}, lines)
+        text = "".join(lines)
+        self.assertIn("2026-11-07 balance Assets:AcmeBrokerage:TaxableBrokerage 501.54 FFFFX\n", text)
+        self.assertNotIn("501.540000", text)
+        self.assertIn("2026-11-07 balance Assets:AcmeBrokerage:TaxableBrokerage 3.141592 VTI\n", text)
+        # Opening lots keep full six-decimal posting precision.
+        self.assertIn("501.540000 FFFFX", self.generator.generate_holdings_bean(holdings))
+
     def test_transactions_only_investment_account_not_asserted_as_cash(self):
         # empower --transactions --beancount fetches balances but not holdings.
         # The investment account's reported balance is portfolio value; it must
@@ -2133,8 +2168,8 @@ class TestBeancountInvestmentGrowthReconstruction(unittest.TestCase):
         )
         bal_output = self.generator.generate_balances_bean(holdings=holdings, transactions=txns)
         # Reconciled GE waits for D+2; unreconciled VTI stays at D+1.
-        self.assertIn("2024-10-03 balance Assets:AcmeBrokerage:TaxableBrokerage 5.000000 GE", bal_output)
-        self.assertIn("2024-10-02 balance Assets:AcmeBrokerage:TaxableBrokerage 60.000000 VTI", bal_output)
+        self.assertIn("2024-10-03 balance Assets:AcmeBrokerage:TaxableBrokerage 5.00 GE", bal_output)
+        self.assertIn("2024-10-02 balance Assets:AcmeBrokerage:TaxableBrokerage 60.00 VTI", bal_output)
 
     def test_repeated_append_does_not_duplicate_shortfall_reconciliation(self):
         """Re-appending the same snapshot keeps exactly one shortfall reconciliation."""
@@ -2242,7 +2277,7 @@ class TestBeancountInvestmentGrowthReconstruction(unittest.TestCase):
                 )
             content = ledger.read_text(encoding="utf-8")
         self.assertEqual(content.count("Snapshot Shortfall Reconciliation"), 1)
-        self.assertIn("2024-10-16 balance Assets:AcmeBrokerage:TaxableBrokerage 5.000000 GE", content)
+        self.assertIn("2024-10-16 balance Assets:AcmeBrokerage:TaxableBrokerage 5.00 GE", content)
         self.assertNotIn("2024-10-17 balance", content)
 
     def test_calculate_baseline_qty_floors_sign_flips_and_traded_shorts(self):
@@ -2506,7 +2541,7 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
             ],
         )
         output = self.generator.generate_balances_bean(balances, holdings)
-        self.assertIn("balance Assets:Vanguard:Brokerage -20.000000 TSLA", output)
+        self.assertIn("balance Assets:Vanguard:Brokerage -20.00 TSLA", output)
 
     def test_export_modular_ledger_atomic_on_failure(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -3257,7 +3292,7 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
             self.assertIn("Assets:Brokerage:SyntheticRothIRA    -1000.00 USD", tx_text)
             self.assertIn("Assets:Brokerage:SyntheticRothIRA     1000.00 USD", tx_text)
             # Balance assertion expects 1500 SPAXX on 2026-10-02
-            self.assertIn("2026-10-02 balance Assets:Brokerage:SyntheticRothIRA 1500.000000 SPAXX", bal_text)
+            self.assertIn("2026-10-02 balance Assets:Brokerage:SyntheticRothIRA 1500.00 SPAXX", bal_text)
 
             from beancount import loader
 
