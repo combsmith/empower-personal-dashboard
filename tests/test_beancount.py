@@ -2704,9 +2704,9 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
             dest.mkdir()
             existing = dest / "accounts.bean"
             existing.write_text("ORIGINAL\n", encoding="utf-8")
-            os.chmod(existing, 0o640)
+            os.chmod(existing, 0o400)
             self.generator.export_modular_ledger(destination_dir=dest)
-            self.assertEqual(existing.stat().st_mode & 0o777, 0o640)
+            self.assertEqual(existing.stat().st_mode & 0o777, 0o400)
             self.assertEqual((dest / "prices.bean").stat().st_mode & 0o777, 0o600)
 
     def test_export_modular_ledger_writes_into_caller_pinned_dir(self):
