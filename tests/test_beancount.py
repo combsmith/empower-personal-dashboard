@@ -9,6 +9,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from empower_personal_dashboard import _safe_io
+from empower_personal_dashboard._safe_io import PinnedDir
+
 from empower_personal_dashboard.models import (
     AccountBalance,
     DashboardBalances,
@@ -2559,14 +2562,14 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
             real_replace = os.replace
             replace_calls = 0
 
-            def failing_replace(src, dst):
+            def failing_replace(src, dst, **kwargs):
                 nonlocal replace_calls
                 if ".bak" in str(dst) or ".bak" in str(src):
-                    return real_replace(src, dst)
+                    return real_replace(src, dst, **kwargs)
                 replace_calls += 1
                 if replace_calls > 1:
                     raise OSError("Simulated I/O commit error")
-                return real_replace(src, dst)
+                return real_replace(src, dst, **kwargs)
 
             with patch("os.replace", side_effect=failing_replace):
                 with self.assertRaises(OSError):
@@ -2597,7 +2600,7 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
                 holdings=[{"ticker": "VTI", "quantity": 1.0}],
             )
 
-            with patch.object(Path, "unlink", side_effect=PermissionError("cleanup denied")):
+            with patch.object(PinnedDir, "unlink", side_effect=PermissionError("cleanup denied")):
                 paths = self.generator.export_modular_ledger(
                     destination_dir=dest, holdings=test_holdings,
                 )
@@ -2657,6 +2660,67 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
             with self.assertRaises(ValueError):
                 BeancountGenerator._commit_staged_files([sf], link)
             self.assertEqual(list(real.iterdir()), [])
+
+    def test_export_modular_ledger_commits_into_pinned_dir_after_swap(self):
+        # #167: the destination is pinned by fd before generation, so swapping
+        # its path for a symlink mid-export cannot redirect the commit.
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir).resolve()
+            dest = root / "ledger"
+            dest.mkdir()
+            (dest / "main.bean").write_text("ORIGINAL_MAIN\n", encoding="utf-8")
+            outside = root / "outside"
+            outside.mkdir()
+            moved = root / "ledger_moved"
+            real_generate = self.generator.generate_accounts_bean
+
+            def swap_then_generate(*args, **kwargs):
+                os.rename(dest, moved)
+                dest.symlink_to(outside, target_is_directory=True)
+                return real_generate(*args, **kwargs)
+
+            test_holdings = DashboardHoldings(
+                as_of_date="2026-10-01", total_value=100.0,
+                holdings=[{"ticker": "VTI", "quantity": 1.0}],
+            )
+            with patch.object(self.generator, "generate_accounts_bean", side_effect=swap_then_generate):
+                try:
+                    self.generator.export_modular_ledger(destination_dir=dest, holdings=test_holdings)
+                except ValueError:
+                    # Platforms without dir_fd cannot pin; refusing is the safe outcome there.
+                    if _safe_io.DIR_FD_SUPPORTED:
+                        raise
+                else:
+                    self.assertTrue(_safe_io.DIR_FD_SUPPORTED)
+                    self.assertIn("accounts.bean", [p.name for p in moved.iterdir()])
+                    self.assertIn('include "holdings.bean"', (moved / "main.bean").read_text(encoding="utf-8"))
+
+            self.assertEqual(list(outside.iterdir()), [])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits")
+    def test_export_modular_ledger_keeps_existing_file_mode(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dest = Path(tmp_dir).resolve() / "ledger"
+            dest.mkdir()
+            existing = dest / "accounts.bean"
+            existing.write_text("ORIGINAL\n", encoding="utf-8")
+            os.chmod(existing, 0o640)
+            self.generator.export_modular_ledger(destination_dir=dest)
+            self.assertEqual(existing.stat().st_mode & 0o777, 0o640)
+            self.assertEqual((dest / "prices.bean").stat().st_mode & 0o777, 0o600)
+
+    def test_export_modular_ledger_writes_into_caller_pinned_dir(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir).resolve()
+            with PinnedDir(root / "ledger", create=True) as pinned:
+                paths = self.generator.export_modular_ledger(
+                    destination_dir=root / "ledger", pinned_dir=pinned,
+                )
+            self.assertEqual(
+                sorted(p.name for p in paths),
+                sorted(["main.bean", "accounts.bean", "balances.bean", "holdings.bean", "prices.bean", "transactions.bean"]),
+            )
+            self.assertTrue((root / "ledger" / "main.bean").is_file())
 
     def test_short_position_opposite_sign_does_not_inherit_cost_basis(self):
         lines = []

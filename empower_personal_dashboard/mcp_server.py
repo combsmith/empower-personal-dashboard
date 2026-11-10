@@ -1081,12 +1081,21 @@ def create_mcp_server(
                     if bean_err:
                         return bean_err
 
-                b_files = b_gen.export_modular_ledger(
-                    destination_dir=ledger_dir,
-                    balances=balances,
-                    holdings=holdings,
-                    transactions=tx_data,
-                )
+                # Pin ledger/ relative to the already-pinned export directory so
+                # a swap of dest_path during the fetches cannot redirect the
+                # ledger outside the authorized root (#167).
+                try:
+                    ledger_pin = dest_dir.subdir(ledger_dir.name, create=True)
+                except ValueError as e:
+                    return {"status": "error", "error_code": "ACCESS_DENIED", "message": str(e)}
+                with ledger_pin:
+                    b_files = b_gen.export_modular_ledger(
+                        destination_dir=ledger_dir,
+                        balances=balances,
+                        holdings=holdings,
+                        transactions=tx_data,
+                        pinned_dir=ledger_pin,
+                    )
                 for bf in b_files:
                     files_created.append({"file": str(bf), "format": "beancount", "records": None})
 

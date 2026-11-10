@@ -2222,12 +2222,27 @@ class TestLocalFileHandlingHardening(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmpdir:
             log_path = Path(tmpdir).resolve() / "debug.log"
+            # Directory descriptors are opened and closed while pinning the
+            # parent too (and their numbers get reused), so check that every
+            # descriptor opened, the log file's included, is closed.
+            real_open = os.open
+            opened = []
+            log_opens = []
+
+            def tracking_open(path, flags, *args, **kwargs):
+                fd = real_open(path, flags, *args, **kwargs)
+                opened.append(fd)
+                if os.fspath(path).endswith("debug.log"):
+                    log_opens.append(fd)
+                return fd
+
             with patch("os.fchmod", side_effect=PermissionError("not owner")), patch(
-                "os.close", wraps=os.close
-            ) as close:
+                "os.open", side_effect=tracking_open
+            ), patch("os.close", wraps=os.close) as close:
                 with self.assertRaises(PermissionError):
                     _PrivateFileHandler(log_path, mode="a", encoding="utf-8")
-            close.assert_called_once()
+            self.assertEqual(len(log_opens), 1)
+            self.assertEqual(sorted(c.args[0] for c in close.call_args_list), sorted(opened))
 
     @unittest.skipUnless(hasattr(os, "symlink") and hasattr(os, "O_NOFOLLOW"), "requires O_NOFOLLOW")
     def test_private_file_handler_refuses_symlinked_log(self):
@@ -2243,6 +2258,39 @@ class TestLocalFileHandlingHardening(unittest.TestCase):
             with self.assertRaises(OSError):
                 _PrivateFileHandler(link, mode="a", encoding="utf-8")
             self.assertEqual(target.read_text(encoding="utf-8"), "UNTOUCHED")
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
+    def test_log_ancestor_swapped_after_validation_creates_nothing_outside(self):
+        # #167: the log's parent directories were created with
+        # ``mkdir(parents=True)`` on the validated pathname, so an ancestor
+        # swapped for a symlink in between had them created outside.
+        from empower_personal_dashboard import client as client_mod
+
+        logger, restore = self._isolated_logger()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                root = Path(tmpdir).resolve()
+                victim = root / "logs"
+                victim.mkdir()
+                outside = root / "outside"
+                outside.mkdir()
+                real_safe_fs_path = client_mod._safe_fs_path
+
+                def validate_then_swap(*args, **kwargs):
+                    result = real_safe_fs_path(*args, **kwargs)
+                    if kwargs.get("description") == "log file path":
+                        os.rename(victim, root / "moved")
+                        victim.symlink_to(outside, target_is_directory=True)
+                    return result
+
+                with patch.object(client_mod, "_safe_fs_path", side_effect=validate_then_swap):
+                    with self.assertRaises(ValueError):
+                        EmpowerDashboardClient(log_file=victim / "nested" / "debug.log", mock_mode=True)
+                self.assertEqual(list(outside.iterdir()), [])
+                self.assertEqual(list((root / "moved").iterdir()), [])
+                self.assertEqual(logger.handlers, [])
+        finally:
+            restore()
 
     def test_log_file_open_failure_leaves_logger_unconfigured(self):
         # If the log file cannot be opened (e.g. a symlink planted after the

@@ -143,6 +143,136 @@ class TestPinnedDir(unittest.TestCase):
         finally:
             _safe_io.DIR_FD_SUPPORTED = original
 
+    def _use_path_fallback(self) -> None:
+        original = _safe_io.DIR_FD_SUPPORTED
+        _safe_io.DIR_FD_SUPPORTED = False
+        self.addCleanup(setattr, _safe_io, "DIR_FD_SUPPORTED", original)
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
+    def test_path_fallback_refuses_symlinked_ancestor(self) -> None:
+        # #167: the fallback checked only the leaf, so a symlinked ancestor
+        # passed and ``mkdir(parents=True)`` created directories through it.
+        self._use_path_fallback()
+        real = self.root / "real"
+        real.mkdir()
+        (self.root / "link").symlink_to(real, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            PinnedDir(self.root / "link" / "child", create=True)
+        self.assertEqual(list(real.iterdir()), [])
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
+    def test_path_fallback_refuses_directory_swapped_for_symlink_after_pin(self) -> None:
+        self._use_path_fallback()
+        victim = self.root / "victim"
+        victim.mkdir()
+        outside = self.root / "outside"
+        outside.mkdir()
+        with PinnedDir(victim) as d:
+            os.rename(victim, self.root / "moved")
+            victim.symlink_to(outside, target_is_directory=True)
+            with self.assertRaises(ValueError):
+                d.write_atomic("export.json", lambda f: f.write("NEW"))
+            with self.assertRaises(ValueError):
+                d.open_text("export.json")
+            with self.assertRaises(ValueError):
+                d.subdir("ledger", create=True)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_path_fallback_refuses_directory_replaced_after_pin(self) -> None:
+        # A real directory renamed into place (no symlink) is a different
+        # directory too; the identity re-check must catch it.
+        self._use_path_fallback()
+        victim = self.root / "victim"
+        victim.mkdir()
+        with PinnedDir(victim) as d:
+            os.rename(victim, self.root / "moved")
+            victim.mkdir()
+            with self.assertRaises(ValueError):
+                d.write_atomic("export.json", lambda f: f.write("NEW"))
+        self.assertEqual(list(victim.iterdir()), [])
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
+    def test_subdir_is_opened_relative_to_pinned_parent(self) -> None:
+        victim = self.root / "victim"
+        victim.mkdir()
+        outside = self.root / "outside"
+        outside.mkdir()
+        moved = self.root / "moved"
+        with PinnedDir(victim) as d:
+            os.rename(victim, moved)
+            victim.symlink_to(outside, target_is_directory=True)
+            if _safe_io.DIR_FD_SUPPORTED:
+                with d.subdir("ledger", create=True) as ledger:
+                    ledger.write_atomic("main.bean", lambda f: f.write("X"))
+                self.assertEqual((moved / "ledger" / "main.bean").read_text(encoding="utf-8"), "X")
+            else:
+                with self.assertRaises(ValueError):
+                    d.subdir("ledger", create=True)
+        self.assertEqual(list(outside.iterdir()), [])
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
+    def test_subdir_refuses_symlinked_child(self) -> None:
+        (self.root / "real").mkdir()
+        (self.root / "ledger").symlink_to(self.root / "real", target_is_directory=True)
+        with PinnedDir(self.root) as d:
+            with self.assertRaises(ValueError):
+                d.subdir("ledger", create=True)
+
+    def test_directory_helpers_round_trip(self) -> None:
+        for fallback in (False, True):
+            with self.subTest(fallback=fallback):
+                original = _safe_io.DIR_FD_SUPPORTED
+                _safe_io.DIR_FD_SUPPORTED = original and not fallback
+                try:
+                    base = self.root / f"helpers_{fallback}"
+                    with PinnedDir(base, create=True) as d:
+                        self.assertIsNone(d.lstat("a.txt"))
+                        tmp = d.write_temp("a.txt", lambda f: f.write("A"))
+                        self.assertTrue(tmp.startswith(".a.txt."))
+                        d.replace(tmp, "a.txt")
+                        self.assertTrue(stat.S_ISREG(d.lstat("a.txt").st_mode))
+                        self.assertEqual(d.listdir(), ["a.txt"])
+                        d.unlink("a.txt")
+                        d.unlink("a.txt")  # missing is not an error
+                        self.assertEqual(d.listdir(), [])
+                finally:
+                    _safe_io.DIR_FD_SUPPORTED = original
+
+    def test_write_temp_failure_removes_temp(self) -> None:
+        def explode(f) -> None:
+            f.write("PARTIAL")
+            raise RuntimeError("boom")
+
+        with PinnedDir(self.root) as d:
+            with self.assertRaises(RuntimeError):
+                d.write_temp("a.txt", explode)
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits")
+    def test_open_private_append_creates_owner_only_and_appends(self) -> None:
+        previous = os.umask(0o022)
+        try:
+            with PinnedDir(self.root) as d:
+                for text in ("one\n", "two\n"):
+                    fd = d.open_private_append("debug.log")
+                    with os.fdopen(fd, "a", encoding="utf-8") as f:
+                        f.write(text)
+        finally:
+            os.umask(previous)
+        log = self.root / "debug.log"
+        self.assertEqual(stat.S_IMODE(log.stat().st_mode), 0o600)
+        self.assertEqual(log.read_text(encoding="utf-8"), "one\ntwo\n")
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
+    def test_open_private_append_refuses_symlinked_leaf(self) -> None:
+        target = self.root / "target.log"
+        target.write_text("UNTOUCHED", encoding="utf-8")
+        (self.root / "debug.log").symlink_to(target)
+        with PinnedDir(self.root) as d:
+            with self.assertRaises(OSError):
+                d.open_private_append("debug.log")
+        self.assertEqual(target.read_text(encoding="utf-8"), "UNTOUCHED")
+
 
 if __name__ == "__main__":
     unittest.main()

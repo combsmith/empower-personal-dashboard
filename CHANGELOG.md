@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 - Session files can no longer select a custom API host; pass `--api-host` explicitly on each run. Only the legacy and migrated Empower hosts are restored from a session file ([#138](https://github.com/combsmith/empower-personal-dashboard/issues/138), [#153](https://github.com/combsmith/empower-personal-dashboard/pull/153)).
+- Extended directory pinning to the remaining path-resolved writes ([#167](https://github.com/combsmith/empower-personal-dashboard/issues/167)):
+  - `BeancountGenerator.export_modular_ledger` now pins the destination by file descriptor and reads, commits and rolls back the ledger relative to it. The MCP `export_data` tool pins `ledger/` inside the already-pinned export directory, so a destination swapped during the fetches no longer redirects (or aborts) the ledger.
+  - The debug log's parent directories are created one component at a time, relative to their already-pinned parent, and the log file is opened relative to it, replacing `mkdir(parents=True)` on the validated pathname.
+  - On platforms without `dir_fd` support (including Windows), the fallback now refuses a symlinked or junctioned component anywhere in the path (it previously checked only the last component). It also refuses any operation once the directory has been swapped or replaced since it was pinned. A swap landing inside one operation's own check-then-use window cannot be excluded there without native handle-relative APIs.
 
 ## [0.8.0] - 2026-10-24
 
