@@ -2410,6 +2410,15 @@ class BeancountGenerator:
                 else (net_buy_meta.get(key, {}).get("any_price", 0.0) or 1.0)
             )
             cost_basis = pos.get("cost_basis")
+            # A core-sweep vehicle's lot is always held at cost: a later export may
+            # append a core redemption (``-N TICKER {}``), and Beancount's ``{}``
+            # reduction only matches lots held at cost. Appends never rewrite an
+            # existing lot, so the cost must be written the first time. At the
+            # $1.00 NAV the price is the cost, so quantity and weight are unchanged.
+            if not force_cost and _has_core_sweep_evidence(
+                ticker, effective_price, "", custom_sweep_tickers=self.mapper.core_sweep_tickers
+            ):
+                force_cost = True
 
             if plan["emit_initial_lot"]:
                 self._append_snapshot_lot(
