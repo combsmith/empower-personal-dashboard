@@ -239,12 +239,26 @@ class TestWorkflowPipInstallsPinned(unittest.TestCase):
         self.assertEqual(unpinned, [], "unpinned pip installs:\n" + "\n".join(unpinned))
 
     def test_referenced_lock_files_exist(self):
+        """Each workflow must install from its designated lock file."""
+        expected_locks = {
+            "ci.yml": REQUIREMENTS_DIR / "ci.txt",
+            "sonarcloud.yml": REQUIREMENTS_DIR / "ci.txt",
+            "mutation.yml": REQUIREMENTS_DIR / "mutation.txt",
+            "copilot-setup-steps.yml": REQUIREMENTS_DIR / "copilot.txt",
+            "publish.yml": REQUIREMENTS_DIR / "build.txt",
+        }
         for name, cmd in _workflow_pip_commands():
             tokens = _tokens(cmd)
             for i, tok in enumerate(tokens[:-1]):
                 if tok in ("-r", "--requirement"):
                     with self.subTest(workflow=name, lock=tokens[i + 1]):
-                        self.assertTrue((ROOT / tokens[i + 1]).is_file())
+                        path = ROOT / tokens[i + 1]
+                        self.assertTrue(path.is_file())
+                        self.assertEqual(
+                            path.resolve(),
+                            expected_locks.get(name),
+                            "workflow must use its designated lock file",
+                        )
 
 
 class TestLockFiles(unittest.TestCase):
@@ -293,7 +307,7 @@ class TestLockFiles(unittest.TestCase):
         # `--no-build-isolation` editable installs need the build backend
         # preinstalled from the same hash-locked file.
         requires = PYPROJECT["build-system"]["requires"]
-        for lock in ("ci.txt", "mutation.txt", "copilot.txt"):
+        for lock in ("ci.txt", "mutation.txt", "copilot.txt", "build.txt"):
             locked = {
                 _normalize(_NAME.match(e).group(1))
                 for e in _lock_entries(REQUIREMENTS_DIR / lock)

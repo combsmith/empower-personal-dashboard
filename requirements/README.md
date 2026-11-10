@@ -12,9 +12,10 @@ gets fetched.
 | `ci.txt` | `ci.yml` (build-and-test, coverage), `sonarcloud.yml` | universal, 3.9–3.13 | runtime + `mcp` + `test` + build backend |
 | `mutation.txt` | `mutation.yml` | 3.12 | runtime + `mcp` + `test` + `mutation` + build backend |
 | `copilot.txt` | `copilot-setup-steps.yml` | 3.12 | runtime + `all` + build backend |
-| `build.txt` | `publish.yml` (build job) | 3.12 | `build` extra (`build`, `twine`) |
+| `build.txt` | `publish.yml` (build job) | 3.12 | `build` extra (`build`, `twine`) + build backend |
 
 `build-backend.in` mirrors `[build-system].requires` in `pyproject.toml`.
+`publish.yml` runs `python -m build --no-isolation`, so its backend comes from `build.txt`.
 
 ## Regenerating
 
