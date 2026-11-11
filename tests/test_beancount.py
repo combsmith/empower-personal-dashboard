@@ -4305,8 +4305,26 @@ class TestCoreSweepOpeningLotAtCost(unittest.TestCase):
 
             from beancount import loader
 
-            _entries, errors, _options = loader.load_file(str(ledger_dir / "main.bean"))
+            entries, errors, _options = loader.load_file(str(ledger_dir / "main.bean"))
             self.assertEqual(errors, [])
+
+            spaxx = [
+                (entry.date, posting.units.number, posting.cost)
+                for entry in entries
+                if type(entry).__name__ == "Transaction"
+                for posting in entry.postings
+                if posting.units is not None and posting.units.currency == "SPAXX"
+            ]
+            # Opening lot: 500 SPAXX at a $1.00 cost, dated at the opening date.
+            opening = [s for s in spaxx if s[1] == 500]
+            self.assertEqual(len(opening), 1)
+            self.assertEqual(str(opening[0][0]), "2020-01-01")
+            self.assertEqual(opening[0][2].number, 1)
+            self.assertEqual(opening[0][2].currency, "USD")
+            # Redemption is dated 2026-10-01 and the net SPAXX balance is zero.
+            redemptions = [s for s in spaxx if s[1] == -800]
+            self.assertEqual([str(s[0]) for s in redemptions], ["2026-10-01"])
+            self.assertEqual(sum(s[1] for s in spaxx), 0)
 
     def test_append_to_legacy_cost_less_lot_documents_limitation(self):
         """Legacy cost-less lots cannot be reduced by a later {} redemption.
