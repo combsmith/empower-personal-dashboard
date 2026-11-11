@@ -320,31 +320,38 @@ class TestFormatBalanceQuantity(unittest.TestCase):
     tolerance absorbs upstream rounding (issue #176)."""
 
     def test_two_decimal_source_keeps_two_decimals(self):
+        """Two-decimal quantities stay at two decimals."""
         self.assertEqual(_format_balance_quantity(501.54), "501.54")
 
     def test_whole_and_one_decimal_padded_to_two(self):
+        """Whole and one-decimal quantities pad to two decimals."""
         self.assertEqual(_format_balance_quantity(40), "40.00")
         self.assertEqual(_format_balance_quantity(40.0), "40.00")
         self.assertEqual(_format_balance_quantity(392.7), "392.70")
 
     def test_real_fractional_digits_are_kept(self):
+        """Meaningful fractional digits are retained."""
         self.assertEqual(_format_balance_quantity(108.772), "108.772")
         self.assertEqual(_format_balance_quantity(1.2345), "1.2345")
         self.assertEqual(_format_balance_quantity(0.000001), "0.000001")
 
     def test_rounds_beyond_six_decimals(self):
+        """Quantities round to at most six decimals."""
         self.assertEqual(_format_balance_quantity(1.2345678), "1.234568")
         self.assertEqual(_format_balance_quantity(0.0000008), "0.000001")
         # Float noise from aggregation does not leak extra digits.
         self.assertEqual(_format_balance_quantity(392.76 + 108.78), "501.54")
 
     def test_negative_quantities(self):
+        """Negative quantities keep their sign and precision."""
         self.assertEqual(_format_balance_quantity(-20), "-20.00")
         self.assertEqual(_format_balance_quantity(-5.125), "-5.125")
 
     def test_never_looser_than_six_decimal_form(self):
+        """Value equals the six-decimal form numerically."""
         for qty in (501.54, 40, 108.772, 1.2345678, -5.125, 0.000001):
             self.assertEqual(float(_format_balance_quantity(qty)), float(_format_quantity(qty)))
 
     def test_posting_quantity_format_unchanged(self):
+        """Posting quantities keep the six-decimal format."""
         self.assertEqual(_format_quantity(501.54), "501.540000")

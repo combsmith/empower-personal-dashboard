@@ -1194,6 +1194,7 @@ class TestUnitBalanceAssertionPrecision(unittest.TestCase):
     )
 
     def _assertion_lines(self):
+        """Return the generated balance-assertion lines for a rounded holding."""
         holdings = DashboardHoldings(
             as_of_date="2024-10-06",
             total_value=5015.40,
@@ -1207,11 +1208,13 @@ class TestUnitBalanceAssertionPrecision(unittest.TestCase):
         return "".join(lines)
 
     def test_two_decimal_snapshot_assertion_absorbs_upstream_rounding(self):
+        """A two-decimal assertion loads despite upstream rounding drift."""
         assertions = self._assertion_lines()
         self.assertIn("2024-10-07 balance Assets:AcmeBrokerage:TaxableBrokerage 501.54 FFFFX", assertions)
         assert_ledger_loads(self, self.LEDGER_PREFIX + assertions)
 
     def test_six_decimal_assertion_would_reject_same_ledger(self):
+        """Control: the former six-decimal assertion fails on the same ledger."""
         # Guards the test above against passing trivially: the former
         # six-decimal form gets a ~0.000001 tolerance and fails on 0.008 drift.
         strict = "2024-10-07 balance Assets:AcmeBrokerage:TaxableBrokerage 501.540000 FFFFX\n"

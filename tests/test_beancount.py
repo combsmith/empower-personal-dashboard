@@ -1945,6 +1945,7 @@ class TestBeancountInvestmentGrowthReconstruction(unittest.TestCase):
         self.assertIn("balance Assets:AcmeBrokerage:TaxableBrokerage 0.000001 MCR", "".join(assertion_lines))
 
     def test_unit_balance_assertion_uses_source_precision(self):
+        """Unit balance assertions use the snapshot's source precision."""
         # Issue #176: a 2-dp snapshot quantity must be asserted at 2 dp so that
         # Beancount's inferred tolerance (~0.01) absorbs upstream rounding,
         # while a quantity with real 6-dp precision keeps all six digits.
