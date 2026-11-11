@@ -260,10 +260,12 @@ class TestWorkflowPipInstallsPinned(unittest.TestCase):
             "copilot-setup-steps.yml": REQUIREMENTS_DIR / "copilot.txt",
             "publish.yml": REQUIREMENTS_DIR / "build.txt",
         }
+        locked_workflows = set()
         for name, cmd in _workflow_pip_commands():
             tokens = _tokens(cmd)
             for i, tok in enumerate(tokens[:-1]):
                 if tok in ("-r", "--requirement"):
+                    locked_workflows.add(name)
                     with self.subTest(workflow=name, lock=tokens[i + 1]):
                         path = ROOT / tokens[i + 1]
                         self.assertTrue(path.is_file())
@@ -272,6 +274,14 @@ class TestWorkflowPipInstallsPinned(unittest.TestCase):
                             expected_locks.get(name),
                             "workflow must use its designated lock file",
                         )
+        # Removing a workflow's lock install must fail, not silently pass.
+        for name in expected_locks:
+            with self.subTest(workflow=name):
+                self.assertIn(
+                    name,
+                    locked_workflows,
+                    "workflow must install from its lock file via -r",
+                )
 
 
 class TestLockFiles(unittest.TestCase):
