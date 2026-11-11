@@ -1272,6 +1272,9 @@ def _reconciliation_date(snapshot_date: str) -> str:
     return _offset_date(snapshot_date, days=1)
 
 
+_SAFE_INCLUDE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]*\.bean")
+
+
 class BeancountGenerator:
     """Generates Beancount directives and ledger files from Empower data models."""
 
@@ -3196,7 +3199,7 @@ class BeancountGenerator:
         if f'include "{BEAN_HOLDINGS}"' not in updated_main:
             updated_main += f'\ninclude "{BEAN_HOLDINGS}"\n'
         # Only bare filenames may be included; reject anything that could escape ``dest``.
-        safe_extra = {b for b in extra_beans if b and "/" not in b and "\\" not in b and b not in (".", "..")}
+        safe_extra = {b for b in extra_beans if _SAFE_INCLUDE_NAME_RE.fullmatch(b)}
         for b in sorted(safe_extra):
             include_line = f"include {_quote_beancount_string(b, 'include filename')}"
             if include_line not in updated_main:
