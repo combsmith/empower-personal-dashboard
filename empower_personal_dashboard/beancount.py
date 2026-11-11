@@ -2414,7 +2414,8 @@ class BeancountGenerator:
             # append a core redemption (``-N TICKER {}``), and Beancount's ``{}``
             # reduction only matches lots held at cost. Appends never rewrite an
             # existing lot, so the cost must be written the first time. At the
-            # $1.00 NAV the price is the cost, so quantity and weight are unchanged.
+            # ~$1.00 NAV (within the +/-$0.01 evidence tolerance) the cost equals the
+            # snapshot price, so quantity and weight are unchanged.
             if not force_cost and _has_core_sweep_evidence(
                 ticker, effective_price, "", custom_sweep_tickers=self.mapper.core_sweep_tickers
             ):
