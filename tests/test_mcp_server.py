@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+from empower_personal_dashboard import _safe_io
 from empower_personal_dashboard.client import EmpowerDashboardClient
 from empower_personal_dashboard.exceptions import EmpowerError, SessionExpiredError
 from empower_personal_dashboard.mcp_server import (
@@ -1782,10 +1783,10 @@ class TestExportDataDirectoryPinning(unittest.TestCase):
             self.assertIn("accounts", json.loads((pinned / "empower_balances.json").read_text(encoding="utf-8")))
 
     @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
-    def test_beancount_export_refuses_destination_swapped_during_fetch(self) -> None:
-        # The JSON write lands in the pinned directory; the path-based ledger
-        # writer then refuses the now-symlinked destination (beancount.py guard),
-        # so nothing reaches the directory outside the export root.
+    def test_beancount_export_writes_into_destination_swapped_during_fetch(self) -> None:
+        # #167: the ledger directory is pinned relative to the already-pinned
+        # export directory, so it lands next to the JSON in the original
+        # directory and nothing reaches the directory outside the export root.
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir).resolve()
             export_root = root / "exports"
@@ -1808,9 +1809,18 @@ class TestExportDataDirectoryPinning(unittest.TestCase):
                         },
                     )
 
-            self.assertEqual(payload["status"], "error", payload)
             self.assertEqual(list(attacker_dir.iterdir()), [])
-            self.assertEqual([p.name for p in moved["dir"].iterdir()], ["empower_balances.json"])
+            pinned = moved["dir"]
+            if not _safe_io.DIR_FD_SUPPORTED:
+                # Without dir_fd the swap cannot be pinned; refusing is the safe outcome.
+                self.assertEqual(payload["status"], "error", payload)
+                return
+            self.assertEqual(payload["status"], "success", payload)
+            self.assertEqual(sorted(p.name for p in pinned.iterdir()), ["empower_balances.json", "ledger"])
+            self.assertEqual(
+                sorted(p.name for p in (pinned / "ledger").iterdir()),
+                ["accounts.bean", "balances.bean", "holdings.bean", "main.bean", "prices.bean", "transactions.bean"],
+            )
 
     def test_export_writes_preserve_existing_file_mode(self) -> None:
         # Atomic replacement must not widen (or reset) an existing export's mode.

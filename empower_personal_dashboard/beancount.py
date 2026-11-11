@@ -13,13 +13,14 @@ import datetime
 import json
 import logging
 import math
-import os
 import re
+import stat
 import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
+from empower_personal_dashboard._safe_io import PinnedDir, is_link_like
 from empower_personal_dashboard.exceptions import LedgerAppendError
 from empower_personal_dashboard.models import (
     DashboardBalances,
@@ -2963,88 +2964,126 @@ class BeancountGenerator:
         lines.append(f"  {category_account:<36} {bal_amount:>8.2f} USD\n\n")
 
     @staticmethod
-    def _stage_append_components(dest: Path, stage: Path) -> None:
+    def _stage_append_components(dest_dir: Optional[PinnedDir], stage: Path) -> None:
         """Copy existing appendable modular ledger components into stage."""
-        if not dest.exists():
+        if dest_dir is None:
             return
         for fname in (BEAN_MAIN, BEAN_HOLDINGS, BEAN_TRANSACTIONS):
-            src_file = dest / fname
-            if src_file.exists() and not src_file.is_symlink():
-                (stage / fname).write_text(src_file.read_text(encoding="utf-8"), encoding="utf-8")
+            st = dest_dir.lstat(fname)
+            if st is not None and stat.S_ISREG(st.st_mode):
+                with dest_dir.open_text(fname) as src:
+                    (stage / fname).write_text(src.read(), encoding="utf-8")
 
     @staticmethod
-    def _write_temp_file(sf: Path, dest: Path) -> Tuple[Path, Path]:
-        """Write staged file content to a temporary file in dest with target permissions."""
-        target_file = dest / sf.name
-        target_mode = (target_file.stat().st_mode & 0o777) if target_file.exists() else 0o600
-        fd, tmp_path_str = tempfile.mkstemp(prefix=f".{sf.name}.", suffix=".tmp", dir=dest)
-        tmp_path = Path(tmp_path_str)
-        try:
-            os.chmod(tmp_path, target_mode)
-            with open(fd, "w", encoding="utf-8") as f:
-                f.write(sf.read_text(encoding="utf-8"))
-            return tmp_path, target_file
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
+    def _extra_bean_names(dest_dir: Optional[PinnedDir]) -> List[str]:
+        """Non-standard, non-hidden, non-symlinked ``*.bean`` names already in the destination."""
+        if dest_dir is None:
+            return []
+        names = []
+        for name in dest_dir.listdir():
+            if not name.endswith(".bean") or name in STANDARD_MODULAR_BEANS or name.startswith("."):
+                continue
+            st = dest_dir.lstat(name)
+            if st is not None and not is_link_like(st):
+                names.append(name)
+        return names
 
     @staticmethod
     def _rollback_committed_files(
-        backups: List[Tuple[Path, Path]],
-        created_files: List[Path],
-        temp_files: List[Tuple[Path, Path]],
+        dest_dir: PinnedDir,
+        backups: List[Tuple[str, str]],
+        created_files: List[str],
+        temp_files: List[Tuple[str, str]],
     ) -> None:
         """Roll back partially committed files on failure."""
-        for backup_file, target_file in backups:
+        for backup_name, target_name in backups:
             try:
-                os.replace(backup_file, target_file)
+                dest_dir.replace(backup_name, target_name)
             except Exception:
-                pass
-        for cf in created_files:
-            if not any(cf == orig for _, orig in backups):
-                cf.unlink(missing_ok=True)
-        for tmp_path, _ in temp_files:
-            tmp_path.unlink(missing_ok=True)
+                logger.warning(
+                    "Ledger rollback could not restore %s from %s",
+                    target_name,
+                    backup_name,
+                    exc_info=True,
+                )
+        backed_up = {target for _, target in backups}
+        for name in created_files + [tmp for tmp, _ in temp_files]:
+            if name in backed_up:
+                continue
+            try:
+                dest_dir.unlink(name)
+            except Exception:
+                logger.warning("Ledger rollback could not remove %s", name, exc_info=True)
 
     @staticmethod
-    def _commit_staged_files(staged_files: List[Path], dest: Path) -> List[Path]:
-        """Atomically commit staged files to destination directory."""
-        def preflight() -> None:
-            for sf in staged_files:
-                target = dest / sf.name
-                _verify_not_symlink(target)
-                if target.exists() and not target.is_file():
-                    raise ValueError(f"Refusing to replace non-file ledger target: {target}")
+    def _commit_staged_files(
+        staged_files: List[Path],
+        dest: Path,
+        pinned_dir: Optional[PinnedDir] = None,
+    ) -> List[Path]:
+        """Atomically commit staged files to the destination directory.
 
-        preflight()
-        dest.mkdir(parents=True, exist_ok=True)
-        # Pin the destination: a symlink planted during generation must not redirect writes.
-        if dest.is_symlink() or not dest.is_dir():
-            raise ValueError(f"Refusing to write to non-directory or symlinked destination: {dest}")
-        preflight()
-        temp_files: List[Tuple[Path, Path]] = []
-        backups: List[Tuple[Path, Path]] = []
-        created_files: List[Path] = []
+        Every write, rename and rollback happens relative to the pinned
+        destination (``pinned_dir``, or ``dest`` pinned here, created if
+        missing), so a symlink swapped in at the path after pinning cannot
+        redirect the commit (#167).
+        """
+        if pinned_dir is not None:
+            return BeancountGenerator._commit_into_pinned(staged_files, pinned_dir)
+        try:
+            dest_dir = PinnedDir(dest, create=True)
+        except ValueError as e:
+            raise ValueError(f"Refusing to write to non-directory or symlinked destination: {dest}") from e
+        with dest_dir:
+            return BeancountGenerator._commit_into_pinned(staged_files, dest_dir)
+
+    @staticmethod
+    def _commit_into_pinned(staged_files: List[Path], dest_dir: PinnedDir) -> List[Path]:
+        """Move staged files into the pinned destination directory, returning the committed paths."""
+        for sf in staged_files:
+            st = dest_dir.lstat(sf.name)
+            if st is None:
+                continue
+            if is_link_like(st):
+                raise ValueError(f"Refusing to write to symlinked ledger target: {dest_dir.path / sf.name}")
+            if not stat.S_ISREG(st.st_mode):
+                raise ValueError(f"Refusing to replace non-file ledger target: {dest_dir.path / sf.name}")
+        temp_files: List[Tuple[str, str]] = []
+        backups: List[Tuple[str, str]] = []
+        created_files: List[str] = []
         try:
             for sf in staged_files:
-                temp_files.append(BeancountGenerator._write_temp_file(sf, dest))
-            for tmp_path, target_file in temp_files:
-                if target_file.exists():
-                    backup_file = dest / f".{target_file.name}.{uuid.uuid4().hex}.bak"
-                    os.replace(target_file, backup_file)
-                    backups.append((backup_file, target_file))
-                os.replace(tmp_path, target_file)
-                created_files.append(target_file)
-        except Exception:
-            BeancountGenerator._rollback_committed_files(backups, created_files, temp_files)
+                st = dest_dir.lstat(sf.name)
+                # Keep an existing ledger file's permission bits; anything else
+                # (new file, or a symlink planted since the preflight, whose
+                # lstat mode is 0o777) gets owner-only.
+                target_mode = (
+                    stat.S_IMODE(st.st_mode) & 0o777
+                    if st is not None and stat.S_ISREG(st.st_mode)
+                    else 0o600
+                )
+                content = sf.read_text(encoding="utf-8")
+                tmp_name = dest_dir.write_temp(sf.name, lambda f, text=content: f.write(text), mode=target_mode)
+                temp_files.append((tmp_name, sf.name))
+            for tmp_name, target_name in temp_files:
+                if dest_dir.lstat(target_name) is not None:
+                    backup_name = f".{target_name}.{uuid.uuid4().hex}.bak"
+                    dest_dir.replace(target_name, backup_name)
+                    backups.append((backup_name, target_name))
+                dest_dir.replace(tmp_name, target_name)
+                created_files.append(target_name)
+        except BaseException:  # includes KeyboardInterrupt: always roll back
+            BeancountGenerator._rollback_committed_files(dest_dir, backups, created_files, temp_files)
             raise
         # Commit succeeded; backup cleanup is best-effort and must never trigger a rollback.
-        for backup_file, _ in backups:
+        for backup_name, _ in backups:
             try:
-                backup_file.unlink(missing_ok=True)
-            except OSError:
-                pass
-        return created_files
+                dest_dir.unlink(backup_name)
+            except (OSError, ValueError):
+                logger.warning(
+                    "Ledger backup cleanup could not remove %s", backup_name, exc_info=True
+                )
+        return [dest_dir.path / name for name in created_files]
 
     def export_modular_ledger(
         self,
@@ -3054,27 +3093,60 @@ class BeancountGenerator:
         transactions: Optional[DashboardTransactions] = None,
         append: bool = True,
         opening_date: Optional[str] = None,
+        *,
+        pinned_dir: Optional[PinnedDir] = None,
     ) -> List[Path]:
         """Export complete modular ledger directory (main.bean, accounts.bean, etc.).
 
         Safely avoids overwriting existing ledgers when append=True by preserving existing
         transactions and accounts. Writes are staged in a temporary directory so a failure
         during generation leaves the destination directory untouched.
-        """
-        dest = _prepare_ledger_path(destination_dir, is_dir=True)
-        effective_opening_date = _determine_opening_date(transactions, balances, opening_date)
-        extra_beans = (
-            [p.name for p in dest.glob("*.bean") if p.name not in STANDARD_MODULAR_BEANS and not p.name.startswith(".") and not p.is_symlink()]
-            if dest.exists()
-            else []
-        )
 
-        existing_state = self._read_modular_existing_state(dest, append)
+        The destination is pinned by file descriptor before anything is read
+        (or, when it does not exist yet, when it is created at commit), and all
+        reads and writes go relative to it, so swapping its path for a symlink
+        mid-export cannot redirect the ledger. A caller that already pinned
+        and validated the directory passes it as ``pinned_dir``;
+        ``destination_dir`` is then not re-resolved.
+        """
+        if pinned_dir is not None:
+            dest = pinned_dir.path
+            dest_dir: Optional[PinnedDir] = pinned_dir
+            owned: Optional[PinnedDir] = None
+        else:
+            dest = _prepare_ledger_path(destination_dir, is_dir=True)
+            try:
+                dest_dir = owned = PinnedDir(dest)
+            except FileNotFoundError:
+                dest_dir = owned = None
+        try:
+            return self._export_modular_into(
+                dest, dest_dir, balances, holdings, transactions, append, opening_date,
+            )
+        finally:
+            if owned is not None:
+                owned.close()
+
+    def _export_modular_into(
+        self,
+        dest: Path,
+        dest_dir: Optional[PinnedDir],
+        balances: Optional[DashboardBalances],
+        holdings: Optional[DashboardHoldings],
+        transactions: Optional[DashboardTransactions],
+        append: bool,
+        opening_date: Optional[str],
+    ) -> List[Path]:
+        """Write the modular ledger into ``dest`` using a pinned directory."""
+        effective_opening_date = _determine_opening_date(transactions, balances, opening_date)
+        extra_beans = self._extra_bean_names(dest_dir)
+
+        existing_state = self._read_modular_existing_state(dest_dir, append)
 
         # Pre-flight the backward-broadening and pre-cutoff deficit guards *before*
         # any file is written. Validating up front makes the export all-or-nothing.
         self._preflight_modular_append_guard(
-            dest, append, holdings, balances, transactions, effective_opening_date,
+            append, holdings, balances, transactions, effective_opening_date,
             existing_state=existing_state,
         )
 
@@ -3083,7 +3155,7 @@ class BeancountGenerator:
             stage.mkdir(parents=True, exist_ok=True)
 
             if append:
-                self._stage_append_components(dest, stage)
+                self._stage_append_components(dest_dir, stage)
 
             staged_files: List[Path] = [
                 self._write_modular_main(stage, append, extra_beans=extra_beans),
@@ -3108,26 +3180,28 @@ class BeancountGenerator:
                 self._write_modular_transactions(stage, append, transactions, balances),
             ]
 
-            return self._commit_staged_files(staged_files, dest)
+            return self._commit_staged_files(staged_files, dest, pinned_dir=dest_dir)
 
     @staticmethod
-    def _read_modular_existing_state(dest: Path, append: bool) -> Optional[str]:
+    def _read_modular_existing_state(dest_dir: Optional[PinnedDir], append: bool) -> Optional[str]:
         """Read combined existing holdings.bean and balances.bean content for append planning."""
-        if not (append and dest.exists()):
+        if not append or dest_dir is None:
             return None
-        holdings_path = dest / BEAN_HOLDINGS
-        if not holdings_path.exists():
+        holdings_st = dest_dir.lstat(BEAN_HOLDINGS)
+        if holdings_st is None:
             return None
-        _verify_not_symlink(holdings_path)
-        parts = [holdings_path.read_text(encoding="utf-8")]
-        balances_path = dest / BEAN_BALANCES
-        if balances_path.exists() and not balances_path.is_symlink():
-            parts.append(balances_path.read_text(encoding="utf-8"))
+        if is_link_like(holdings_st):
+            raise ValueError(f"Refusing to write to symlinked ledger target: {dest_dir.path / BEAN_HOLDINGS}")
+        with dest_dir.open_text(BEAN_HOLDINGS) as f:
+            parts = [f.read()]
+        balances_st = dest_dir.lstat(BEAN_BALANCES)
+        if balances_st is not None and stat.S_ISREG(balances_st.st_mode):
+            with dest_dir.open_text(BEAN_BALANCES) as f:
+                parts.append(f.read())
         return "\n".join(parts)
 
     def _preflight_modular_append_guard(
         self,
-        dest: Path,
         append: bool,
         holdings: Optional[DashboardHoldings],
         balances: Optional[DashboardBalances],
@@ -3136,20 +3210,21 @@ class BeancountGenerator:
         *,
         existing_state: Optional[str] = None,
     ) -> None:
-        """Reject a backward-broadening or pre-cutoff-deficit append before any modular file is touched."""
-        holdings_path = dest / BEAN_HOLDINGS
-        if not (append and holdings_path.exists()):
+        """Reject a backward-broadening or pre-cutoff-deficit append before any modular file is touched.
+
+        ``existing_state`` is the content read by ``_read_modular_existing_state``;
+        ``None`` means there is no existing holdings.bean to guard.
+        """
+        if not append or existing_state is None:
             return
-        _verify_not_symlink(holdings_path)
-        existing_h_text = existing_state if existing_state is not None else holdings_path.read_text(encoding="utf-8")
         lot_date = self._resolve_lot_date(
             holdings, effective_opening_date, transactions, balances,
         )
-        self._guard_window_not_broadened(existing_h_text, lot_date)
+        self._guard_window_not_broadened(existing_state, lot_date)
         if holdings and holdings.holdings and transactions and transactions.transactions:
             acct_lookup = _build_account_lookup(balances)
             self._shortfall_reconciled_keys(
-                holdings, transactions, acct_lookup, existing_content=existing_h_text,
+                holdings, transactions, acct_lookup, existing_content=existing_state,
             )
 
     def _write_modular_section(self, dest: Path, filename: str, content: str) -> Path:
@@ -3167,6 +3242,8 @@ class BeancountGenerator:
     ) -> Path:
         """Write or patch main.bean, ensuring the holdings include and FIFO booking option."""
         main_path = dest / BEAN_MAIN
+        if dest.is_symlink() or main_path.resolve().parent != dest.resolve():
+            raise ValueError(f"Refusing to write outside the staging directory: {main_path}")
         _verify_not_symlink(main_path)
         if extra_beans is None:
             extra_beans = [p.name for p in dest.glob("*.bean") if p.name not in STANDARD_MODULAR_BEANS and not p.name.startswith(".")]
@@ -3188,7 +3265,12 @@ class BeancountGenerator:
         # earlier release that omitted the option.
         updated_main = _ensure_fifo_booking_method(updated_main)
         if updated_main != current_main:
-            main_path.write_text(updated_main, encoding="utf-8")
+            # NOSONAR pythonsecurity:S2083 — false positive. ``main_path`` is
+            # ``dest / BEAN_MAIN`` (a constant leaf) after the containment and
+            # symlink checks above; the taint engine mislabels the ledger's own
+            # read-back content as a path source. The write target is never
+            # derived from untrusted content.
+            main_path.write_text(updated_main, encoding="utf-8")  # NOSONAR
         return main_path
 
     def _write_modular_holdings(

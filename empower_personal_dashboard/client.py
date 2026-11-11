@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import requests
 
-from ._safe_io import PinnedDir
+from ._safe_io import PinnedDir, is_link_like
 from .exceptions import (
     EmpowerError,
     LoginFailedException,
@@ -76,6 +76,14 @@ def _env_flag(value: Optional[str]) -> bool:
     return value.strip().lower() not in _FALSY_ENV_VALUES
 
 
+def _is_link_like_path(path: Path) -> bool:
+    """True for a symlink or a Windows junction/reparse point (not followed)."""
+    try:
+        return is_link_like(path.lstat())
+    except OSError:
+        return False
+
+
 def _safe_fs_path(filepath: Union[str, Path], *, description: str, action: str = "write to") -> Path:
     """Resolve and validate a user-supplied filesystem path before any read or write.
 
@@ -92,12 +100,12 @@ def _safe_fs_path(filepath: Union[str, Path], *, description: str, action: str =
     expanded = Path(filepath).expanduser()
     # Inspect the user-supplied location for a symlink *before* resolving it:
     # ``Path.resolve()`` follows symlinks, so a post-resolve check never sees one.
-    if expanded.is_symlink():
+    if _is_link_like_path(expanded):
         raise ValueError(f"Refusing to {action} symlinked {description}: {expanded}")
     # A symlink anywhere in the parent chain can redirect the write just as a
     # symlinked leaf can; reject every symlinked parent before resolving.
     for parent in expanded.parents:
-        if parent.is_symlink():
+        if _is_link_like_path(parent):
             raise ValueError(f"Refusing to {action} {description} inside symlinked directory: {expanded}")
     return expanded.resolve()
 
@@ -111,16 +119,14 @@ class _PrivateFileHandler(logging.FileHandler):
     """
 
     def _open(self):  # type: ignore[override]
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-        for optional in ("O_NOFOLLOW", "O_CLOEXEC", "O_BINARY"):
-            flags |= getattr(os, optional, 0)
-        fd = os.open(self.baseFilename, flags, 0o600)
-        if hasattr(os, "fchmod"):
-            try:
-                os.fchmod(fd, os.fstat(fd).st_mode & 0o600)
-            except OSError:
-                os.close(fd)
-                raise
+        """Open the debug log relative to its pinned parent directory."""
+        # Pin the parent directory first (creating missing components relative
+        # to their already-pinned parent) and open the log relative to it, so
+        # an ancestor swapped for a symlink cannot redirect the file or the
+        # directories created for it (#167).
+        log_path = Path(self.baseFilename)
+        with PinnedDir(log_path.parent, create=True) as log_dir:
+            fd = log_dir.open_private_append(log_path.name)
         return os.fdopen(fd, self.mode, encoding=self.encoding, errors=self.errors)
 
 
@@ -247,12 +253,11 @@ class EmpowerDashboardClient:
 
             formatter = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 
-            # Open the log file before attaching anything: the O_NOFOLLOW open
-            # can still fail (e.g. a symlink planted after the check above), and
-            # that must leave the logger untouched for the same reason.
+            # Open the log file before attaching anything: the pinned O_NOFOLLOW
+            # open can still fail (e.g. a symlink planted after the check above),
+            # and that must leave the logger untouched for the same reason.
             file_handler = None
             if log_path is not None:
-                log_path.parent.mkdir(parents=True, exist_ok=True)
                 file_handler = _PrivateFileHandler(log_path, mode="a", encoding="utf-8")
                 file_handler.setLevel(logging.DEBUG)
                 file_handler.setFormatter(formatter)
