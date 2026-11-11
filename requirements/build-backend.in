@@ -1,5 +1,6 @@
 # Build backend for the `pip install --no-deps --no-build-isolation -e .`
-# step. Mirrors [build-system].requires in pyproject.toml; it's locked with
-# hashes here because --no-build-isolation stops pip from fetching it unpinned.
+# step. Mirrors [build-system].requires in pyproject.toml; the hashes are generated
+# into the requirements/*.txt locks, because --no-build-isolation stops pip
+# from fetching it unpinned.
 setuptools>=68.0
 wheel

@@ -114,8 +114,11 @@ def _pip_args(tokens: List[str]) -> List[str]:
             return []
     else:
         return []
-    if not rest or rest[0].lower() != "install":
+    # Skip pip global options (e.g. --disable-pip-version-check) before the subcommand.
+    lowered = [r.lower() for r in rest]
+    if "install" not in lowered:
         return []
+    rest = rest[lowered.index("install"):]
     return rest[1:] or ["<bare>"]
 
 
@@ -215,6 +218,7 @@ class TestScorecardPipRules(unittest.TestCase):
             "pip install",
             "pip install -e git+https://example.invalid/pkg.git",
             "pip3 install requests==2.0",
+            "pip --disable-pip-version-check install requests",
         ):
             with self.subTest(cmd=cmd):
                 self.assertTrue(is_unpinned_pip_install(cmd))
@@ -299,7 +303,11 @@ class TestLockFiles(unittest.TestCase):
                     self.assertIn("--hash=sha256:", entry)
 
     def test_locks_cover_declared_dependencies(self):
-        """Verify each lock file covers all declared dependencies for its extras."""
+        """Verify each lock has an entry for every declared dependency name.
+
+        Only package-name presence is checked; pinned versions are not compared
+        against the pyproject specifiers.
+        """
         optional = PYPROJECT["project"]["optional-dependencies"]
         for lock, extras in LOCK_EXTRAS.items():
             locked = {
