@@ -3195,6 +3195,8 @@ class BeancountGenerator:
         if f'include "{BEAN_HOLDINGS}"' not in updated_main:
             updated_main += f'\ninclude "{BEAN_HOLDINGS}"\n'
         for b in sorted(set(extra_beans)):
+            if Path(b).name != b or b in ("", ".", ".."):
+                raise ValueError(f"Refusing include of non-basename ledger file: {b!r}")
             include_line = f"include {_quote_beancount_string(b, 'include filename')}"
             if include_line not in updated_main:
                 updated_main += include_line + "\n"
