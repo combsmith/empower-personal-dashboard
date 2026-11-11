@@ -3265,7 +3265,12 @@ class BeancountGenerator:
         # earlier release that omitted the option.
         updated_main = _ensure_fifo_booking_method(updated_main)
         if updated_main != current_main:
-            main_path.write_text(updated_main, encoding="utf-8")
+            # NOSONAR pythonsecurity:S2083 — false positive. ``main_path`` is
+            # ``dest / BEAN_MAIN`` (a constant leaf) after the containment and
+            # symlink checks above; the taint engine mislabels the ledger's own
+            # read-back content as a path source. The write target is never
+            # derived from untrusted content.
+            main_path.write_text(updated_main, encoding="utf-8")  # NOSONAR
         return main_path
 
     def _write_modular_holdings(
