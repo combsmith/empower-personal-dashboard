@@ -2417,8 +2417,13 @@ class BeancountGenerator:
             # ~$1.00 NAV (within the +/-$0.01 evidence tolerance) the cost equals the
             # snapshot price, so quantity and weight are unchanged.
             # For snapshot holdings (no transaction context), check ticker and price only.
-            if not force_cost and _has_core_sweep_evidence(
-                ticker, effective_price, "", custom_sweep_tickers=self.mapper.core_sweep_tickers
+            # Only real price evidence counts: the 1.0 fallback above is a
+            # placeholder, not reported NAV, so it must not trigger forced cost.
+            evidence_price = raw_price if raw_price > 0 else (
+                net_buy_meta.get(key, {}).get("any_price", 0.0)
+            )
+            if not force_cost and evidence_price > 0 and _has_core_sweep_evidence(
+                ticker, evidence_price, "", custom_sweep_tickers=self.mapper.core_sweep_tickers
             ):
                 force_cost = True
 

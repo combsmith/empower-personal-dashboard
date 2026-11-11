@@ -4188,6 +4188,12 @@ class TestCoreSweepOpeningLotAtCost(unittest.TestCase):
         # Unconfigured $1.00 ticker without sweep evidence is not forced to cost.
         self.assertIn("30.000000 BNKSWP2 @ 1.0000 USD", out)
 
+    def test_sweep_ticker_without_reported_price_not_forced_to_cost(self):
+        """A missing snapshot price must not be treated as $1.00 NAV evidence (no fabricated cost basis)."""
+        holdings = self._holdings("2026-09-30", [{"ticker": "SPAXX", "quantity": 500.0, "price": 0.0}])
+        out = self.generator.generate_holdings_bean(holdings, opening_date="2020-01-01")
+        self.assertNotIn("SPAXX {1.000000 USD}", out)
+
     def test_money_market_ticker_off_one_dollar_nav_not_forced_to_cost(self):
         """Without a $1.00 NAV the sweep evidence rule does not apply, so the lot keeps the ``@ price`` form."""
         holdings = self._holdings("2026-09-30", [{"ticker": "ABCXX", "quantity": 40.0, "price": 10.0}])
