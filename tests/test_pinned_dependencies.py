@@ -57,6 +57,7 @@ _NAME = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 
 def _normalize(name: str) -> str:
+    """Normalize a package name for comparison (lowercase, replace separators with dash)."""
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
@@ -87,6 +88,7 @@ def _applies(spec: str, python) -> bool:
 
 
 def _tokens(command: str) -> List[str]:
+    """Tokenize a shell command, falling back to whitespace split for complex quoting."""
     # Segments split out of a multi-line quoted string may not tokenize; a
     # plain whitespace split is enough there because pip install arguments
     # in these workflows never contain quoted spaces.
@@ -157,6 +159,7 @@ def is_unpinned_pip_install(command: str) -> bool:
 
 
 def _split_commands(script: str) -> Iterator[str]:
+    """Split a shell script into individual commands, handling continuations and separators."""
     joined = re.sub(r"\\\n", " ", script)
     for line in joined.splitlines():
         for part in re.split(r"&&|\|\||;|\|", line):
@@ -166,6 +169,7 @@ def _split_commands(script: str) -> Iterator[str]:
 
 
 def _run_blocks(node) -> Iterator[str]:
+    """Recursively extract 'run' script blocks from a YAML node structure."""
     if isinstance(node, dict):
         for key, value in node.items():
             if key == "run" and isinstance(value, str):
@@ -178,6 +182,7 @@ def _run_blocks(node) -> Iterator[str]:
 
 
 def _workflow_pip_commands() -> Iterator[tuple]:
+    """Yield (workflow_name, pip_command) pairs found in all workflow files."""
     for path in sorted(WORKFLOWS_DIR.glob("*.y*ml")):
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         for block in _run_blocks(data):
@@ -200,6 +205,7 @@ class TestScorecardPipRules(unittest.TestCase):
     """The rule mirror must agree with Scorecard on known samples."""
 
     def test_unpinned_forms(self):
+        """Verify that known unpinned forms are detected."""
         for cmd in (
             "pip install --upgrade pip",
             "python -m pip install --upgrade pip",
@@ -214,6 +220,7 @@ class TestScorecardPipRules(unittest.TestCase):
                 self.assertTrue(is_unpinned_pip_install(cmd))
 
     def test_pinned_forms(self):
+        """Verify that hash-pinned forms are correctly recognized."""
         for cmd in (
             "pip install --require-hashes -r requirements/ci.txt",
             "python -m pip install --require-hashes -r requirements/ci.txt",
@@ -227,10 +234,12 @@ class TestScorecardPipRules(unittest.TestCase):
 
 class TestWorkflowPipInstallsPinned(unittest.TestCase):
     def test_workflows_contain_pip_installs(self):
+        """Verify workflows have pip install commands to check."""
         # Guards against the scan silently matching nothing.
         self.assertTrue(list(_workflow_pip_commands()))
 
     def test_every_pip_install_is_pinned_by_hash(self):
+        """Verify all workflow pip installs use hash pinning (Scorecard requirement)."""
         unpinned = [
             f"{name}: {cmd}"
             for name, cmd in _workflow_pip_commands()
@@ -263,6 +272,7 @@ class TestWorkflowPipInstallsPinned(unittest.TestCase):
 
 class TestLockFiles(unittest.TestCase):
     def test_marker_evaluation(self):
+        """Verify python_version marker evaluation for dependency filtering."""
         tomli = "tomli>=1.1.0; python_version < '3.11'"
         mcp = "mcp>=1.23.0; python_version >= '3.10'"
         self.assertFalse(_applies(tomli, (3, 12)))
@@ -273,11 +283,13 @@ class TestLockFiles(unittest.TestCase):
         self.assertTrue(_applies("requests>=2.28.0", (3, 12)))
 
     def test_expected_lock_files_exist(self):
+        """Verify all expected lock files exist."""
         for lock in LOCK_EXTRAS:
             with self.subTest(lock=lock):
                 self.assertTrue((REQUIREMENTS_DIR / lock).is_file())
 
     def test_every_entry_is_exact_and_hashed(self):
+        """Verify all lock file entries are exact versions with SHA256 hashes."""
         for lock in LOCK_EXTRAS:
             entries = _lock_entries(REQUIREMENTS_DIR / lock)
             self.assertTrue(entries, f"{lock} has no entries")
@@ -287,6 +299,7 @@ class TestLockFiles(unittest.TestCase):
                     self.assertIn("--hash=sha256:", entry)
 
     def test_locks_cover_declared_dependencies(self):
+        """Verify each lock file covers all declared dependencies for its extras."""
         optional = PYPROJECT["project"]["optional-dependencies"]
         for lock, extras in LOCK_EXTRAS.items():
             locked = {
@@ -304,8 +317,11 @@ class TestLockFiles(unittest.TestCase):
                     self.assertIn(name, locked)
 
     def test_editable_installs_have_build_backend_locked(self):
+        """Verify build backend tools are available in all hash-locked environments."""
         # `--no-build-isolation` editable installs need the build backend
-        # preinstalled from the same hash-locked file.
+        # preinstalled from the same hash-locked file. build.txt is included
+        # because publish.yml runs `python -m build --no-isolation`, requiring
+        # setuptools and wheel to be pre-installed with pinned hashes.
         requires = PYPROJECT["build-system"]["requires"]
         for lock in ("ci.txt", "mutation.txt", "copilot.txt", "build.txt"):
             locked = {
