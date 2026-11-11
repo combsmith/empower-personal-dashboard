@@ -141,11 +141,14 @@ jobs:
 
       - name: Install build tools
         run: |
-          python -m pip install --upgrade pip
-          pip install --upgrade build twine
+          # Hash-locked install (OpenSSF Scorecard Pinned-Dependencies, #58).
+          # Regenerate requirements/build.txt with the command in its header.
+          python -m pip install --require-hashes -r requirements/build.txt
 
       - name: Build sdist and wheel
-        run: python -m build
+        # --no-isolation: build with the hash-locked setuptools/wheel installed
+        # above instead of letting an isolated env fetch them unpinned.
+        run: python -m build --no-isolation
 
       - name: Verify package metadata with twine
         run: twine check --strict dist/*
