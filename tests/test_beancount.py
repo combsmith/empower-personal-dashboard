@@ -4321,9 +4321,12 @@ class TestCoreSweepOpeningLotAtCost(unittest.TestCase):
             self.assertEqual(str(opening[0][0]), "2020-01-01")
             self.assertEqual(opening[0][2].number, 1)
             self.assertEqual(opening[0][2].currency, "USD")
-            # Redemption is dated 2026-10-01 and the net SPAXX balance is zero.
-            redemptions = [s for s in spaxx if s[1] == -800]
-            self.assertEqual([str(s[0]) for s in redemptions], ["2026-10-01"])
+            # Redemption (-800 total) is dated 2026-10-01, first drains the
+            # opening lot (cost date 2020-01-01), and the net SPAXX balance is zero.
+            redemptions = [s for s in spaxx if s[1] < 0]
+            self.assertEqual({str(s[0]) for s in redemptions}, {"2026-10-01"})
+            self.assertEqual(sum(s[1] for s in redemptions), -800)
+            self.assertIn((-500, "2020-01-01"), [(s[1], str(s[2].date)) for s in redemptions])
             self.assertEqual(sum(s[1] for s in spaxx), 0)
 
     def test_append_to_legacy_cost_less_lot_documents_limitation(self):
