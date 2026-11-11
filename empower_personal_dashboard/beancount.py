@@ -3190,7 +3190,9 @@ class BeancountGenerator:
         # Ensure holdings.bean include is present if missing
         if f'include "{BEAN_HOLDINGS}"' not in updated_main:
             updated_main += f'\ninclude "{BEAN_HOLDINGS}"\n'
-        for b in sorted(set(extra_beans)):
+        # Only bare filenames may be included; reject anything that could escape ``dest``.
+        safe_extra = {b for b in extra_beans if b and b == Path(b).name and b not in (".", "..")}
+        for b in sorted(safe_extra):
             include_line = f"include {_quote_beancount_string(b, 'include filename')}"
             if include_line not in updated_main:
                 updated_main += include_line + "\n"
