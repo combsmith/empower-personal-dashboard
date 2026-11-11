@@ -4407,10 +4407,17 @@ class TestCoreSweepOpeningLotAtCost(unittest.TestCase):
 
             _entries, errors, _options = loader.load_file(str(ledger_dir / "main.bean"))
             self.assertGreater(len(errors), 0)
-            error_strs = [str(e).lower() for e in errors]
+            # Inspect only the error type and message (str(e) can include the attached
+            # transaction and its cost field, letting unrelated errors match).
+            reduction_errors = [
+                e
+                for e in errors
+                if type(e).__name__ in ("ReductionError", "BookingError")
+                and "spaxx" in str(getattr(e, "message", "")).lower()
+            ]
             self.assertTrue(
-                any("cost" in e or "booking" in e for e in error_strs),
-                f"Expected cost/booking error, got: {error_strs}",
+                reduction_errors,
+                f"Expected SPAXX lot reduction error, got: {[(type(e).__name__, getattr(e, 'message', '')) for e in errors]}",
             )
 
 
