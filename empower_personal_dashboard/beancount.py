@@ -3079,7 +3079,9 @@ class BeancountGenerator:
             try:
                 dest_dir.unlink(backup_name)
             except (OSError, ValueError):
-                pass
+                logger.warning(
+                    "Ledger backup cleanup could not remove %s", backup_name, exc_info=True
+                )
         return [dest_dir.path / name for name in created_files]
 
     def export_modular_ledger(
