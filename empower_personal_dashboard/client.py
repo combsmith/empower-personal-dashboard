@@ -18,7 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import requests
 
-from ._safe_io import PinnedDir
+from ._safe_io import PinnedDir, is_link_like
 from .exceptions import (
     EmpowerError,
     LoginFailedException,
@@ -76,6 +76,14 @@ def _env_flag(value: Optional[str]) -> bool:
     return value.strip().lower() not in _FALSY_ENV_VALUES
 
 
+def _is_link_like_path(path: Path) -> bool:
+    """True for a symlink or a Windows junction/reparse point (not followed)."""
+    try:
+        return is_link_like(path.lstat())
+    except OSError:
+        return False
+
+
 def _safe_fs_path(filepath: Union[str, Path], *, description: str, action: str = "write to") -> Path:
     """Resolve and validate a user-supplied filesystem path before any read or write.
 
@@ -92,12 +100,12 @@ def _safe_fs_path(filepath: Union[str, Path], *, description: str, action: str =
     expanded = Path(filepath).expanduser()
     # Inspect the user-supplied location for a symlink *before* resolving it:
     # ``Path.resolve()`` follows symlinks, so a post-resolve check never sees one.
-    if expanded.is_symlink():
+    if _is_link_like_path(expanded):
         raise ValueError(f"Refusing to {action} symlinked {description}: {expanded}")
     # A symlink anywhere in the parent chain can redirect the write just as a
     # symlinked leaf can; reject every symlinked parent before resolving.
     for parent in expanded.parents:
-        if parent.is_symlink():
+        if _is_link_like_path(parent):
             raise ValueError(f"Refusing to {action} {description} inside symlinked directory: {expanded}")
     return expanded.resolve()
 

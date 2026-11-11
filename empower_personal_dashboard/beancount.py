@@ -3072,7 +3072,7 @@ class BeancountGenerator:
                     backups.append((backup_name, target_name))
                 dest_dir.replace(tmp_name, target_name)
                 created_files.append(target_name)
-        except Exception:
+        except BaseException:  # includes KeyboardInterrupt: always roll back
             BeancountGenerator._rollback_committed_files(dest_dir, backups, created_files, temp_files)
             raise
         # Commit succeeded; backup cleanup is best-effort and must never trigger a rollback.
