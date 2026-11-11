@@ -23,6 +23,7 @@ from empower_personal_dashboard.beancount import (
     _parse_simple_yaml,
     slugify_account_name,
 )
+from empower_personal_dashboard.exceptions import LedgerAppendError
 
 # Standard Beancount account regex
 BEANCOUNT_ACCOUNT_REGEX = re.compile(
@@ -4306,6 +4307,87 @@ class TestCoreSweepOpeningLotAtCost(unittest.TestCase):
 
             _entries, errors, _options = loader.load_file(str(ledger_dir / "main.bean"))
             self.assertEqual(errors, [])
+
+    def test_append_to_legacy_cost_less_lot_documents_limitation(self):
+        """Legacy cost-less lots cannot be reduced by a later {} redemption.
+
+        Appending to a ledger where the opening lot was written cost-less (e.g.
+        before the fix, or hand-edited) will fail when the append carries a cost-based
+        redemption ({}), because {} only matches lots held at cost. This test documents
+        the limitation: users must manually edit legacy cost-less lots to at-cost form.
+        """
+        initial = self._holdings("2026-09-30", [{"ticker": "SPAXX", "quantity": 500.0, "price": 1.0}])
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ledger_dir = Path(tmp_dir) / "ledger"
+
+            # Initial export with the new code (writes at cost).
+            self.generator.export_modular_ledger(
+                destination_dir=ledger_dir, holdings=initial, append=False, opening_date="2020-01-01"
+            )
+
+            # Simulate a legacy ledger: manually edit the holdings file to use cost-less notation.
+            holdings_text = (ledger_dir / "holdings.bean").read_text(encoding="utf-8")
+            # Replace the cost notation {1.000000 USD} with price notation @ 1.0000 USD
+            legacy_holdings = holdings_text.replace(
+                "500.000000 SPAXX {1.000000 USD}",
+                "500.000000 SPAXX @ 1.0000 USD"
+            )
+            (ledger_dir / "holdings.bean").write_text(legacy_holdings, encoding="utf-8")
+
+            # Now try to append with a redemption that uses the {} cost spec.
+            updated = self._holdings("2026-10-02", [{"ticker": "SPAXX", "quantity": 0.0, "price": 1.0}])
+            txs = DashboardTransactions(
+                start_date="2026-10-01",
+                end_date="2026-10-01",
+                total_transactions=1,
+                money_in=0.0,
+                money_out=500.0,
+                net_cashflow=-500.0,
+                transactions=[
+                    {
+                        "user_transaction_id": 99175003,
+                        "account_name": "Synthetic IRA",
+                        "transaction_date": "2026-10-01",
+                        "description": "Fidelity Government Money Market - Redemption From Core Account",
+                        "amount": 500.0,
+                        "transaction_type": "Shares In",
+                        "investment_type": "Transfer",
+                        "symbol": "SPAXX",
+                        "price": 1.0,
+                        "quantity": 500.0,
+                        "status": "posted",
+                    },
+                ],
+            )
+
+            # Append with a redemption. The legacy cost-less lot and the new {} redemption
+            # will be written to the ledger. However, when Beancount loads the ledger,
+            # it will fail because {} can only reduce lots held at cost, not cost-less ones.
+            try:
+                self.generator.export_modular_ledger(
+                    destination_dir=ledger_dir,
+                    holdings=updated,
+                    transactions=txs,
+                    append=True,
+                    opening_date="2020-01-01",
+                )
+                # Export succeeded. Now try to load the ledger - that's where it should fail.
+                from beancount import loader
+                _entries, errors, _options = loader.load_file(str(ledger_dir / "main.bean"))
+                # If we get here, the load failed. Document that legacy cost-less lots
+                # cause load errors when a {} redemption is appended.
+                self.assertGreater(len(errors), 0, "Expected Beancount to report an error when reducing a cost-less lot with {}")
+                # Verify the error mentions the booking or cost matching issue.
+                error_strs = [str(e) for e in errors]
+                self.assertTrue(
+                    any("cost" in e.lower() or "booking" in e.lower() for e in error_strs),
+                    f"Expected cost/booking error, got: {error_strs}"
+                )
+            except LedgerAppendError as e:
+                # If the export itself raises LedgerAppendError, that's also acceptable.
+                self.assertIn("cost", str(e).lower(), f"Expected error to mention cost, got: {e}")
+            except Exception as e:
+                self.fail(f"Unexpected error type {type(e).__name__}: {e}")
 
 
 if __name__ == "__main__":
