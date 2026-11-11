@@ -32,3 +32,12 @@ Regenerate the affected locks whenever you change dependencies or extras in
 `pyproject.toml`. `tests/test_pinned_dependencies.py` fails if a lock is
 missing a declared dependency, if an entry isn't exact and hashed, or if a
 workflow adds an unpinned `pip install`.
+
+## Provenance
+
+Regenerate locks only against the default PyPI index (`https://pypi.org/simple`);
+do not pass `--extra-index-url` or `--index-url` pointing at a mirror. Hashes
+prove the installed bytes match what was locked, not who published them, so
+review the diff of each regenerated lock (new packages, version jumps) before
+committing. After regenerating, run `python3 -m unittest tests/test_pinned_dependencies.py`
+to confirm every lock still satisfies the version specifiers in `pyproject.toml`.
