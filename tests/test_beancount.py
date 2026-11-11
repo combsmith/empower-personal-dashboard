@@ -2676,7 +2676,12 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
 
             def swap_then_generate(*args, **kwargs):
                 os.rename(dest, moved)
-                dest.symlink_to(outside, target_is_directory=True)
+                try:
+                    dest.symlink_to(outside, target_is_directory=True)
+                except (OSError, NotImplementedError):
+                    # Symlink creation can need privileges (e.g. Windows); a
+                    # plain directory replacement exercises the same swap.
+                    dest.mkdir()
                 return real_generate(*args, **kwargs)
 
             test_holdings = DashboardHoldings(
@@ -2686,10 +2691,14 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
             with patch.object(self.generator, "generate_accounts_bean", side_effect=swap_then_generate):
                 try:
                     self.generator.export_modular_ledger(destination_dir=dest, holdings=test_holdings)
-                except ValueError:
+                except ValueError as exc:
                     # Platforms without dir_fd cannot pin; refusing is the safe outcome there.
                     if _safe_io.DIR_FD_SUPPORTED:
                         raise
+                    self.assertRegex(
+                        str(exc),
+                        "symlinked or non-directory component|replaced since it was pinned|no longer exists",
+                    )
                 else:
                     self.assertTrue(_safe_io.DIR_FD_SUPPORTED)
                     self.assertIn("accounts.bean", [p.name for p in moved.iterdir()])
@@ -2713,6 +2722,11 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir).resolve()
             with PinnedDir(root / "ledger", create=True) as pinned:
+                # Invalidate the path after pinning: output must land in the
+                # pinned (renamed) directory, never in the replacement.
+                moved = root / "ledger_moved"
+                os.rename(root / "ledger", moved)
+                (root / "ledger").mkdir()
                 paths = self.generator.export_modular_ledger(
                     destination_dir=root / "ledger", pinned_dir=pinned,
                 )
@@ -2720,7 +2734,8 @@ class TestShortPositionsCostBasisAndAtomicModularExport(unittest.TestCase):
                 sorted(p.name for p in paths),
                 sorted(["main.bean", "accounts.bean", "balances.bean", "holdings.bean", "prices.bean", "transactions.bean"]),
             )
-            self.assertTrue((root / "ledger" / "main.bean").is_file())
+            self.assertTrue((moved / "main.bean").is_file())
+            self.assertEqual(list((root / "ledger").iterdir()), [])
 
     def test_short_position_opposite_sign_does_not_inherit_cost_basis(self):
         lines = []

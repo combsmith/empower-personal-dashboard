@@ -276,14 +276,21 @@ class PinnedDir:
         """
         _check_name(name)
         self._refuse_link_leaf_without_fd(name)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | _O_NOFOLLOW | _O_CLOEXEC | _O_BINARY
+        # O_NONBLOCK keeps a FIFO planted at the path from hanging the open; the
+        # descriptor is then required to be a regular file.
+        flags = (
+            os.O_WRONLY | os.O_CREAT | os.O_APPEND | _O_NOFOLLOW | _O_CLOEXEC | _O_BINARY | _O_NONBLOCK
+        )
         fd = os.open(self._target(name), flags, 0o600, **self._dir_kw())
-        if hasattr(os, "fchmod"):
-            try:
-                os.fchmod(fd, os.fstat(fd).st_mode & 0o600)
-            except OSError:
-                os.close(fd)
-                raise
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                raise ValueError(f"Refusing to open non-regular file: {self.path / name}")
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, st.st_mode & 0o600)
+        except BaseException:
+            os.close(fd)
+            raise
         return fd
 
     def write_temp(

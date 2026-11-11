@@ -193,6 +193,8 @@ class TestPinnedDir(unittest.TestCase):
 
     @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
     def test_subdir_is_opened_relative_to_pinned_parent(self) -> None:
+        if not _safe_io.DIR_FD_SUPPORTED:
+            self.skipTest("requires dir_fd support")
         victim = self.root / "victim"
         victim.mkdir()
         outside = self.root / "outside"
@@ -201,14 +203,39 @@ class TestPinnedDir(unittest.TestCase):
         with PinnedDir(victim) as d:
             os.rename(victim, moved)
             victim.symlink_to(outside, target_is_directory=True)
-            if _safe_io.DIR_FD_SUPPORTED:
-                with d.subdir("ledger", create=True) as ledger:
-                    ledger.write_atomic("main.bean", lambda f: f.write("X"))
-                self.assertEqual((moved / "ledger" / "main.bean").read_text(encoding="utf-8"), "X")
-            else:
+            with d.subdir("ledger", create=True) as ledger:
+                ledger.write_atomic("main.bean", lambda f: f.write("X"))
+            self.assertEqual((moved / "ledger" / "main.bean").read_text(encoding="utf-8"), "X")
+        self.assertEqual(list(outside.iterdir()), [])
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
+    def test_subdir_refuses_swapped_parent_in_fallback(self) -> None:
+        victim = self.root / "victim"
+        victim.mkdir()
+        outside = self.root / "outside"
+        outside.mkdir()
+        original = _safe_io.DIR_FD_SUPPORTED
+        _safe_io.DIR_FD_SUPPORTED = False
+        try:
+            with PinnedDir(victim) as d:
+                os.rename(victim, self.root / "moved")
+                victim.symlink_to(outside, target_is_directory=True)
                 with self.assertRaises(ValueError):
                     d.subdir("ledger", create=True)
+        finally:
+            _safe_io.DIR_FD_SUPPORTED = original
         self.assertEqual(list(outside.iterdir()), [])
+
+    def test_subdir_creates_child_in_fallback(self) -> None:
+        original = _safe_io.DIR_FD_SUPPORTED
+        _safe_io.DIR_FD_SUPPORTED = False
+        try:
+            with PinnedDir(self.root) as d:
+                with d.subdir("ledger", create=True) as ledger:
+                    ledger.write_atomic("main.bean", lambda f: f.write("X"))
+        finally:
+            _safe_io.DIR_FD_SUPPORTED = original
+        self.assertEqual((self.root / "ledger" / "main.bean").read_text(encoding="utf-8"), "X")
 
     @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
     def test_subdir_refuses_symlinked_child(self) -> None:
@@ -265,13 +292,39 @@ class TestPinnedDir(unittest.TestCase):
 
     @unittest.skipUnless(hasattr(os, "symlink"), "requires symlink support")
     def test_open_private_append_refuses_symlinked_leaf(self) -> None:
-        target = self.root / "target.log"
-        target.write_text("UNTOUCHED", encoding="utf-8")
-        (self.root / "debug.log").symlink_to(target)
+        for fallback in (False, True):
+            with self.subTest(fallback=fallback):
+                original = _safe_io.DIR_FD_SUPPORTED
+                _safe_io.DIR_FD_SUPPORTED = original and not fallback
+                try:
+                    base = self.root / f"leaf_{fallback}"
+                    base.mkdir()
+                    target = base / "target.log"
+                    target.write_text("UNTOUCHED", encoding="utf-8")
+                    (base / "debug.log").symlink_to(target)
+                    with PinnedDir(base) as d:
+                        with self.assertRaises(OSError):
+                            d.open_private_append("debug.log")
+                    self.assertEqual(target.read_text(encoding="utf-8"), "UNTOUCHED")
+                finally:
+                    _safe_io.DIR_FD_SUPPORTED = original
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires FIFO support")
+    def test_open_private_append_refuses_fifo_without_blocking(self) -> None:
+        fifo = self.root / "debug.log"
+        os.mkfifo(fifo)
+        # A reader makes the write-open succeed immediately; without one,
+        # O_NONBLOCK makes it fail (ENXIO) instead of hanging.
+        reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            with PinnedDir(self.root) as d:
+                with self.assertRaises(ValueError):
+                    d.open_private_append("debug.log")
+        finally:
+            os.close(reader)
         with PinnedDir(self.root) as d:
             with self.assertRaises(OSError):
                 d.open_private_append("debug.log")
-        self.assertEqual(target.read_text(encoding="utf-8"), "UNTOUCHED")
 
 
 if __name__ == "__main__":

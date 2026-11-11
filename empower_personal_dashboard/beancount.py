@@ -3239,8 +3239,8 @@ class BeancountGenerator:
         extra_beans: Optional[List[str]] = None,
     ) -> Path:
         """Write or patch main.bean, ensuring the holdings include and FIFO booking option."""
-        main_path = dest.resolve() / BEAN_MAIN
-        if main_path.parent != dest.resolve():
+        main_path = dest / BEAN_MAIN
+        if dest.is_symlink() or main_path.resolve().parent != dest.resolve():
             raise ValueError(f"Refusing to write outside the staging directory: {main_path}")
         _verify_not_symlink(main_path)
         if extra_beans is None:
