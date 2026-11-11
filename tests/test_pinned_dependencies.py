@@ -318,15 +318,15 @@ class TestLockFiles(unittest.TestCase):
         Only package-name presence is checked; pinned versions are not compared
         against the pyproject specifiers.
         """
-        optional = PYPROJECT["project"]["optional-dependencies"]
+        optional = PYPROJECT.get("project", {}).get("optional-dependencies", {})
         for lock, extras in LOCK_EXTRAS.items():
             locked = {
                 _normalize(_NAME.match(e).group(1))
                 for e in _lock_entries(REQUIREMENTS_DIR / lock)
             }
-            declared = list(PYPROJECT["project"]["dependencies"])
+            declared = list(PYPROJECT.get("project", {}).get("dependencies", []))
             for extra in extras:
-                declared.extend(optional[extra])
+                declared.extend(optional.get(extra, []))
             for spec in declared:
                 if not _applies(spec, LOCK_PYTHON[lock]):
                     continue
@@ -340,8 +340,8 @@ class TestLockFiles(unittest.TestCase):
         # preinstalled from the same hash-locked file. build.txt is included
         # because publish.yml runs `python -m build --no-isolation`, requiring
         # setuptools and wheel to be pre-installed with pinned hashes.
-        requires = PYPROJECT["build-system"]["requires"]
-        for lock in ("ci.txt", "mutation.txt", "copilot.txt", "build.txt"):
+        requires = PYPROJECT.get("build-system", {}).get("requires", [])
+        for lock in LOCK_EXTRAS:
             locked = {
                 _normalize(_NAME.match(e).group(1))
                 for e in _lock_entries(REQUIREMENTS_DIR / lock)
