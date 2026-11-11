@@ -3000,7 +3000,12 @@ class BeancountGenerator:
             try:
                 dest_dir.replace(backup_name, target_name)
             except Exception:
-                pass
+                logger.warning(
+                    "Ledger rollback could not restore %s from %s",
+                    target_name,
+                    backup_name,
+                    exc_info=True,
+                )
         backed_up = {target for _, target in backups}
         for name in created_files + [tmp for tmp, _ in temp_files]:
             if name in backed_up:
@@ -3008,7 +3013,7 @@ class BeancountGenerator:
             try:
                 dest_dir.unlink(name)
             except Exception:
-                pass
+                logger.warning("Ledger rollback could not remove %s", name, exc_info=True)
 
     @staticmethod
     def _commit_staged_files(
@@ -3073,7 +3078,7 @@ class BeancountGenerator:
         for backup_name, _ in backups:
             try:
                 dest_dir.unlink(backup_name)
-            except OSError:
+            except (OSError, ValueError):
                 pass
         return [dest_dir.path / name for name in created_files]
 
