@@ -4192,6 +4192,46 @@ class TestCoreSweepOpeningLotAtCost(unittest.TestCase):
         out = self.generator.generate_holdings_bean(holdings, opening_date="2020-01-01")
         self.assertIn("40.000000 ABCXX @ 10.0000 USD", out)
 
+    def test_append_sweep_topup_lot_without_cost_basis_or_sale_is_written_at_cost(self):
+        """A buy-only append whose snapshot needs a top-up lot books it at cost (no sale forces it)."""
+        initial = self._holdings("2026-09-30", [{"ticker": "SPAXX", "quantity": 500.0, "price": 1.0}])
+        updated = self._holdings("2026-10-02", [{"ticker": "SPAXX", "quantity": 900.0, "price": 1.0}])
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-01",
+            total_transactions=1,
+            money_in=0.0,
+            money_out=0.0,
+            net_cashflow=0.0,
+            transactions=[
+                {
+                    "user_transaction_id": 99175011,
+                    "account_name": "Synthetic IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": "Fidelity Government Money Market - Purchase Into Core Account",
+                    "amount": 100.0,
+                    "transaction_type": "Shares Out",
+                    "investment_type": "Transfer",
+                    "symbol": "SPAXX",
+                    "price": 1.0,
+                    "quantity": 100.0,
+                    "status": "posted",
+                },
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ledger_dir = Path(tmp_dir) / "ledger"
+            self.generator.export_modular_ledger(
+                destination_dir=ledger_dir, holdings=initial, append=False, opening_date="2020-01-01"
+            )
+            self.generator.export_modular_ledger(
+                destination_dir=ledger_dir, holdings=updated, transactions=txs,
+                append=True, opening_date="2020-01-01",
+            )
+            holdings_text = (ledger_dir / "holdings.bean").read_text(encoding="utf-8")
+            self.assertNotIn("SPAXX @", holdings_text)
+            self.assertIn("SPAXX {1.000000 USD}", holdings_text.split("500.000000 SPAXX {1.000000 USD}", 1)[1])
+
     def test_append_core_redemption_reduces_snapshot_lot_written_without_sale(self):
         """Repro from Issue #175: first export with no SPAXX sale, then an append with a core purchase and redemption."""
         initial = self._holdings("2026-09-30", [{"ticker": "SPAXX", "quantity": 500.0, "price": 1.0}])
