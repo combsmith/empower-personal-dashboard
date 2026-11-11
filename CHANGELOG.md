@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Security
 - Session files can no longer select a custom API host; pass `--api-host` explicitly on each run. Only the legacy and migrated Empower hosts are restored from a session file ([#138](https://github.com/combsmith/empower-personal-dashboard/issues/138), [#153](https://github.com/combsmith/empower-personal-dashboard/pull/153)).
 
+### Fixed
+- Beancount snapshot opening lots for core-sweep tickers (money market `^[A-Z]{3}XX$`, bank sweep symbols, and configured `core_sweep_tickers` at a `$1.00` NAV, within ±$0.01) are now always written at cost using the reported NAV (for example `{1.000000 USD}`). Before, a lot written in a window with no sale had no cost, so a core redemption (`{}`) in a later `--append` export could not reduce it and `bean-check` failed. Lots already written without a cost are not rewritten; change `@ <NAV> USD` to `{<NAV> USD}` on those lines by hand, reusing each line's own reported NAV ([#175](https://github.com/combsmith/empower-personal-dashboard/issues/175)).
+
 ## [0.8.0] - 2026-10-24
 
 ### Added

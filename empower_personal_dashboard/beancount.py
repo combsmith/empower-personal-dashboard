@@ -1272,6 +1272,11 @@ def _reconciliation_date(snapshot_date: str) -> str:
     return _offset_date(snapshot_date, days=1)
 
 
+def _is_bare_include_name(name: str) -> bool:
+    """True for a bare filename (no path separators / relative components); quoting is checked at write time."""
+    return bool(name) and "/" not in name and "\\" not in name and name not in (".", "..")
+
+
 class BeancountGenerator:
     """Generates Beancount directives and ledger files from Empower data models."""
 
@@ -2410,6 +2415,22 @@ class BeancountGenerator:
                 else (net_buy_meta.get(key, {}).get("any_price", 0.0) or 1.0)
             )
             cost_basis = pos.get("cost_basis")
+            # A core-sweep vehicle's lot is always held at cost: a later export may
+            # append a core redemption (``-N TICKER {}``), and Beancount's ``{}``
+            # reduction only matches lots held at cost. Appends never rewrite an
+            # existing lot, so the cost must be written the first time. At the
+            # ~$1.00 NAV (within the +/-$0.01 evidence tolerance) the cost equals the
+            # snapshot price, so quantity and weight are unchanged.
+            # For snapshot holdings (no transaction context), check ticker and price only.
+            # Only real price evidence counts: the 1.0 fallback above is a
+            # placeholder, not reported NAV, so it must not trigger forced cost.
+            evidence_price = raw_price if raw_price > 0 else (
+                net_buy_meta.get(key, {}).get("any_price", 0.0)
+            )
+            if not force_cost and evidence_price > 0 and _has_core_sweep_evidence(
+                ticker, evidence_price, "", custom_sweep_tickers=self.mapper.core_sweep_tickers
+            ):
+                force_cost = True
 
             if plan["emit_initial_lot"]:
                 self._append_snapshot_lot(
@@ -3179,7 +3200,9 @@ class BeancountGenerator:
         # Ensure holdings.bean include is present if missing
         if f'include "{BEAN_HOLDINGS}"' not in updated_main:
             updated_main += f'\ninclude "{BEAN_HOLDINGS}"\n'
-        for b in sorted(set(extra_beans)):
+        # Only bare filenames may be included; reject anything that could escape ``dest``.
+        safe_extra = {b for b in extra_beans if _is_bare_include_name(b)}
+        for b in sorted(safe_extra):
             include_line = f"include {_quote_beancount_string(b, 'include filename')}"
             if include_line not in updated_main:
                 updated_main += include_line + "\n"
@@ -3188,7 +3211,11 @@ class BeancountGenerator:
         # earlier release that omitted the option.
         updated_main = _ensure_fifo_booking_method(updated_main)
         if updated_main != current_main:
-            main_path.write_text(updated_main, encoding="utf-8")
+            # NOSONAR pythonsecurity:S2083 — false positive. ``main_path`` is
+            # ``dest / BEAN_MAIN`` (a constant filename) validated by
+            # ``_verify_not_symlink``; the ledger content is data, never a path, and
+            # include names are restricted to bare filenames above.
+            main_path.write_text(updated_main, encoding="utf-8")  # NOSONAR
         return main_path
 
     def _write_modular_holdings(
