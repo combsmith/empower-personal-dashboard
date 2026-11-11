@@ -4193,6 +4193,20 @@ class TestCoreSweepOpeningLotAtCost(unittest.TestCase):
         holdings = self._holdings("2026-09-30", [{"ticker": "SPAXX", "quantity": 500.0, "price": 0.0}])
         out = self.generator.generate_holdings_bean(holdings, opening_date="2020-01-01")
         self.assertNotIn("SPAXX {1.000000 USD}", out)
+        self.assertIn("500.000000 SPAXX @ 0.0000 USD", out)
+        self.assertEqual(out.count("SPAXX {"), 0)
+        self.assertEqual(out.count("SPAXX @"), 1)
+
+        # The generated text must parse and book cleanly under Beancount's loader.
+        from beancount import loader
+
+        ledger = (
+            "option \"operating_currency\" \"USD\"\n"
+            "2000-01-01 open Assets:Brokerage:SyntheticIRA\n"
+            "2000-01-01 open Equity:Opening-Balances\n\n" + out
+        )
+        _entries, errors, _options = loader.load_string(ledger)
+        self.assertEqual(errors, [])
 
     def test_money_market_ticker_off_one_dollar_nav_not_forced_to_cost(self):
         """Without a $1.00 NAV the sweep evidence rule does not apply, so the lot keeps the ``@ price`` form."""
