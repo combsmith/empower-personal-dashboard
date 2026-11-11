@@ -4136,6 +4136,7 @@ class TestCoreSweepOpeningLotAtCost(unittest.TestCase):
 
     @staticmethod
     def _holdings(as_of, positions):
+        """Build a DashboardHoldings snapshot from a list of position dicts (ticker, quantity, price)."""
         return DashboardHoldings(
             as_of_date=as_of,
             total_value=sum(p["quantity"] * p["price"] for p in positions),
