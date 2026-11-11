@@ -4384,6 +4384,7 @@ class TestCoreSweepOpeningLotAtCost(unittest.TestCase):
             # Append with a redemption. The legacy cost-less lot and the new {} redemption
             # will be written to the ledger. However, when Beancount loads the ledger,
             # it will fail because {} can only reduce lots held at cost, not cost-less ones.
+            append_error = None
             try:
                 self.generator.export_modular_ledger(
                     destination_dir=ledger_dir,
@@ -4392,23 +4393,24 @@ class TestCoreSweepOpeningLotAtCost(unittest.TestCase):
                     append=True,
                     opening_date="2020-01-01",
                 )
-                # Export succeeded. Now try to load the ledger - that's where it should fail.
-                from beancount import loader
-                _entries, errors, _options = loader.load_file(str(ledger_dir / "main.bean"))
-                # If we get here, the load failed. Document that legacy cost-less lots
-                # cause load errors when a {} redemption is appended.
-                self.assertGreater(len(errors), 0, "Expected Beancount to report an error when reducing a cost-less lot with {}")
-                # Verify the error mentions the booking or cost matching issue.
-                error_strs = [str(e) for e in errors]
-                self.assertTrue(
-                    any("cost" in e.lower() or "booking" in e.lower() for e in error_strs),
-                    f"Expected cost/booking error, got: {error_strs}"
-                )
-            except LedgerAppendError as e:
-                # If the export itself raises LedgerAppendError, that's also acceptable.
-                self.assertIn("cost", str(e).lower(), f"Expected error to mention cost, got: {e}")
-            except Exception as e:
-                self.fail(f"Unexpected error type {type(e).__name__}: {e}")
+            except LedgerAppendError as exc:
+                # The export itself rejecting the append is also acceptable.
+                append_error = exc
+
+            if append_error is not None:
+                self.assertIn("cost", str(append_error).lower())
+                return
+
+            # Export succeeded; the failure surfaces when Beancount loads the ledger.
+            from beancount import loader
+
+            _entries, errors, _options = loader.load_file(str(ledger_dir / "main.bean"))
+            self.assertGreater(len(errors), 0)
+            error_strs = [str(e).lower() for e in errors]
+            self.assertTrue(
+                any("cost" in e or "booking" in e for e in error_strs),
+                f"Expected cost/booking error, got: {error_strs}",
+            )
 
 
 if __name__ == "__main__":
