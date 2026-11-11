@@ -2416,6 +2416,7 @@ class BeancountGenerator:
             # existing lot, so the cost must be written the first time. At the
             # ~$1.00 NAV (within the +/-$0.01 evidence tolerance) the cost equals the
             # snapshot price, so quantity and weight are unchanged.
+            # For snapshot holdings (no transaction context), check ticker and price only.
             if not force_cost and _has_core_sweep_evidence(
                 ticker, effective_price, "", custom_sweep_tickers=self.mapper.core_sweep_tickers
             ):
