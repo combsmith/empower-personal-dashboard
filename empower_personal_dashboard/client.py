@@ -111,6 +111,7 @@ class _PrivateFileHandler(logging.FileHandler):
     """
 
     def _open(self):  # type: ignore[override]
+        """Open the debug log relative to its pinned parent directory."""
         # Pin the parent directory first (creating missing components relative
         # to their already-pinned parent) and open the log relative to it, so
         # an ancestor swapped for a symlink cannot redirect the file or the

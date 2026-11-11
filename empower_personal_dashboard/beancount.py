@@ -3039,6 +3039,7 @@ class BeancountGenerator:
 
     @staticmethod
     def _commit_into_pinned(staged_files: List[Path], dest_dir: PinnedDir) -> List[Path]:
+        """Move staged files into the pinned destination directory, returning the committed paths."""
         for sf in staged_files:
             st = dest_dir.lstat(sf.name)
             if st is None:
@@ -3136,6 +3137,7 @@ class BeancountGenerator:
         append: bool,
         opening_date: Optional[str],
     ) -> List[Path]:
+        """Write the modular ledger into ``dest`` using a pinned directory."""
         effective_opening_date = _determine_opening_date(transactions, balances, opening_date)
         extra_beans = self._extra_bean_names(dest_dir)
 

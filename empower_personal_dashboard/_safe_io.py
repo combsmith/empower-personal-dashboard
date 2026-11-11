@@ -71,6 +71,7 @@ def is_link_like(st: os.stat_result) -> bool:
 
 
 def _symlinked_component_error(path: Path) -> ValueError:
+    """Build the error raised when a path component is a symlink or not a directory."""
     return ValueError(f"Refusing to use directory with a symlinked or non-directory component: {path}")
 
 
@@ -126,6 +127,7 @@ class PinnedDir:
     """
 
     def __init__(self, path: Union[str, Path], *, create: bool = False) -> None:
+        """Pin ``path`` (absolute), optionally creating missing components."""
         self.path = Path(path)
         if not self.path.is_absolute():
             raise ValueError(f"Directory path must be absolute: {self.path}")
@@ -138,6 +140,7 @@ class PinnedDir:
 
     @classmethod
     def _from_fd(cls, path: Path, fd: int) -> "PinnedDir":
+        """Wrap an already-open directory descriptor as a ``PinnedDir``."""
         obj = cls.__new__(cls)
         obj.path = path
         obj.fd = fd
@@ -145,6 +148,7 @@ class PinnedDir:
         return obj
 
     def _open_nofollow(self, create: bool) -> int:
+        """Open every path component with no-follow semantics, returning the final fd."""
         flags = _O_DIR_SEARCH | _O_DIRECTORY | _O_NOFOLLOW | _O_CLOEXEC
         parts = self.path.parts
         fd = os.open(parts[0], flags)
@@ -159,14 +163,17 @@ class PinnedDir:
         return fd
 
     def close(self) -> None:
+        """Close the pinned descriptor (idempotent)."""
         if self.fd is not None:
             os.close(self.fd)
             self.fd = None
 
     def __enter__(self) -> "PinnedDir":
+        """Return self for use as a context manager."""
         return self
 
     def __exit__(self, *exc: Any) -> None:
+        """Close the pinned directory on context exit."""
         self.close()
 
     def _revalidate(self) -> None:
@@ -179,12 +186,14 @@ class PinnedDir:
             raise ValueError(f"Refusing to use directory replaced since it was pinned: {self.path}")
 
     def _target(self, name: str) -> str:
+        """Return the name to pass to os calls: bare name when fd-relative, else the full path."""
         if self.fd is not None:
             return name
         self._revalidate()
         return str(self.path / name)
 
     def _dir_kw(self) -> Dict[str, int]:
+        """Return the ``dir_fd`` keyword argument for os calls, empty in fallback mode."""
         return {"dir_fd": self.fd} if self.fd is not None else {}
 
     def _refuse_link_leaf_without_fd(self, name: str) -> None:
@@ -233,6 +242,7 @@ class PinnedDir:
             os.replace(self._target(src), self._target(dst))
 
     def unlink(self, name: str, *, missing_ok: bool = True) -> None:
+        """Remove ``name`` inside the pinned directory; ignore absence when ``missing_ok``."""
         _check_name(name)
         try:
             os.unlink(self._target(name), **self._dir_kw())
