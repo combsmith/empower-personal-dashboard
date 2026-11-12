@@ -1692,10 +1692,11 @@ class BeancountGenerator:
         append invalidates the preserved assertion.
 
         Quantities are formatted at source precision (2..6 decimals) via
-        :func:`_format_balance_quantity`. When rows of mixed precision aggregate
-        into a finer total, an explicit Beancount tolerance override (``~ 0.01``)
-        preserves the coarsest row's rounding tolerance without discarding the
-        six-decimal sum.
+        :func:`_format_balance_quantity`. Whenever the formatted sum's decimal
+        count differs from the coarsest contributing row's precision (either
+        mixed-precision rows or trailing-digit cancellation), an explicit
+        Beancount tolerance override (``~ 0.01`` / ``~ 0.000001``) preserves
+        the row-derived tolerance without discarding the aggregated quantity.
         """
         if not (holdings and holdings.holdings):
             return
@@ -1738,7 +1739,7 @@ class BeancountGenerator:
             qty_str = _format_balance_quantity(total_qty)
             sum_dp = len(qty_str.partition(".")[2])
             min_dp = holding_min_decimals.get(key, sum_dp)
-            if sum_dp > min_dp:
+            if sum_dp != min_dp:
                 tol_str = f"0.{'0' * (min_dp - 1)}1"
                 lines.append(f"{assert_date} balance {b_account} {qty_str} ~ {tol_str} {ticker}\n")
             else:
@@ -1858,7 +1859,7 @@ class BeancountGenerator:
             return existing_keys, existing_opening_qty, existing_reconciliations, latest_balance_dates
 
         for match in re.finditer(
-            r"^\s*(\d{4}-\d{2}-\d{2})\s+balance\s+(\S+)\s+-?\d+(?:\.\d+)?(?:\s+~\s+\d+(?:\.\d+)?)?\s+([A-Z0-9.\-]+)\b",
+            r"^\s*(\d{4}-\d{2}-\d{2})\s+balance\s+(\S+)\s+-?\d+(?:\.\d+)?(?:\s+~\s+\d+(?:\.\d+)?)?\s+([A-Z0-9'._\-]+)(?=\s|$|;)",
             existing_content,
             re.MULTILINE,
         ):

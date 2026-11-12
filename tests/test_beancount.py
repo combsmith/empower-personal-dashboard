@@ -2070,11 +2070,54 @@ class TestBeancountInvestmentGrowthReconstruction(unittest.TestCase):
             dust_bal_bean,
         )
         self.assertNotIn("~", dust_bal_bean)
-        # Ensure append-state parser tracks latest_balance_dates on explicit-tolerance lines.
-        _, _, _, latest_dates = self.generator._parse_existing_holdings_state(bal_bean)
+        # Ensure append-state parser tracks latest_balance_dates on explicit-tolerance lines
+        # as well as valid commodity symbols containing apostrophes or underscores.
+        extra_symbols_text = (
+            bal_bean
+            + "2026-11-08 balance Assets:AcmeBrokerage:TaxableBrokerage 12.50 ~ 0.01 BRK'B\n"
+            + "2026-11-09 balance Assets:AcmeBrokerage:TaxableBrokerage 25.00 ACME_A\n"
+        )
+        _, _, _, latest_dates = self.generator._parse_existing_holdings_state(extra_symbols_text)
         self.assertEqual(
             latest_dates.get("Assets:AcmeBrokerage:TaxableBrokerage:FFFFX"),
             "2026-11-07",
+        )
+        self.assertEqual(
+            latest_dates.get("Assets:AcmeBrokerage:TaxableBrokerage:BRK'B"),
+            "2026-11-08",
+        )
+        self.assertEqual(
+            latest_dates.get("Assets:AcmeBrokerage:TaxableBrokerage:ACME_A"),
+            "2026-11-09",
+        )
+        # Same-precision 6-dp rows whose sum cancels trailing digits (0.123456 + 0.876544 = 1.00)
+        # must still emit ~ 0.000001 so tolerance does not loosen to 0.01.
+        cancelling_holdings = DashboardHoldings(
+            as_of_date="2026-11-06",
+            total_value=10.0,
+            holdings=[
+                {
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "ticker": "FFFFX",
+                    "quantity": 0.123456,
+                    "price": 10.0,
+                    "cost_basis": 1.23,
+                },
+                {
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "ticker": "FFFFX",
+                    "quantity": 0.876544,
+                    "price": 10.0,
+                    "cost_basis": 8.77,
+                },
+            ],
+        )
+        cancelling_bal_bean = self.generator.generate_balances_bean(holdings=cancelling_holdings)
+        self.assertIn(
+            "2026-11-07 balance Assets:AcmeBrokerage:TaxableBrokerage 1.00 ~ 0.000001 FFFFX\n",
+            cancelling_bal_bean,
         )
 
     def test_transactions_only_investment_account_not_asserted_as_cash(self):

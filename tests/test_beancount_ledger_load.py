@@ -1255,6 +1255,40 @@ class TestUnitBalanceAssertionPrecision(unittest.TestCase):
         _entries, errors, _options = loader.load_string(mixed_prefix + excessive)
         self.assertTrue(any("Balance failed" in e.message for e in errors))
 
+    def test_cancelling_fractional_rows_preserve_fine_tolerance(self):
+        """Rows 0.123456 + 0.876544 summing to 1.00 emit ~ 0.000001 instead of loosening to 0.01."""
+        holdings = DashboardHoldings(
+            as_of_date="2024-10-06",
+            total_value=10.0,
+            holdings=[
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "ticker": "FFFFX", "quantity": 0.123456, "price": 10.0, "cost_basis": 1.23},
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "ticker": "FFFFX", "quantity": 0.876544, "price": 10.0, "cost_basis": 8.77},
+            ],
+        )
+        assertions = BeancountGenerator().generate_balances_bean(holdings=holdings)
+        self.assertIn(
+            "2024-10-07 balance Assets:AcmeBrokerage:TaxableBrokerage 1.00 ~ 0.000001 FFFFX",
+            assertions,
+        )
+        exact_prefix = (
+            "2024-01-01 open Assets:AcmeBrokerage:TaxableBrokerage\n"
+            "2024-01-01 open Equity:Opening-Balances\n"
+            "2024-10-01 * \"Lot A\"\n"
+            "  Assets:AcmeBrokerage:TaxableBrokerage  0.123456 FFFFX {10.000000 USD}\n"
+            "  Equity:Opening-Balances\n"
+            "2024-10-02 * \"Lot B\"\n"
+            "  Assets:AcmeBrokerage:TaxableBrokerage  0.876544 FFFFX {10.000000 USD}\n"
+            "  Equity:Opening-Balances\n"
+        )
+        assert_ledger_loads(self, exact_prefix + assertions)
+
+        # A 0.005 discrepancy (which bare 1.00 would accept) is rejected by ~ 0.000001.
+        drifted_prefix = exact_prefix.replace("0.876544 FFFFX", "0.871544 FFFFX")
+        _entries, errors, _options = loader.load_string(drifted_prefix + assertions)
+        self.assertTrue(any("Balance failed" in e.message for e in errors))
+
 
 if __name__ == "__main__":
     unittest.main()
