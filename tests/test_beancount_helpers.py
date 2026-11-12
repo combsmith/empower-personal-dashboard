@@ -12,6 +12,7 @@ and custom sweep ticker forwarding. All data is synthetic.
 import unittest
 
 from empower_personal_dashboard.beancount import (
+    _balance_quantity_decimals,
     _classify_buy_sell,
     _clean_tx_description,
     _format_balance_quantity,
@@ -311,10 +312,6 @@ class TestCommodityAndInvestmentTx(unittest.TestCase):
         self.assertFalse(_is_investment_tx(tx))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestFormatBalanceQuantity(unittest.TestCase):
     """Balance assertions keep the source precision so Beancount's inferred
     tolerance absorbs upstream rounding (issue #176)."""
@@ -355,3 +352,17 @@ class TestFormatBalanceQuantity(unittest.TestCase):
     def test_posting_quantity_format_unchanged(self):
         """Posting quantities keep the six-decimal format."""
         self.assertEqual(_format_quantity(501.54), "501.540000")
+
+    def test_balance_quantity_decimals_tracks_row_precision(self):
+        """Row decimal count reflects formatted precision while ignoring sub-micro dust."""
+        self.assertEqual(_balance_quantity_decimals(501.54), 2)
+        self.assertEqual(_balance_quantity_decimals(40), 2)
+        self.assertEqual(_balance_quantity_decimals(108.772), 3)
+        self.assertEqual(_balance_quantity_decimals(0.123456), 6)
+        # Sub-micro dust rounding to zero at 6 dp must not widen tolerance to 2 dp.
+        self.assertEqual(_balance_quantity_decimals(0.0), 6)
+        self.assertEqual(_balance_quantity_decimals(2e-7), 6)
+
+
+if __name__ == "__main__":
+    unittest.main()

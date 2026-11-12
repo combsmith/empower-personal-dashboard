@@ -1945,10 +1945,15 @@ class TestBeancountInvestmentGrowthReconstruction(unittest.TestCase):
         self.assertIn("balance Assets:AcmeBrokerage:TaxableBrokerage 0.000001 MCR", "".join(assertion_lines))
 
     def test_unit_balance_assertion_uses_source_precision(self):
-        """Unit balance assertions use the snapshot's source precision."""
+        """Unit balance assertions use the snapshot's source precision via public export."""
         # Issue #176: a 2-dp snapshot quantity must be asserted at 2 dp so that
         # Beancount's inferred tolerance (~0.01) absorbs upstream rounding,
         # while a quantity with real 6-dp precision keeps all six digits.
+        from decimal import Decimal
+        from beancount import loader
+        from beancount.core import realization
+        from beancount.core.data import Balance
+
         holdings = DashboardHoldings(
             as_of_date="2026-11-06",
             total_value=5329.56,
@@ -1971,14 +1976,106 @@ class TestBeancountInvestmentGrowthReconstruction(unittest.TestCase):
                 },
             ],
         )
-        lines: list = []
-        self.generator._emit_commodity_unit_assertions(holdings, {}, lines)
-        text = "".join(lines)
-        self.assertIn("2026-11-07 balance Assets:AcmeBrokerage:TaxableBrokerage 501.54 FFFFX\n", text)
-        self.assertNotIn("501.540000", text)
-        self.assertIn("2026-11-07 balance Assets:AcmeBrokerage:TaxableBrokerage 3.141592 VTI\n", text)
+        bal_bean = self.generator.generate_balances_bean(holdings=holdings)
+        self.assertIn("2026-11-07 balance Assets:AcmeBrokerage:TaxableBrokerage 501.54 FFFFX\n", bal_bean)
+        self.assertNotIn("501.540000", bal_bean)
+        self.assertIn("2026-11-07 balance Assets:AcmeBrokerage:TaxableBrokerage 3.141592 VTI\n", bal_bean)
         # Opening lots keep full six-decimal posting precision.
-        self.assertIn("501.540000 FFFFX", self.generator.generate_holdings_bean(holdings))
+        holdings_bean = self.generator.generate_holdings_bean(holdings, opening_date="2026-10-01")
+        self.assertIn("501.540000 FFFFX", holdings_bean)
+
+        # Exercise the public single-file export path and verify Beancount loads cleanly.
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ledger_file = Path(tmp_dir) / "ledger.bean"
+            self.generator.export_single_file(
+                filepath=ledger_file,
+                holdings=holdings,
+                opening_date="2026-10-01",
+            )
+            exported_text = ledger_file.read_text(encoding="utf-8")
+        entries, errors, _options = loader.load_string(exported_text)
+        self.assertEqual(errors, [])
+        balance_amounts = {
+            e.amount.currency: e.amount.number
+            for e in entries
+            if isinstance(e, Balance)
+        }
+        self.assertEqual(balance_amounts["FFFFX"], Decimal("501.54"))
+        self.assertEqual(balance_amounts["VTI"], Decimal("3.141592"))
+        real_root = realization.realize(entries)
+        brokerage_acct = realization.get(real_root, "Assets:AcmeBrokerage:TaxableBrokerage")
+        self.assertIsNotNone(brokerage_acct)
+        units_by_currency = {
+            pos.units.currency: pos.units.number
+            for pos in brokerage_acct.balance.get_positions()
+        }
+        self.assertEqual(units_by_currency["FFFFX"], Decimal("501.540000"))
+        self.assertEqual(units_by_currency["VTI"], Decimal("3.141592"))
+
+    def test_mixed_precision_same_ticker_aggregation_preserves_rounded_tolerance(self):
+        """Aggregating coarse and fine rows keeps 6-dp quantity and explicit coarse tolerance."""
+        holdings = DashboardHoldings(
+            as_of_date="2026-11-06",
+            total_value=5016.63,
+            holdings=[
+                {
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "ticker": "FFFFX",
+                    "quantity": 0.123456,
+                    "price": 10.0,
+                    "cost_basis": 1.23,
+                },
+                {
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "ticker": "FFFFX",
+                    "quantity": 501.54,
+                    "price": 10.0,
+                    "cost_basis": 5015.40,
+                },
+            ],
+        )
+        bal_bean = self.generator.generate_balances_bean(holdings=holdings)
+        self.assertIn(
+            "2026-11-07 balance Assets:AcmeBrokerage:TaxableBrokerage 501.663456 ~ 0.01 FFFFX\n",
+            bal_bean,
+        )
+        # Sub-micro dust row alongside a 6-dp row must NOT widen tolerance to 0.01.
+        dust_holdings = DashboardHoldings(
+            as_of_date="2026-11-06",
+            total_value=1.23,
+            holdings=[
+                {
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "ticker": "VTI",
+                    "quantity": 2e-7,
+                    "price": 10.0,
+                    "cost_basis": 0.0,
+                },
+                {
+                    "account_name": "Taxable Brokerage",
+                    "firm_name": "Acme Brokerage",
+                    "ticker": "VTI",
+                    "quantity": 0.123456,
+                    "price": 10.0,
+                    "cost_basis": 1.23,
+                },
+            ],
+        )
+        dust_bal_bean = self.generator.generate_balances_bean(holdings=dust_holdings)
+        self.assertIn(
+            "2026-11-07 balance Assets:AcmeBrokerage:TaxableBrokerage 0.123456 VTI\n",
+            dust_bal_bean,
+        )
+        self.assertNotIn("~", dust_bal_bean)
+        # Ensure append-state parser tracks latest_balance_dates on explicit-tolerance lines.
+        _, _, _, latest_dates = self.generator._parse_existing_holdings_state(bal_bean)
+        self.assertEqual(
+            latest_dates.get("Assets:AcmeBrokerage:TaxableBrokerage:FFFFX"),
+            "2026-11-07",
+        )
 
     def test_transactions_only_investment_account_not_asserted_as_cash(self):
         # empower --transactions --beancount fetches balances but not holdings.
