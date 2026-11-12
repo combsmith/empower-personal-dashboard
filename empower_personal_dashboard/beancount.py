@@ -356,6 +356,33 @@ def _format_quantity(qty: float) -> str:
     return f"{qty:.6f}"
 
 
+def _format_balance_quantity(qty: float) -> str:
+    """Format a commodity quantity for a ``balance`` assertion at source precision.
+
+    Beancount infers a balance assertion's tolerance from the digits of the
+    asserted number, so always writing six decimals (``501.540000``) shrinks the
+    tolerance to ~0.000001 and makes the upstream's own 2-dp rounding fail
+    ``bean-check``. The six-decimal form is trimmed of trailing zeros but keeps
+    at least two decimals; a quantity with real 3–6 decimals keeps them, so no
+    assertion is looser than its data.
+    """
+    text = _format_quantity(qty)
+    whole, _, frac = text.partition(".")
+    return f"{whole}.{frac.rstrip('0').ljust(2, '0')}"
+
+
+def _balance_quantity_decimals(qty: float) -> int:
+    """Return the inferred decimal places (2..6) of a single holding row's quantity.
+
+    Sub-micro dust that rounds to zero at six decimals returns ``6`` so it cannot
+    widen the tolerance of a finer sibling row when aggregated.
+    """
+    if round(qty, 6) == 0:
+        return 6
+    _, _, frac = _format_balance_quantity(qty).partition(".")
+    return len(frac)
+
+
 def _format_cost(cost: float) -> str:
     """Format per-share cost basis or unit price with high precision."""
     return f"{cost:.6f}"
@@ -1663,6 +1690,13 @@ class BeancountGenerator:
         checked. Delaying *every* assertion to D+2 would make an unreconciled
         position wrongly absorb a genuine D+1 trade in that commodity, which on
         append invalidates the preserved assertion.
+
+        Quantities are formatted at source precision (2..6 decimals) via
+        :func:`_format_balance_quantity`. Whenever the formatted sum's decimal
+        count differs from the coarsest contributing row's precision (either
+        mixed-precision rows or trailing-digit cancellation), an explicit
+        Beancount tolerance override (``~ 0.01`` / ``~ 0.000001``) preserves
+        the row-derived tolerance without discarding the aggregated quantity.
         """
         if not (holdings and holdings.holdings):
             return
@@ -1676,6 +1710,7 @@ class BeancountGenerator:
         )
         # Aggregate positions by (b_account, ticker) to avoid duplicate conflicting balance assertions
         holding_units: Dict[Tuple[str, str], float] = {}
+        holding_min_decimals: Dict[Tuple[str, str], int] = {}
         for h in holdings.holdings:
             ticker = _clean_ticker(h.get("ticker"))
             qty = _safe_float(h.get("quantity"))
@@ -1686,7 +1721,11 @@ class BeancountGenerator:
                 continue
             firm, acct_name, acct_type, acct_id = _resolve_account_from_holding(h, acct_lookup)
             b_account = self.mapper.resolve_account(firm, acct_name, acct_id, account_type=acct_type, is_asset=True)
-            holding_units[(b_account, ticker)] = holding_units.get((b_account, ticker), 0.0) + qty
+            key = (b_account, ticker)
+            holding_units[key] = holding_units.get(key, 0.0) + qty
+            row_dp = _balance_quantity_decimals(qty)
+            if key not in holding_min_decimals or row_dp < holding_min_decimals[key]:
+                holding_min_decimals[key] = row_dp
 
         for (b_account, ticker), total_qty in sorted(holding_units.items()):
             # Skip aggregates that cancel to zero at six-decimal precision: the
@@ -1695,8 +1734,16 @@ class BeancountGenerator:
             # (short) aggregates are asserted as negative unit balances.
             if round(total_qty, 6) == 0:
                 continue
-            assert_date = reconciled_day if (b_account, ticker) in reconciled_keys else next_day
-            lines.append(f"{assert_date} balance {b_account} {_format_quantity(total_qty)} {ticker}\n")
+            key = (b_account, ticker)
+            assert_date = reconciled_day if key in reconciled_keys else next_day
+            qty_str = _format_balance_quantity(total_qty)
+            sum_dp = len(qty_str.partition(".")[2])
+            min_dp = holding_min_decimals.get(key, sum_dp)
+            if sum_dp != min_dp:
+                tol_str = f"0.{'0' * (min_dp - 1)}1"
+                lines.append(f"{assert_date} balance {b_account} {qty_str} ~ {tol_str} {ticker}\n")
+            else:
+                lines.append(f"{assert_date} balance {b_account} {qty_str} {ticker}\n")
 
     def generate_prices_bean(
         self,
@@ -1812,7 +1859,7 @@ class BeancountGenerator:
             return existing_keys, existing_opening_qty, existing_reconciliations, latest_balance_dates
 
         for match in re.finditer(
-            r"^\s*(\d{4}-\d{2}-\d{2})\s+balance\s+(\S+)\s+-?\d+(?:\.\d+)?\s+([A-Z0-9.\-]+)\b",
+            r"^\s*(\d{4}-\d{2}-\d{2})\s+balance\s+(\S+)\s+-?\d+(?:\.\d+)?(?:\s+~\s+\d+(?:\.\d+)?)?\s+([A-Z0-9'._\-]+)(?=\s|$|;)",
             existing_content,
             re.MULTILINE,
         ):
@@ -3188,7 +3235,10 @@ class BeancountGenerator:
         # earlier release that omitted the option.
         updated_main = _ensure_fifo_booking_method(updated_main)
         if updated_main != current_main:
-            main_path.write_text(updated_main, encoding="utf-8")
+            # NOSONAR pythonsecurity:S2083 — false positive. ``main_path`` is
+            # ``dest / BEAN_MAIN`` (a constant filename) validated by
+            # ``_verify_not_symlink``; the ledger content is data, never a path.
+            main_path.write_text(updated_main, encoding="utf-8")  # NOSONAR
         return main_path
 
     def _write_modular_holdings(
