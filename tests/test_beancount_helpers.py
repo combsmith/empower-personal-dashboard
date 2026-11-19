@@ -12,8 +12,11 @@ and custom sweep ticker forwarding. All data is synthetic.
 import unittest
 
 from empower_personal_dashboard.beancount import (
+    _balance_quantity_decimals,
     _classify_buy_sell,
     _clean_tx_description,
+    _format_balance_quantity,
+    _format_quantity,
     _has_core_sweep_evidence,
     _has_investment_account_signal,
     _is_commodity_trade_tx,
@@ -307,6 +310,58 @@ class TestCommodityAndInvestmentTx(unittest.TestCase):
             "account_type": "Bank",
         }
         self.assertFalse(_is_investment_tx(tx))
+
+
+class TestFormatBalanceQuantity(unittest.TestCase):
+    """Balance assertions keep the source precision so Beancount's inferred
+    tolerance absorbs upstream rounding (issue #176)."""
+
+    def test_two_decimal_source_keeps_two_decimals(self):
+        """Two-decimal quantities stay at two decimals."""
+        self.assertEqual(_format_balance_quantity(501.54), "501.54")
+
+    def test_whole_and_one_decimal_padded_to_two(self):
+        """Whole and one-decimal quantities pad to two decimals."""
+        self.assertEqual(_format_balance_quantity(40), "40.00")
+        self.assertEqual(_format_balance_quantity(40.0), "40.00")
+        self.assertEqual(_format_balance_quantity(392.7), "392.70")
+
+    def test_real_fractional_digits_are_kept(self):
+        """Meaningful fractional digits are retained."""
+        self.assertEqual(_format_balance_quantity(108.772), "108.772")
+        self.assertEqual(_format_balance_quantity(1.2345), "1.2345")
+        self.assertEqual(_format_balance_quantity(0.000001), "0.000001")
+
+    def test_rounds_beyond_six_decimals(self):
+        """Quantities round to at most six decimals."""
+        self.assertEqual(_format_balance_quantity(1.2345678), "1.234568")
+        self.assertEqual(_format_balance_quantity(0.0000008), "0.000001")
+        # Float noise from aggregation does not leak extra digits.
+        self.assertEqual(_format_balance_quantity(392.76 + 108.78), "501.54")
+
+    def test_negative_quantities(self):
+        """Negative quantities keep their sign and precision."""
+        self.assertEqual(_format_balance_quantity(-20), "-20.00")
+        self.assertEqual(_format_balance_quantity(-5.125), "-5.125")
+
+    def test_never_looser_than_six_decimal_form(self):
+        """Value equals the six-decimal form numerically."""
+        for qty in (501.54, 40, 108.772, 1.2345678, -5.125, 0.000001):
+            self.assertEqual(float(_format_balance_quantity(qty)), float(_format_quantity(qty)))
+
+    def test_posting_quantity_format_unchanged(self):
+        """Posting quantities keep the six-decimal format."""
+        self.assertEqual(_format_quantity(501.54), "501.540000")
+
+    def test_balance_quantity_decimals_tracks_row_precision(self):
+        """Row decimal count reflects formatted precision while ignoring sub-micro dust."""
+        self.assertEqual(_balance_quantity_decimals(501.54), 2)
+        self.assertEqual(_balance_quantity_decimals(40), 2)
+        self.assertEqual(_balance_quantity_decimals(108.772), 3)
+        self.assertEqual(_balance_quantity_decimals(0.123456), 6)
+        # Sub-micro dust rounding to zero at 6 dp must not widen tolerance to 2 dp.
+        self.assertEqual(_balance_quantity_decimals(0.0), 6)
+        self.assertEqual(_balance_quantity_decimals(2e-7), 6)
 
 
 if __name__ == "__main__":
