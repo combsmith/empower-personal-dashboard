@@ -23,6 +23,7 @@ from empower_personal_dashboard.beancount import (
     _parse_simple_yaml,
     slugify_account_name,
 )
+from empower_personal_dashboard.exceptions import LedgerAppendError
 
 # Standard Beancount account regex
 BEANCOUNT_ACCOUNT_REGEX = re.compile(
@@ -4125,6 +4126,319 @@ class TestCoreMoneyMarketSweepTransactions(unittest.TestCase):
         self.assertIn("Assets:AcmeBrokerage:TaxableBrokerage -5.000000 VXUS {} @ 60.0000 USD\n", tx_out)
         self.assertNotIn("@ 0.0000 USD", tx_out)
         self.assertNotRegex(tx_out, r"\s0\.00 USD")
+
+
+class TestCoreSweepOpeningLotAtCost(unittest.TestCase):
+    """Issue #175: core-sweep snapshot opening lots are written at cost so a later ``{}`` redemption can reduce them."""
+
+    def setUp(self):
+        self.generator = BeancountGenerator()
+
+    @staticmethod
+    def _holdings(as_of, positions):
+        """Build a DashboardHoldings snapshot from a list of position dicts (ticker, quantity, price)."""
+        return DashboardHoldings(
+            as_of_date=as_of,
+            total_value=sum(p["quantity"] * p["price"] for p in positions),
+            holdings=[
+                {
+                    "account_name": "Synthetic IRA",
+                    "ticker": p["ticker"],
+                    "quantity": p["quantity"],
+                    "price": p["price"],
+                    "value": p["quantity"] * p["price"],
+                }
+                for p in positions
+            ],
+        )
+
+    def test_core_sweep_snapshot_lot_without_sale_is_written_at_cost(self):
+        """A cost-less SPAXX snapshot lot with no in-window sale is still booked at its $1.00 cost."""
+        holdings = self._holdings(
+            "2026-09-30",
+            [
+                {"ticker": "SPAXX", "quantity": 500.0, "price": 1.0},
+                {"ticker": "VTI", "quantity": 10.0, "price": 250.0},
+            ],
+        )
+        out = self.generator.generate_holdings_bean(holdings, opening_date="2020-01-01")
+        self.assertIn("500.000000 SPAXX {1.000000 USD}", out)
+        self.assertNotIn("SPAXX @", out)
+        # A non-sweep equity without a sale keeps the existing price-annotated form.
+        self.assertIn("10.000000 VTI @ 250.0000 USD", out)
+        self.assertNotIn("VTI {", out)
+
+    def test_bank_sweep_and_custom_sweep_tickers_written_at_cost(self):
+        """Bank sweep symbols and mapping-configured core_sweep_tickers also get a cost lot at $1.00 NAV."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            map_path = Path(tmp_dir) / "beancount_map.yaml"
+            map_path.write_text('core_sweep_tickers:\n  - "BNKSWP1"\n', encoding="utf-8")
+            gen = BeancountGenerator(mapper=BeancountMapper(mapping_path=map_path))
+            holdings = self._holdings(
+                "2026-09-30",
+                [
+                    {"ticker": "BNKSWP1", "quantity": 75.0, "price": 1.0},
+                    {"ticker": "FCASH", "quantity": 20.0, "price": 1.0},
+                    {"ticker": "BNKSWP2", "quantity": 30.0, "price": 1.0},
+                ],
+            )
+            out = gen.generate_holdings_bean(holdings, opening_date="2020-01-01")
+        self.assertIn("75.000000 BNKSWP1 {1.000000 USD}", out)
+        self.assertIn("20.000000 FCASH {1.000000 USD}", out)
+        # Unconfigured $1.00 ticker without sweep evidence is not forced to cost.
+        self.assertIn("30.000000 BNKSWP2 @ 1.0000 USD", out)
+
+    def test_sweep_ticker_without_reported_price_not_forced_to_cost(self):
+        """A missing snapshot price must not be treated as $1.00 NAV evidence (no fabricated cost basis)."""
+        holdings = self._holdings("2026-09-30", [{"ticker": "SPAXX", "quantity": 500.0, "price": 0.0}])
+        out = self.generator.generate_holdings_bean(holdings, opening_date="2020-01-01")
+        self.assertNotIn("SPAXX {1.000000 USD}", out)
+        self.assertIn("500.000000 SPAXX @ 0.0000 USD", out)
+        self.assertEqual(out.count("SPAXX {"), 0)
+        self.assertEqual(out.count("SPAXX @"), 1)
+
+        # The generated text must parse and book cleanly under Beancount's loader.
+        from beancount import loader
+
+        ledger = (
+            "option \"operating_currency\" \"USD\"\n"
+            "2000-01-01 open Assets:Brokerage:SyntheticIRA\n"
+            "2000-01-01 open Equity:Opening-Balances\n\n" + out
+        )
+        _entries, errors, _options = loader.load_string(ledger)
+        self.assertEqual(errors, [])
+
+    def test_money_market_ticker_off_one_dollar_nav_not_forced_to_cost(self):
+        """Without a $1.00 NAV the sweep evidence rule does not apply, so the lot keeps the ``@ price`` form."""
+        holdings = self._holdings("2026-09-30", [{"ticker": "ABCXX", "quantity": 40.0, "price": 10.0}])
+        out = self.generator.generate_holdings_bean(holdings, opening_date="2020-01-01")
+        self.assertIn("40.000000 ABCXX @ 10.0000 USD", out)
+
+    def test_append_sweep_topup_lot_without_cost_basis_or_sale_is_written_at_cost(self):
+        """A buy-only append whose snapshot needs a top-up lot books it at cost (no sale forces it)."""
+        initial = self._holdings("2026-09-30", [{"ticker": "SPAXX", "quantity": 500.0, "price": 1.0}])
+        updated = self._holdings("2026-10-02", [{"ticker": "SPAXX", "quantity": 900.0, "price": 1.0}])
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-01",
+            total_transactions=1,
+            money_in=0.0,
+            money_out=0.0,
+            net_cashflow=0.0,
+            transactions=[
+                {
+                    "user_transaction_id": 99175011,
+                    "account_name": "Synthetic IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": "Fidelity Government Money Market - Purchase Into Core Account",
+                    "amount": 100.0,
+                    "transaction_type": "Shares Out",
+                    "investment_type": "Transfer",
+                    "symbol": "SPAXX",
+                    "price": 1.0,
+                    "quantity": 100.0,
+                    "status": "posted",
+                },
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ledger_dir = Path(tmp_dir) / "ledger"
+            self.generator.export_modular_ledger(
+                destination_dir=ledger_dir, holdings=initial, append=False, opening_date="2020-01-01"
+            )
+            self.generator.export_modular_ledger(
+                destination_dir=ledger_dir, holdings=updated, transactions=txs,
+                append=True, opening_date="2020-01-01",
+            )
+            holdings_text = (ledger_dir / "holdings.bean").read_text(encoding="utf-8")
+            self.assertNotIn("SPAXX @", holdings_text)
+            self.assertIn("SPAXX {1.000000 USD}", holdings_text.split("500.000000 SPAXX {1.000000 USD}", 1)[1])
+
+    def test_append_core_redemption_reduces_snapshot_lot_written_without_sale(self):
+        """Repro from Issue #175: first export with no SPAXX sale, then an append with a core purchase and redemption."""
+        initial = self._holdings("2026-09-30", [{"ticker": "SPAXX", "quantity": 500.0, "price": 1.0}])
+        updated = self._holdings("2026-10-02", [{"ticker": "SPAXX", "quantity": 0.0, "price": 1.0}])
+        txs = DashboardTransactions(
+            start_date="2026-10-01",
+            end_date="2026-10-01",
+            total_transactions=3,
+            money_in=300.0,
+            money_out=0.0,
+            net_cashflow=300.0,
+            transactions=[
+                {
+                    "user_transaction_id": 99175001,
+                    "account_name": "Synthetic IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": "Cash Contribution Current Year",
+                    "amount": 300.0,
+                    "transaction_type": "Cash In",
+                    "status": "posted",
+                },
+                {
+                    "user_transaction_id": 99175002,
+                    "account_name": "Synthetic IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": "Fidelity Government Money Market - Purchase Into Core Account",
+                    "amount": 300.0,
+                    "transaction_type": "Shares Out",
+                    "investment_type": "Transfer",
+                    "symbol": "SPAXX",
+                    "price": 1.0,
+                    "quantity": 300.0,
+                    "status": "posted",
+                },
+                {
+                    "user_transaction_id": 99175003,
+                    "account_name": "Synthetic IRA",
+                    "transaction_date": "2026-10-01",
+                    "description": "Fidelity Government Money Market - Redemption From Core Account",
+                    "amount": 800.0,
+                    "transaction_type": "Shares In",
+                    "investment_type": "Transfer",
+                    "symbol": "SPAXX",
+                    "price": 1.0,
+                    "quantity": 800.0,
+                    "status": "posted",
+                },
+            ],
+        )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ledger_dir = Path(tmp_dir) / "ledger"
+            self.generator.export_modular_ledger(
+                destination_dir=ledger_dir,
+                holdings=initial,
+                append=False,
+                opening_date="2020-01-01",
+            )
+            holdings_text = (ledger_dir / "holdings.bean").read_text(encoding="utf-8")
+            self.assertIn("500.000000 SPAXX {1.000000 USD}", holdings_text)
+
+            self.generator.export_modular_ledger(
+                destination_dir=ledger_dir,
+                holdings=updated,
+                transactions=txs,
+                append=True,
+                opening_date="2020-01-01",
+            )
+            tx_text = (ledger_dir / "transactions.bean").read_text(encoding="utf-8")
+            self.assertIn("-800.000000 SPAXX {} @ 1.0000 USD", tx_text)
+
+            from beancount import loader
+
+            entries, errors, _options = loader.load_file(str(ledger_dir / "main.bean"))
+            self.assertEqual(errors, [])
+
+            spaxx = [
+                (entry.date, posting.units.number, posting.cost)
+                for entry in entries
+                if type(entry).__name__ == "Transaction"
+                for posting in entry.postings
+                if posting.units is not None and posting.units.currency == "SPAXX"
+            ]
+            # Opening lot: 500 SPAXX at a $1.00 cost, dated at the opening date.
+            opening = [s for s in spaxx if s[1] == 500]
+            self.assertEqual(len(opening), 1)
+            self.assertEqual(str(opening[0][0]), "2020-01-01")
+            self.assertEqual(opening[0][2].number, 1)
+            self.assertEqual(opening[0][2].currency, "USD")
+            # Redemption (-800 total) is dated 2026-10-01, first drains the
+            # opening lot (cost date 2020-01-01), and the net SPAXX balance is zero.
+            redemptions = [s for s in spaxx if s[1] < 0]
+            self.assertEqual({str(s[0]) for s in redemptions}, {"2026-10-01"})
+            self.assertEqual(sum(s[1] for s in redemptions), -800)
+            self.assertIn((-500, "2020-01-01"), [(s[1], str(s[2].date)) for s in redemptions])
+            self.assertEqual(sum(s[1] for s in spaxx), 0)
+
+    def test_append_to_legacy_cost_less_lot_documents_limitation(self):
+        """Legacy cost-less lots cannot be reduced by a later {} redemption.
+
+        Appending to a ledger where the opening lot was written cost-less (e.g.
+        before the fix, or hand-edited) will fail when the append carries a cost-based
+        redemption ({}), because {} only matches lots held at cost. This test documents
+        the limitation: users must manually edit legacy cost-less lots to at-cost form.
+        """
+        initial = self._holdings("2026-09-30", [{"ticker": "SPAXX", "quantity": 500.0, "price": 1.0}])
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            ledger_dir = Path(tmp_dir) / "ledger"
+
+            # Initial export with the new code (writes at cost).
+            self.generator.export_modular_ledger(
+                destination_dir=ledger_dir, holdings=initial, append=False, opening_date="2020-01-01"
+            )
+
+            # Simulate a legacy ledger: manually edit the holdings file to use cost-less notation.
+            holdings_text = (ledger_dir / "holdings.bean").read_text(encoding="utf-8")
+            # Replace the cost notation {1.000000 USD} with price notation @ 1.0000 USD
+            legacy_holdings = holdings_text.replace(
+                "500.000000 SPAXX {1.000000 USD}",
+                "500.000000 SPAXX @ 1.0000 USD"
+            )
+            (ledger_dir / "holdings.bean").write_text(legacy_holdings, encoding="utf-8")
+
+            # Now try to append with a redemption that uses the {} cost spec.
+            updated = self._holdings("2026-10-02", [{"ticker": "SPAXX", "quantity": 0.0, "price": 1.0}])
+            txs = DashboardTransactions(
+                start_date="2026-10-01",
+                end_date="2026-10-01",
+                total_transactions=1,
+                money_in=0.0,
+                money_out=500.0,
+                net_cashflow=-500.0,
+                transactions=[
+                    {
+                        "user_transaction_id": 99175003,
+                        "account_name": "Synthetic IRA",
+                        "transaction_date": "2026-10-01",
+                        "description": "Fidelity Government Money Market - Redemption From Core Account",
+                        "amount": 500.0,
+                        "transaction_type": "Shares In",
+                        "investment_type": "Transfer",
+                        "symbol": "SPAXX",
+                        "price": 1.0,
+                        "quantity": 500.0,
+                        "status": "posted",
+                    },
+                ],
+            )
+
+            # Append with a redemption. The legacy cost-less lot and the new {} redemption
+            # will be written to the ledger. However, when Beancount loads the ledger,
+            # it will fail because {} can only reduce lots held at cost, not cost-less ones.
+            append_error = None
+            try:
+                self.generator.export_modular_ledger(
+                    destination_dir=ledger_dir,
+                    holdings=updated,
+                    transactions=txs,
+                    append=True,
+                    opening_date="2020-01-01",
+                )
+            except LedgerAppendError as exc:
+                # The export itself rejecting the append is also acceptable.
+                append_error = exc
+
+            if append_error is not None:
+                self.assertIn("cost", str(append_error).lower())
+                return
+
+            # Export succeeded; the failure surfaces when Beancount loads the ledger.
+            from beancount import loader
+
+            _entries, errors, _options = loader.load_file(str(ledger_dir / "main.bean"))
+            self.assertGreater(len(errors), 0)
+            # Inspect only the error type and message (str(e) can include the attached
+            # transaction and its cost field, letting unrelated errors match).
+            reduction_errors = [
+                e
+                for e in errors
+                if type(e).__name__ in ("ReductionError", "BookingError")
+                and "spaxx" in str(getattr(e, "message", "")).lower()
+            ]
+            self.assertTrue(
+                reduction_errors,
+                f"Expected SPAXX lot reduction error, got: {[(type(e).__name__, getattr(e, 'message', '')) for e in errors]}",
+            )
 
 
 if __name__ == "__main__":
