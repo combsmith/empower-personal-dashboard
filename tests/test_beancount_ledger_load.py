@@ -139,7 +139,7 @@ class TestShortPositions(_BaseGeneratorTest):
             )
             content = target.read_text(encoding="utf-8")
         self.assertIn("-10.000000 GE", content)
-        self.assertRegex(content, r"balance\s+Assets:AcmeBrokerage:TaxableBrokerage\s+-10\.000000 GE")
+        self.assertRegex(content, r"balance\s+Assets:AcmeBrokerage:TaxableBrokerage\s+-10\.00 GE")
         assert_ledger_loads(self, content)
 
     def test_current_short_distinct_from_fully_sold_security(self):
@@ -223,7 +223,7 @@ class TestShortPositions(_BaseGeneratorTest):
             )
             content = target.read_text(encoding="utf-8")
         self.assertRegex(
-            content, r"balance\s+Assets:AcmeBrokerage:TaxableBrokerage\s+-5\.000000 GE"
+            content, r"balance\s+Assets:AcmeBrokerage:TaxableBrokerage\s+-5\.00 GE"
         )
         assert_ledger_loads(self, content)
 
@@ -258,7 +258,7 @@ class TestShortPositions(_BaseGeneratorTest):
             )
             content = target.read_text(encoding="utf-8")
         self.assertRegex(
-            content, r"balance\s+Assets:AcmeBrokerage:TaxableBrokerage\s+-10\.000000 GE"
+            content, r"balance\s+Assets:AcmeBrokerage:TaxableBrokerage\s+-10\.00 GE"
         )
         assert_ledger_loads(self, content)
 
@@ -293,7 +293,7 @@ class TestShortPositions(_BaseGeneratorTest):
             )
             content = target.read_text(encoding="utf-8")
         self.assertRegex(
-            content, r"balance\s+Assets:AcmeBrokerage:TaxableBrokerage\s+-15\.000000 GE"
+            content, r"balance\s+Assets:AcmeBrokerage:TaxableBrokerage\s+-15\.00 GE"
         )
         assert_ledger_loads(self, content)
 
@@ -344,7 +344,7 @@ class TestShortPositions(_BaseGeneratorTest):
             )
             long_content = long_flip_file.read_text(encoding="utf-8")
             self.assertIn(
-                "2024-10-03 balance Assets:AcmeBrokerage:TaxableBrokerage 5.000000 FLIP",
+                "2024-10-03 balance Assets:AcmeBrokerage:TaxableBrokerage 5.00 FLIP",
                 long_content,
             )
             assert_ledger_loads(self, long_content)
@@ -355,7 +355,7 @@ class TestShortPositions(_BaseGeneratorTest):
             )
             short_content = short_flip_file.read_text(encoding="utf-8")
             self.assertIn(
-                "2024-10-03 balance Assets:AcmeBrokerage:TaxableBrokerage -5.000000 FLIP",
+                "2024-10-03 balance Assets:AcmeBrokerage:TaxableBrokerage -5.00 FLIP",
                 short_content,
             )
             assert_ledger_loads(self, short_content)
@@ -444,8 +444,8 @@ class TestDeficitFloorShortfall(_BaseGeneratorTest):
             content = target.read_text(encoding="utf-8")
         self.assertIn("10.000000 GE {", content)
         self.assertIn("-15.000000 GE {}", content)
-        self.assertIn("2024-10-03 balance Assets:AcmeBrokerage:TaxableBrokerage 5.000000 GE", content)
-        self.assertIn("2024-10-02 balance Assets:AcmeBrokerage:TaxableBrokerage -5.000000 SHORTCO", content)
+        self.assertIn("2024-10-03 balance Assets:AcmeBrokerage:TaxableBrokerage 5.00 GE", content)
+        self.assertIn("2024-10-02 balance Assets:AcmeBrokerage:TaxableBrokerage -5.00 SHORTCO", content)
         assert_ledger_loads(self, content)
 
     def test_subsequent_append_with_changed_and_deeper_surplus_reconciles_and_loads(self):
@@ -586,7 +586,7 @@ class TestDeficitFloorShortfall(_BaseGeneratorTest):
                 filepath=ledger, holdings=holdings("2024-10-20", 15.0), transactions=txns_3,
             )
             content = ledger.read_text(encoding="utf-8")
-        self.assertIn("2024-10-16 balance Assets:AcmeBrokerage:TaxableBrokerage 5.000000 GE", content)
+        self.assertIn("2024-10-16 balance Assets:AcmeBrokerage:TaxableBrokerage 5.00 GE", content)
         self.assertNotIn("2024-10-17 balance", content)
         assert_ledger_loads(self, content)
 
@@ -1172,6 +1172,122 @@ class TestWindowMarkerInTransactionText(_BaseGeneratorTest):
                     opening_date="2021-01-01",
                 )
             assert_ledger_loads(self, ledger.read_text(encoding="utf-8"))
+
+
+class TestUnitBalanceAssertionPrecision(unittest.TestCase):
+    """Issue #176: unit balance assertions tolerate the upstream's own rounding."""
+
+    LEDGER_PREFIX = (
+        "2024-01-01 open Assets:AcmeBrokerage:TaxableBrokerage\n"
+        "2024-01-01 open Assets:AcmeBrokerage:Cash USD\n"
+        "2024-01-01 open Equity:Opening-Balances\n"
+        "2024-10-01 * \"Opening lot\"\n"
+        "  Assets:AcmeBrokerage:TaxableBrokerage  392.760000 FFFFX {10.000000 USD}\n"
+        "  Equity:Opening-Balances\n"
+        "2024-10-03 * \"Buy\"\n"
+        "  Assets:AcmeBrokerage:TaxableBrokerage  108.772000 FFFFX {10.000000 USD}\n"
+        "  Assets:AcmeBrokerage:Cash  -1087.72 USD\n"
+    )
+
+    def _assertion_lines(self):
+        """Return the generated balance-assertion section for a rounded holding."""
+        holdings = DashboardHoldings(
+            as_of_date="2024-10-06",
+            total_value=5015.40,
+            holdings=[
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "ticker": "FFFFX", "quantity": 501.54, "price": 10.0, "cost_basis": 5015.40},
+            ],
+        )
+        return BeancountGenerator().generate_balances_bean(holdings=holdings)
+
+    def test_two_decimal_snapshot_assertion_absorbs_upstream_rounding(self):
+        """A two-decimal assertion infers 0.01 tolerance and loads despite 0.008 drift."""
+        from decimal import Decimal
+        from beancount.core.data import Balance
+        from beancount.ops import balance as beancount_balance
+
+        assertions = self._assertion_lines()
+        self.assertIn("2024-10-07 balance Assets:AcmeBrokerage:TaxableBrokerage 501.54 FFFFX", assertions)
+        entries, errors, options = loader.load_string(self.LEDGER_PREFIX + assertions)
+        self.assertEqual(errors, [])
+        bal_entries = [e for e in entries if isinstance(e, Balance)]
+        self.assertEqual(len(bal_entries), 1)
+        # Beancount doubles tolerance_multiplier (0.5) on Balance directives: 2 * 0.5 * 10^-2 = 0.01.
+        self.assertEqual(beancount_balance.get_balance_tolerance(bal_entries[0], options), Decimal("0.01"))
+
+    def test_six_decimal_assertion_would_reject_same_ledger(self):
+        """Control: the former six-decimal assertion fails on the same ledger."""
+        # Guards the test above against passing trivially: the former
+        # six-decimal form gets a ~0.000001 tolerance and fails on 0.008 drift.
+        strict = "2024-10-07 balance Assets:AcmeBrokerage:TaxableBrokerage 501.540000 FFFFX\n"
+        _entries, errors, _options = loader.load_string(self.LEDGER_PREFIX + strict)
+        self.assertTrue(any("Balance failed" in e.message for e in errors))
+
+    def test_mixed_precision_aggregated_rows_preserve_rounded_row_tolerance(self):
+        """Aggregating 2-dp and 6-dp rows retains 6-dp sum and 0.01 explicit tolerance."""
+        mixed_prefix = (
+            self.LEDGER_PREFIX
+            + "2024-10-04 * \"Micro dividend reinvestment\"\n"
+            + "  Assets:AcmeBrokerage:TaxableBrokerage  0.123456 FFFFX {10.000000 USD}\n"
+            + "  Assets:AcmeBrokerage:Cash  -1.23 USD\n"
+        )
+        holdings = DashboardHoldings(
+            as_of_date="2024-10-06",
+            total_value=5016.63,
+            holdings=[
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "ticker": "FFFFX", "quantity": 501.54, "price": 10.0, "cost_basis": 5015.40},
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "ticker": "FFFFX", "quantity": 0.123456, "price": 10.0, "cost_basis": 1.23},
+            ],
+        )
+        assertions = BeancountGenerator().generate_balances_bean(holdings=holdings)
+        self.assertIn(
+            "2024-10-07 balance Assets:AcmeBrokerage:TaxableBrokerage 501.663456 ~ 0.01 FFFFX",
+            assertions,
+        )
+        # Ledger accumulates 501.655456 (0.008 below 501.663456), which is within ~ 0.01.
+        assert_ledger_loads(self, mixed_prefix + assertions)
+
+        # Drift exceeding 0.01 (e.g. 501.68 ~ 0.01 vs 501.655456 -> 0.024544) still fails.
+        excessive = "2024-10-07 balance Assets:AcmeBrokerage:TaxableBrokerage 501.680000 ~ 0.01 FFFFX\n"
+        _entries, errors, _options = loader.load_string(mixed_prefix + excessive)
+        self.assertTrue(any("Balance failed" in e.message for e in errors))
+
+    def test_cancelling_fractional_rows_preserve_fine_tolerance(self):
+        """Rows 0.123456 + 0.876544 summing to 1.00 emit ~ 0.000001 instead of loosening to 0.01."""
+        holdings = DashboardHoldings(
+            as_of_date="2024-10-06",
+            total_value=10.0,
+            holdings=[
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "ticker": "FFFFX", "quantity": 0.123456, "price": 10.0, "cost_basis": 1.23},
+                {"account_name": "Taxable Brokerage", "firm_name": "Acme Brokerage",
+                 "ticker": "FFFFX", "quantity": 0.876544, "price": 10.0, "cost_basis": 8.77},
+            ],
+        )
+        assertions = BeancountGenerator().generate_balances_bean(holdings=holdings)
+        self.assertIn(
+            "2024-10-07 balance Assets:AcmeBrokerage:TaxableBrokerage 1.00 ~ 0.000001 FFFFX",
+            assertions,
+        )
+        exact_prefix = (
+            "2024-01-01 open Assets:AcmeBrokerage:TaxableBrokerage\n"
+            "2024-01-01 open Equity:Opening-Balances\n"
+            "2024-10-01 * \"Lot A\"\n"
+            "  Assets:AcmeBrokerage:TaxableBrokerage  0.123456 FFFFX {10.000000 USD}\n"
+            "  Equity:Opening-Balances\n"
+            "2024-10-02 * \"Lot B\"\n"
+            "  Assets:AcmeBrokerage:TaxableBrokerage  0.876544 FFFFX {10.000000 USD}\n"
+            "  Equity:Opening-Balances\n"
+        )
+        assert_ledger_loads(self, exact_prefix + assertions)
+
+        # A 0.005 discrepancy (which bare 1.00 would accept) is rejected by ~ 0.000001.
+        drifted_prefix = exact_prefix.replace("0.876544 FFFFX", "0.871544 FFFFX")
+        _entries, errors, _options = loader.load_string(drifted_prefix + assertions)
+        self.assertTrue(any("Balance failed" in e.message for e in errors))
 
 
 if __name__ == "__main__":
