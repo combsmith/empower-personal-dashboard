@@ -134,10 +134,9 @@ jobs:
               exit 0
               ;;
           esac
-          # Capture dispatch time with clock skew buffer (3s absorbs GitHub's clock variance).
-          # Only look for runs created after THIS dispatch, not arbitrary 30s back, to ensure
-          # we link the newly created run even if the bridge is retried (#2521).
-          dispatch_time=$(date -u -d '-3 seconds' +%Y-%m-%dT%H:%M:%SZ)
+          # 30s back absorbs clock skew; the exact title, not the time, ties the run
+          # to this Discussion.
+          dispatched_at=$(date -u -d '-30 seconds' +%Y-%m-%dT%H:%M:%SZ)
           gh workflow run feature-ideation.yml --repo "${REPO}" \
             -f target_discussion="${DISCUSSION_NUMBER}"
 
@@ -150,9 +149,9 @@ jobs:
           for attempt in 1 2 3; do
             sleep 5
             if listed=$(gh run list --repo "${REPO}" --workflow feature-ideation.yml \
-              --event workflow_dispatch --created ">=${dispatch_time}" \
-              --limit 50 --json displayTitle,url,createdAt) &&
-              matches=$(jq --arg t "${title}" '[.[] | select(.displayTitle == $t)] | sort_by(.createdAt) | reverse | .[0:1]' <<<"${listed}") &&
+              --event workflow_dispatch --created ">=${dispatched_at}" \
+              --limit 50 --json displayTitle,url) &&
+              matches=$(jq --arg t "${title}" '[.[] | select(.displayTitle == $t)]' <<<"${listed}") &&
               count=$(jq 'length' <<<"${matches}") &&
               urls=$(jq -r '.[].url' <<<"${matches}"); then
               found="found ${count} runs titled '${title}'"
