@@ -1156,6 +1156,26 @@ def _prepare_ledger_path(filepath: Union[str, Path], *, is_dir: bool) -> Path:
     return expanded.resolve()
 
 
+def _contained_child_path(base: Path, filename: str) -> Path:
+    """Return ``base/filename`` after proving the result stays inside ``base``.
+
+    Path-traversal sanitizer for ledger component writes: ``filename`` is reduced
+    to its final component (so ``../`` segments or absolute names cannot climb
+    out), and the fully resolved candidate must remain under the resolved base
+    directory — which also refuses a symlinked leaf pointing elsewhere.
+    """
+    if "\x00" in filename:
+        raise ValueError("Ledger component filename must not contain NUL bytes.")
+    name = os.path.basename(filename)
+    if name in ("", ".", ".."):
+        raise ValueError(f"Invalid ledger component filename: {filename!r}")
+    base_real = os.path.realpath(base)
+    candidate = os.path.realpath(os.path.join(base_real, name))
+    if os.path.dirname(candidate) != base_real:
+        raise ValueError(f"Refusing ledger write outside destination directory: {filename!r}")
+    return Path(candidate)
+
+
 def _verify_not_symlink(p: Path) -> None:
     """Refuse to write through a symlinked ledger component file."""
     if p.is_symlink():
@@ -3166,8 +3186,8 @@ class BeancountGenerator:
         extra_beans: Optional[List[str]] = None,
     ) -> Path:
         """Write or patch main.bean, ensuring the holdings include and FIFO booking option."""
-        main_path = dest / BEAN_MAIN
-        _verify_not_symlink(main_path)
+        _verify_not_symlink(dest / BEAN_MAIN)
+        main_path = _contained_child_path(dest, BEAN_MAIN)
         if extra_beans is None:
             extra_beans = [p.name for p in dest.glob("*.bean") if p.name not in STANDARD_MODULAR_BEANS and not p.name.startswith(".")]
 
