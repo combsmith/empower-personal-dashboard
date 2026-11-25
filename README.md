@@ -456,7 +456,7 @@ All notable changes across releases are documented in [CHANGELOG.md](https://git
 1. **Zero-PII Commitment**: All test suites, mock fixtures, and sample documentation use 100% synthetic financial records. Real user names, balances, account numbers, and transaction descriptions are never stored or committed.
 2. **Owner-Only Session Storage**: Saved session tokens are written using atomic temporary files with restricted POSIX file permissions (`0600`).
 3. **Secret Redaction**: When running in `--debug` mode or with logging enabled, passwords, pins, and 2FA verification codes are automatically masked (`***REDACTED***`).
-4. **Password Storage Is Opt-In**: The session file holds only session cookies, the CSRF token and the API host, never your password. By default the password is read from `EMPOWER_PASSWORD` or a prompt and kept only in memory. If you run `--set-keyring`, it is stored in your OS keychain (macOS Keychain, Linux SecretService, Windows Credential Manager). A credential helper (`EMPOWER_CREDENTIAL_HELPER`) fetches it from your password manager instead.
+4. **Password Storage Is Opt-In**: The session file holds session metadata (format version and save time), session cookies, the CSRF token, the API host and, when known, your username. It never holds your password. By default the password is read from `EMPOWER_PASSWORD` or a prompt and kept only in memory. If you run `--set-keyring`, it is stored in your OS keychain (macOS Keychain, Linux SecretService, Windows Credential Manager). A credential helper (`EMPOWER_CREDENTIAL_HELPER`) fetches it from your password manager instead.
 
 ---
 

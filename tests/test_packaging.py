@@ -46,6 +46,10 @@ class TestReadmeNotices(unittest.TestCase):
 
     def test_password_storage_claim_matches_keyring_option(self):
         self.assertNotIn("No Password Storage", self.readme)
+        self.assertIn("Password Storage Is Opt-In", self.readme)
+        self.assertIn("session cookies, the CSRF token, the API host and, when known, your username", self.readme)
+        self.assertIn("It never holds your password", self.readme)
+        self.assertIn("--set-keyring", self.readme)
 
 
 class TestPackaging(unittest.TestCase):
