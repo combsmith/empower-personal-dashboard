@@ -1171,7 +1171,7 @@ def _contained_child_path(base: Path, filename: str) -> Path:
         raise ValueError(f"Invalid ledger component filename: {filename!r}")
     base_real = os.path.realpath(base)
     candidate = os.path.realpath(os.path.join(base_real, name))
-    if os.path.dirname(candidate) != base_real or not candidate.startswith(base_real + os.sep):
+    if os.path.dirname(candidate) != base_real:
         raise ValueError(f"Refusing ledger write outside destination directory: {filename!r}")
     return Path(candidate)
 
