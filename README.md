@@ -9,6 +9,13 @@
 
 A standalone, modern Python client and CLI for **Empower Personal Dashboard** (formerly **Personal Capital**).
 
+> [!WARNING]
+> **Unofficial project.** This is an independent, community-maintained tool. It is not affiliated with, endorsed by, or supported by Empower or Personal Capital.
+>
+> Empower's [Terms of Use](https://www.empower.com/hpc/terms-of-use) restrict automated access to the Dashboard Services without Empower's prior written consent. Using this tool may lead Empower to restrict or close your account. You are responsible for how you use it with your own account.
+>
+> It relies on Empower's undocumented web API, which can change or break at any time without notice. Nothing here is legal or financial advice.
+
 Empower Personal Dashboard aggregates linked financial institutions—including banking, checking, high-yield savings, credit cards, mortgages, 401(k) plans, traditional/Roth IRAs, 529 plans, and taxable brokerage accounts.
 
 This library provides full programmatic and CLI access to:
@@ -48,7 +55,6 @@ This library provides full programmatic and CLI access to:
 - [Security & Privacy Model](#security--privacy-model)
 - [Development & Testing](#development--testing)
 - [Contributing & Agent Standards](#contributing--agent-standards)
-- [Commercial Support & Enterprise Services](#-commercial-support--enterprise-services)
 - [License](#license)
 
 ---
@@ -450,7 +456,7 @@ All notable changes across releases are documented in [CHANGELOG.md](https://git
 1. **Zero-PII Commitment**: All test suites, mock fixtures, and sample documentation use 100% synthetic financial records. Real user names, balances, account numbers, and transaction descriptions are never stored or committed.
 2. **Owner-Only Session Storage**: Saved session tokens are written using atomic temporary files with restricted POSIX file permissions (`0600`).
 3. **Secret Redaction**: When running in `--debug` mode or with logging enabled, passwords, pins, and 2FA verification codes are automatically masked (`***REDACTED***`).
-4. **No Password Storage**: The client does not store your account password; it persists only the session cookies and CSRF token generated upon device binding.
+4. **Password Storage Is Opt-In**: The session file holds session metadata (format version and save time), session cookies, the CSRF token, the API host and, when known, your username. It never holds your password. By default the password is read from `EMPOWER_PASSWORD` or a prompt and kept only in memory. If you run `--set-keyring`, it is stored in your OS keychain (macOS Keychain, Linux SecretService, Windows Credential Manager). A credential helper (`EMPOWER_CREDENTIAL_HELPER`) fetches it from your password manager instead.
 
 ---
 
@@ -478,23 +484,6 @@ python3 -m compileall empower_personal_dashboard tests
 - **[CONTRIBUTING.md](https://github.com/combsmith/.github/blob/main/CONTRIBUTING.md)**: Guidelines for opening issues, reporting API changes, coding conventions, pull request workflows, and contributor licensing.
 - **[AGENTS.md](AGENTS.md)**: Canonical development standards, Test-Driven Development (TDD) rules, and security guidelines for AI coding agents (extending [`combsmith/.github/AGENTS.md`](https://github.com/combsmith/.github/blob/main/AGENTS.md)).
 - **[CLAUDE.md](CLAUDE.md)**: Agent instructions for Claude Code.
-
----
-
-## 💼 Commercial Support & Enterprise Services
-
-This project is open source and free for the community. For enterprise deployments, proprietary integration, and priority service, commercial support and custom engineering are provided through [CombSmith LLC](https://combsmith.com):
-
-- **Standard SLA & Priority Support:** $199/month per organization
-  - Guaranteed 24-hour issue triage
-  - Dedicated private communications channel
-  - Upstream bug-fix and security patch prioritization
-- **Custom MCP Development & Architecture Advisory:** $250/hour
-  - Custom tool, prompt, and resource connector implementation
-  - Security audit and containerized deployment assistance
-  - Tailored agentic workflow integration
-
-For commercial invoicing, custom service agreements, or enterprise purchase orders, contact **support@combsmith.com** or visit [combsmith.com](https://combsmith.com).
 
 ---
 

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- README: added an "Unofficial project" notice near the top. It says the project is not affiliated with Empower and that Empower's Terms of Use restrict automated access without written consent.
+- README: replaced the inaccurate "No Password Storage" claim. Password storage is opt-in (OS keyring or a credential helper), and the session file never holds the password.
+
+### Removed
+- The commercial support and enterprise services offer, from the README and the `pyproject.toml` project URLs.
+
 ### Security
 - Session files can no longer select a custom API host; pass `--api-host` explicitly on each run. Only the legacy and migrated Empower hosts are restored from a session file ([#138](https://github.com/combsmith/empower-personal-dashboard/issues/138), [#153](https://github.com/combsmith/empower-personal-dashboard/pull/153)).
 - CI, coverage, SonarCloud, mutation, and Copilot setup workflows now install Python dependencies from hash-locked files in `requirements/` (`pip install --require-hashes`), followed by `pip install --no-deps --no-build-isolation -e .`; the publish workflow installs build tools from `requirements/build.txt` and runs `python -m build --no-isolation`. This fixes the OpenSSF Scorecard Pinned-Dependencies finding. `tests/test_pinned_dependencies.py` fails if a workflow adds an unpinned `pip install` or a lock is missing a dependency declared in `pyproject.toml` ([#58](https://github.com/combsmith/empower-personal-dashboard/issues/58)).
