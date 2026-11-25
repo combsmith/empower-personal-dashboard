@@ -46,6 +46,22 @@ class TestClientSessionPersistence(unittest.TestCase):
             self.assertEqual(new_client.csrf, "test-csrf-token-abc")
             self.assertEqual(new_client.session.cookies.get("JSESSIONID"), "cookie-12345")
 
+    def test_saved_session_contents_match_readme_and_exclude_password(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session_file = Path(tmpdir) / "contents_session.json"
+            client = EmpowerDashboardClient(session_file=session_file, mock_mode=False)
+            client.csrf = "synthetic-csrf"
+            client.username = "synthetic-user@example.invalid"
+            client.session.cookies.set("JSESSIONID", "synthetic-cookie")
+
+            client.save_session(session_file)
+            data = json.loads(session_file.read_text(encoding="utf-8"))
+
+            for key in ("cookies", "csrf", "base_url", "username"):
+                self.assertIn(key, data)
+            self.assertNotIn("password", {k.lower() for k in data})
+            self.assertNotIn("password", json.dumps(data).lower())
+
     def test_save_session_rejects_symlinked_target(self):
         # A user-/LLM-supplied session path that is a symlink could redirect the
         # write outside the intended location (path traversal, SonarCloud S2083).
