@@ -116,7 +116,6 @@ Documentation = "https://github.com/combsmith/empower-personal-dashboard#readme"
 Changelog = "https://github.com/combsmith/empower-personal-dashboard/blob/main/CHANGELOG.md"
 Issues = "https://github.com/combsmith/empower-personal-dashboard/issues"
 Repository = "https://github.com/combsmith/empower-personal-dashboard.git"
-"Commercial Support" = "https://combsmith.com"
 
 [tool.setuptools.packages.find]
 where = ["."]

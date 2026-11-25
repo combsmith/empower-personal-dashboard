@@ -21,6 +21,33 @@ MUTATION_WORKFLOW = ROOT / ".github" / "workflows" / "mutation.yml"
 EXPECTED_VERSION = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))["project"]["version"]
 
 
+README_PATH = ROOT / "README.md"
+
+
+class TestReadmeNotices(unittest.TestCase):
+    """README must disclose its unofficial status and carry no commercial offer."""
+
+    def setUp(self):
+        self.readme = README_PATH.read_text(encoding="utf-8")
+
+    def test_unofficial_notice_near_top(self):
+        head = self.readme[:4000]
+        self.assertIn("unofficial", head.lower())
+        self.assertIn("not affiliated with", head.lower())
+        self.assertIn("https://www.empower.com/hpc/terms-of-use", head)
+
+    def test_no_commercial_support_offer(self):
+        for phrase in ("Commercial Support", "$199", "$250", "support@combsmith.com"):
+            self.assertNotIn(phrase, self.readme)
+
+    def test_no_commercial_support_project_url(self):
+        urls = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))["project"]["urls"]
+        self.assertNotIn("Commercial Support", urls)
+
+    def test_password_storage_claim_matches_keyring_option(self):
+        self.assertNotIn("No Password Storage", self.readme)
+
+
 class TestPackaging(unittest.TestCase):
     def test_pyproject_toml_structure(self):
         self.assertTrue(PYPROJECT_PATH.exists(), "pyproject.toml must exist")
