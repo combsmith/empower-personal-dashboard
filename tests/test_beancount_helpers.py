@@ -9,10 +9,15 @@ pin input normalization: missing fields, case handling, category fallback,
 and custom sweep ticker forwarding. All data is synthetic.
 """
 
+import os
+import tempfile
 import unittest
+from pathlib import Path
 
 from empower_personal_dashboard.beancount import (
+    BeancountGenerator,
     _classify_buy_sell,
+    _contained_child_path,
     _clean_tx_description,
     _has_core_sweep_evidence,
     _has_investment_account_signal,
@@ -307,6 +312,41 @@ class TestCommodityAndInvestmentTx(unittest.TestCase):
             "account_type": "Bank",
         }
         self.assertFalse(_is_investment_tx(tx))
+
+
+class TestContainedChildPath(unittest.TestCase):
+    """Path-containment sanitizer guarding modular ledger writes (SonarCloud S2083, #203)."""
+
+    def test_plain_filename_is_joined_under_base(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            result = _contained_child_path(base, "main.bean")
+            self.assertEqual(result, Path(os.path.realpath(tmp)) / "main.bean")
+
+    def test_traversal_and_absolute_names_are_reduced_to_basename(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            real_base = Path(os.path.realpath(tmp))
+            self.assertEqual(_contained_child_path(Path(tmp), "../escape.bean"), real_base / "escape.bean")
+            self.assertEqual(_contained_child_path(Path(tmp), "/etc/escape.bean"), real_base / "escape.bean")
+
+    def test_rejects_empty_and_dot_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for bad in ("", ".", "..", "sub/..", "name\x00.bean"):
+                with self.assertRaises(ValueError, msg=repr(bad)):
+                    _contained_child_path(Path(tmp), bad)
+
+    def test_rejects_symlinked_leaf_escaping_base(self):
+        with tempfile.TemporaryDirectory() as tmp, tempfile.TemporaryDirectory() as outside:
+            link = Path(tmp) / "main.bean"
+            link.symlink_to(Path(outside) / "target.bean")
+            with self.assertRaises(ValueError):
+                _contained_child_path(Path(tmp), "main.bean")
+
+    def test_write_modular_main_writes_inside_destination(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            main_path = BeancountGenerator()._write_modular_main(Path(tmp), append=False, extra_beans=[])
+            self.assertEqual(main_path, Path(os.path.realpath(tmp)) / "main.bean")
+            self.assertTrue(main_path.is_file())
 
 
 if __name__ == "__main__":
